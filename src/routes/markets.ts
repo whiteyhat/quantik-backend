@@ -58,16 +58,61 @@ function writeCache(key: string, data: unknown[]): void {
 const GAMMA_MARKETS_BASE = "https://gamma-api.polymarket.com/markets";
 const GAMMA_EVENTS_BASE  = "https://gamma-api.polymarket.com/events";
 
-// Valid category → Polymarket tag mapping
-const CATEGORY_TAG_MAP: Record<string, string> = {
-  crypto:       "crypto",
-  politics:     "politics",
-  sports:       "sports",
-  "pop-culture": "pop-culture",
-  science:      "science",
-  world:        "world",
-  business:     "business",
+// Maps our category keys → tag slugs used in the Gamma events API.
+// A single category can match multiple slugs (OR logic).
+// NOTE: The Gamma events `tag=` query param is broken and always ignored —
+//       we fetch all events and filter client-side by event.tags[].slug.
+const CATEGORY_TAG_SLUGS: Record<string, string[]> = {
+  crypto:        ["crypto", "crypto-prices"],
+  politics:      ["politics", "geopolitics", "elections", "world-elections", "global-elections"],
+  sports:        ["sports", "soccer", "nba", "nfl", "mma", "tennis", "golf", "baseball"],
+  "pop-culture": ["pop-culture", "awards", "movies", "music", "tv", "celebrity"],
+  science:       ["science", "space", "technology", "ai", "biotech"],
+  world:         ["world", "geopolitics", "foreign-policy", "middle-east", "ukraine"],
+  business:      ["business", "finance", "economy", "stocks", "earnings"],
 };
+
+interface GammaTag {
+  id: string;
+  label: string;
+  slug: string;
+}
+
+interface GammaEvent {
+  tags?: GammaTag[];
+  markets?: unknown[];
+  [key: string]: unknown;
+}
+
+/**
+ * Returns true if an event's tags array includes at least one of the
+ * target slugs. Comparison is case-insensitive.
+ */
+function eventMatchesCategory(event: GammaEvent, targetSlugs: string[]): boolean {
+  const tags = event.tags ?? [];
+  return tags.some((t) => targetSlugs.includes(t.slug?.toLowerCase?.() ?? ""));
+}
+
+/**
+ * Enrich each market object with parent event metadata so the frontend
+ * has context (event title, image, tags) even for nested markets.
+ */
+function enrichMarketsFromEvent(event: GammaEvent): unknown[] {
+  const markets = event.markets ?? [];
+  const eventMeta = {
+    eventId:    event["id"],
+    eventTitle: event["title"],
+    eventImage: event["image"],
+    eventSlug:  event["slug"],
+    eventTags:  event["tags"],
+  };
+
+  return markets.map((m) =>
+    typeof m === "object" && m !== null
+      ? { ...eventMeta, ...(m as Record<string, unknown>) }
+      : m
+  );
+}
 
 async function fetchGammaMarkets(
   limit: number,
@@ -75,21 +120,26 @@ async function fetchGammaMarkets(
   category?: string
 ): Promise<unknown[]> {
   if (category) {
-    // Polymarket Gamma does NOT filter /markets by tag.
-    // Use the /events endpoint with tag= then flatten each event's markets array.
-    const tag = CATEGORY_TAG_MAP[category] ?? category;
+    // The Gamma events `tag=` query param is completely ignored by the API
+    // (verified: tag=Politics and tag=Crypto return identical results).
+    // Instead: fetch a large batch of events, then filter client-side by
+    // checking whether any of the event's tags[].slug matches our category.
+    const targetSlugs = CATEGORY_TAG_SLUGS[category] ?? [category];
+
+    // Fetch enough events to have a deep pool after filtering.
+    // 300 is generous; Gamma seems to cap at ~200 per page.
     const params = new URLSearchParams({
-      active: "true",
-      closed: "false",
-      tag,
-      limit: String(limit),
-      offset: String(offset),
+      active:     "true",
+      closed:     "false",
+      order:      "volume",
+      ascending:  "false",
+      limit:      "300",
     });
 
     const url = `${GAMMA_EVENTS_BASE}?${params.toString()}`;
     const res = await fetch(url, {
       headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!res.ok) {
@@ -99,15 +149,13 @@ async function fetchGammaMarkets(
     const events: unknown = await res.json();
     if (!Array.isArray(events)) return [];
 
-    // Flatten all markets from every event
+    // Filter events by tag slug, then flatten their markets
     const markets: unknown[] = [];
     for (const event of events) {
-      if (
-        event !== null &&
-        typeof event === "object" &&
-        Array.isArray((event as Record<string, unknown>)["markets"])
-      ) {
-        markets.push(...((event as Record<string, unknown>)["markets"] as unknown[]));
+      if (event === null || typeof event !== "object") continue;
+      const ev = event as GammaEvent;
+      if (eventMatchesCategory(ev, targetSlugs)) {
+        markets.push(...enrichMarketsFromEvent(ev));
       }
     }
     return markets;
@@ -115,12 +163,12 @@ async function fetchGammaMarkets(
 
   // No category — use /markets sorted by volume (default behaviour)
   const params = new URLSearchParams({
-    active: "true",
-    closed: "false",
-    order: "volume",
+    active:    "true",
+    closed:    "false",
+    order:     "volume",
     ascending: "false",
-    limit: String(limit),
-    offset: String(offset),
+    limit:     String(limit),
+    offset:    String(offset),
   });
 
   const url = `${GAMMA_MARKETS_BASE}?${params.toString()}`;
@@ -146,22 +194,33 @@ router.get("/", async (req: Request, res: Response) => {
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
   const category =
     typeof req.query.category === "string" && req.query.category
-      ? req.query.category
+      ? req.query.category.toLowerCase()
       : undefined;
 
   const key = cacheKey(category);
 
   try {
-    // Fetch one extra to determine hasMore
-    const rawMarkets = await fetchGammaMarkets(limit + 1, offset, category);
+    let markets: unknown[];
+    let hasMore: boolean;
+    let total: number;
 
-    // Determine pagination
-    const hasMore = rawMarkets.length > limit;
-    const markets = rawMarkets.slice(0, limit);
-    const total = offset + markets.length + (hasMore ? 1 : 0);
-
-    // Cache successful result
-    writeCache(key, rawMarkets);
+    if (category) {
+      // Client-side filtering: fetchGammaMarkets returns the full filtered pool.
+      // We paginate here after receiving all matching markets.
+      const allMatching = await fetchGammaMarkets(limit, offset, category);
+      hasMore = allMatching.length > offset + limit;
+      markets = allMatching.slice(offset, offset + limit);
+      total = allMatching.length;
+      // Cache the full pool so stale fallback has complete data
+      writeCache(key, allMatching);
+    } else {
+      // API-side pagination: fetch limit+1 to detect hasMore
+      const probe = await fetchGammaMarkets(limit + 1, offset, undefined);
+      hasMore = probe.length > limit;
+      markets = probe.slice(0, limit);
+      total = offset + markets.length + (hasMore ? 1 : 0);
+      writeCache(key, probe);
+    }
 
     const response: MarketsListResponse = { markets, total, hasMore };
     res.json(response);
