@@ -1,3 +1,14 @@
+import * as Sentry from "@sentry/node";
+Sentry.init({
+  dsn: "https://3452bb639c2bd626cc575d5936d234b3@o4506259886833664.ingest.us.sentry.io/4510949180047360",
+  environment: process.env.NODE_ENV ?? "production",
+  tracesSampleRate: 0.1,
+  integrations: [
+    Sentry.httpIntegration(),
+    Sentry.expressIntegration(),
+  ],
+});
+
 import express from "express";
 import cors from "cors";
 import { getDb } from "./db/schema";
@@ -55,6 +66,9 @@ app.use("/api/v1", settingsRouter);
 app.use("/api/v1", chatRouter);
 app.use("/api/v1", agentStatusRouter);
 app.use("/api/webhooks/sentry", sentryWebhookRouter);
+
+// Sentry error handler (must be before generic error handler)
+app.use(Sentry.expressErrorHandler());
 
 // Global error handler
 app.use(
