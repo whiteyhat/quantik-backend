@@ -11,6 +11,7 @@ import riskRouter from "./routes/risk";
 import settingsRouter from "./routes/settings";
 import chatRouter from "./routes/chat";
 import agentStatusRouter from "./routes/agentStatus";
+import { sentryWebhookRouter } from "./routes/sentryWebhook";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -53,6 +54,7 @@ app.use("/api/v1", riskRouter);
 app.use("/api/v1", settingsRouter);
 app.use("/api/v1", chatRouter);
 app.use("/api/v1", agentStatusRouter);
+app.use("/api/webhooks/sentry", sentryWebhookRouter);
 
 // Global error handler
 app.use(
