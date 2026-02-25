@@ -1,11 +1,11 @@
 import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
-import { insertPipelineRun, updatePipelineRun, getPipelineHistory } from "../db/queries";
+import { insertPipelineRun, updatePipelineRun, getPipelineHistory, PipelineRun } from "../db/queries";
 import { v4 as uuid } from "uuid";
 
 const router = Router();
 
-// ── Agent definitions ──────────────────────────────────────────
+// ── Agent data interfaces (for strict typing) ──────────────────
 
 interface AgentResult {
   agent: string;
@@ -13,8 +13,48 @@ interface AgentResult {
   data: unknown;
 }
 
-async function runAura(slug: string): Promise<AgentResult> {
-  // Aura: Sentiment & narrative scanner (mock for now)
+interface EdgeAgentData {
+  estimated_true_prob?: number;
+  market_price?: number;
+  edge?: number;
+  kelly_fraction?: number;
+  ev_grade?: string;
+  net_ev?: number;
+}
+
+interface LuciferAgentData {
+  adjusted_confidence?: number;
+  contrarian_take?: string;
+  risk_flags?: string[];
+}
+
+interface AuraAgentData {
+  sentiment_score?: number;
+  narrative?: string;
+}
+
+type AgentOutputKey =
+  | "aura_output"
+  | "flux_output"
+  | "oracle_output"
+  | "edge_output"
+  | "clause_output"
+  | "lucifer_output"
+  | "sigma_output";
+
+const OUTPUT_KEY_MAP: Record<string, AgentOutputKey> = {
+  aura: "aura_output",
+  flux: "flux_output",
+  oracle: "oracle_output",
+  edge: "edge_output",
+  clause: "clause_output",
+  lucifer: "lucifer_output",
+  sigma: "sigma_output",
+};
+
+// ── Agent definitions ──────────────────────────────────────────
+
+async function runAura(_slug: string): Promise<AgentResult> {
   return {
     agent: "aura",
     status: "complete",
@@ -28,7 +68,6 @@ async function runAura(slug: string): Promise<AgentResult> {
 }
 
 async function runFlux(slug: string): Promise<AgentResult> {
-  // Flux: Market data fetcher (real CLI call)
   try {
     const market = await runCli(["markets", "get", slug]);
     return { agent: "flux", status: "complete", data: market };
@@ -42,7 +81,6 @@ async function runFlux(slug: string): Promise<AgentResult> {
 }
 
 async function runOracle(slug: string): Promise<AgentResult> {
-  // Oracle: On-chain / price data (real CLI when possible)
   try {
     const market = await runCli(["markets", "get", slug]);
     const marketObj =
@@ -77,7 +115,6 @@ async function runOracle(slug: string): Promise<AgentResult> {
 }
 
 async function runEdge(_slug: string): Promise<AgentResult> {
-  // Edge: EV calculator (mock)
   return {
     agent: "edge",
     status: "complete",
@@ -93,7 +130,6 @@ async function runEdge(_slug: string): Promise<AgentResult> {
 }
 
 async function runClause(_slug: string): Promise<AgentResult> {
-  // Clause: Resolution rules auditor (mock)
   return {
     agent: "clause",
     status: "complete",
@@ -107,30 +143,38 @@ async function runClause(_slug: string): Promise<AgentResult> {
 }
 
 async function runLucifer(_slug: string): Promise<AgentResult> {
-  // Lucifer: Devil's advocate (mock)
   return {
     agent: "lucifer",
     status: "complete",
     data: {
-      contrarian_take: "Market may be underpricing tail risk of regulatory intervention.",
-      risk_flags: ["Liquidity thin below 0.55", "Similar market resolved ambiguously in Q3"],
+      contrarian_take:
+        "Market may be underpricing tail risk of regulatory intervention.",
+      risk_flags: [
+        "Liquidity thin below 0.55",
+        "Similar market resolved ambiguously in Q3",
+      ],
       worst_case: "Full loss if resolution disputed",
       adjusted_confidence: -0.05,
     },
   };
 }
 
+function toAgentData<T>(raw: unknown): T | undefined {
+  if (raw !== null && typeof raw === "object") return raw as T;
+  return undefined;
+}
+
 function runSigma(results: Record<string, unknown>): AgentResult {
-  // Sigma: Final decision aggregator (mock logic)
-  const edge = results.edge as any;
-  const lucifer = results.lucifer as any;
-  const aura = results.aura as any;
+  const edge = toAgentData<EdgeAgentData>(results["edge"]);
+  const lucifer = toAgentData<LuciferAgentData>(results["lucifer"]);
+  const aura = toAgentData<AuraAgentData>(results["aura"]);
 
   const baseConf = edge?.estimated_true_prob ?? 0.65;
   const adjustment = lucifer?.adjusted_confidence ?? 0;
   const finalConf = Math.max(0, Math.min(1, baseConf + adjustment));
 
-  const decision = finalConf > 0.6 ? "BUY_YES" : finalConf < 0.4 ? "BUY_NO" : "HOLD";
+  const decision =
+    finalConf > 0.6 ? "BUY_YES" : finalConf < 0.4 ? "BUY_NO" : "HOLD";
 
   return {
     agent: "sigma",
@@ -139,18 +183,64 @@ function runSigma(results: Record<string, unknown>): AgentResult {
       decision,
       confidence: parseFloat(finalConf.toFixed(3)),
       reasoning: `Edge=${edge?.edge ?? "?"}, Sentiment=${aura?.sentiment_score ?? "?"}, Adjusted by Lucifer. Final: ${decision} @ ${(finalConf * 100).toFixed(1)}%`,
-      recommended_size: edge?.kelly_fraction ? `${(edge.kelly_fraction * 100).toFixed(0)}% of bankroll` : "2%",
+      recommended_size: edge?.kelly_fraction
+        ? `${(edge.kelly_fraction * 100).toFixed(0)}% of bankroll`
+        : "2%",
     },
   };
+}
+
+// ── Input resolution ───────────────────────────────────────────
+
+function resolveSlug(body: Record<string, unknown>): string | null {
+  // Prefer slug > marketSlug (compat) > marketId
+  if (typeof body["slug"] === "string" && body["slug"]) return body["slug"];
+  if (typeof body["marketSlug"] === "string" && body["marketSlug"])
+    return body["marketSlug"];
+  if (typeof body["marketId"] === "string" && body["marketId"])
+    return body["marketId"];
+  return null;
 }
 
 // ── POST /api/pipeline/run — SSE stream ────────────────────────
 
 router.post("/run", async (req: Request, res: Response) => {
-  const { marketSlug } = req.body;
-  if (!marketSlug) {
-    res.status(400).json({ error: "Missing required field: marketSlug" });
+  const body = req.body as Record<string, unknown>;
+
+  const slug = resolveSlug(body);
+  const tokenId =
+    typeof body["tokenId"] === "string" && body["tokenId"]
+      ? body["tokenId"]
+      : null;
+
+  if (!slug && !tokenId) {
+    res.status(400).json({
+      error:
+        "Missing required field. Provide one of: slug, marketId, or tokenId.",
+      required: ["slug", "marketId", "tokenId"],
+      provided: Object.keys(body),
+    });
     return;
+  }
+
+  // Resolve the identifier to use for pipeline (prefer slug over tokenId)
+  const resolvedSlug = slug ?? tokenId ?? "";
+
+  // If only tokenId was given, try to fetch market slug from CLOB
+  let effectiveSlug = resolvedSlug;
+  if (!slug && tokenId) {
+    try {
+      const clobMarket = await runCli(["clob", "market", tokenId]);
+      if (clobMarket !== null && typeof clobMarket === "object") {
+        const m = clobMarket as Record<string, unknown>;
+        const marketSlug = m["market_slug"] ?? m["slug"];
+        if (typeof marketSlug === "string" && marketSlug) {
+          effectiveSlug = marketSlug;
+        }
+      }
+    } catch {
+      // Can't resolve slug from tokenId — use tokenId directly as identifier
+    }
   }
 
   // SSE headers
@@ -163,9 +253,9 @@ router.post("/run", async (req: Request, res: Response) => {
   const runId = uuid();
   const now = Date.now();
 
-  insertPipelineRun({
+  const newRun: PipelineRun = {
     id: runId,
-    market_slug: marketSlug,
+    market_slug: effectiveSlug,
     market_question: "",
     created_at: now,
     completed_at: null,
@@ -178,15 +268,19 @@ router.post("/run", async (req: Request, res: Response) => {
     sigma_output: null,
     clause_output: null,
     lucifer_output: null,
-  });
+  };
+  insertPipelineRun(newRun);
 
-  const sendEvent = (event: string, data: unknown) => {
+  const sendEvent = (event: string, data: unknown): void => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  sendEvent("pipeline:start", { runId, marketSlug, timestamp: now });
+  sendEvent("pipeline:start", { runId, slug: effectiveSlug, timestamp: now });
 
-  const agents: Array<{ name: string; fn: (slug: string) => Promise<AgentResult> }> = [
+  const agents: Array<{
+    name: string;
+    fn: (s: string) => Promise<AgentResult>;
+  }> = [
     { name: "aura", fn: runAura },
     { name: "flux", fn: runFlux },
     { name: "oracle", fn: runOracle },
@@ -200,16 +294,23 @@ router.post("/run", async (req: Request, res: Response) => {
   for (const agent of agents) {
     try {
       sendEvent("agent:start", { agent: agent.name });
-      const result = await agent.fn(marketSlug);
+      const result = await agent.fn(effectiveSlug);
       results[agent.name] = result.data;
       sendEvent("agent:complete", result);
 
-      // Persist to DB
-      updatePipelineRun(runId, {
-        [`${agent.name}_output` as keyof typeof results]: JSON.stringify(result.data),
-      } as any);
+      const outputKey = OUTPUT_KEY_MAP[agent.name];
+      if (outputKey) {
+        const partial: Partial<PipelineRun> = {
+          [outputKey]: JSON.stringify(result.data),
+        };
+        updatePipelineRun(runId, partial);
+      }
     } catch (err) {
-      const errorResult = { agent: agent.name, status: "error", data: String(err) };
+      const errorResult = {
+        agent: agent.name,
+        status: "error",
+        data: err instanceof Error ? err.message : String(err),
+      };
       results[agent.name] = errorResult;
       sendEvent("agent:error", errorResult);
     }
@@ -218,45 +319,61 @@ router.post("/run", async (req: Request, res: Response) => {
   // Sigma aggregation
   sendEvent("agent:start", { agent: "sigma" });
   const sigma = runSigma(results);
-  results.sigma = sigma.data;
+  results["sigma"] = sigma.data;
   sendEvent("agent:complete", sigma);
 
-  const sigmaData = sigma.data as any;
+  const sigmaData = sigma.data as Record<string, unknown>;
+
+  const fluxData = toAgentData<Record<string, unknown>>(results["flux"]);
+  const marketQuestion =
+    typeof fluxData?.["question"] === "string"
+      ? fluxData["question"]
+      : effectiveSlug;
+
   updatePipelineRun(runId, {
     sigma_output: JSON.stringify(sigma.data),
     completed_at: Date.now(),
-    decision: sigmaData.decision,
-    confidence: sigmaData.confidence,
-    market_question: (results.flux as any)?.question || marketSlug,
+    decision: typeof sigmaData["decision"] === "string" ? sigmaData["decision"] : null,
+    confidence:
+      typeof sigmaData["confidence"] === "number" ? sigmaData["confidence"] : null,
+    market_question: marketQuestion,
   });
 
   sendEvent("pipeline:complete", {
     runId,
-    decision: sigmaData.decision,
-    confidence: sigmaData.confidence,
+    decision: sigmaData["decision"],
+    confidence: sigmaData["confidence"],
   });
 
   res.end();
 });
 
-// GET /api/pipeline/history
+// ── GET /api/pipeline/history ──────────────────────────────────
 router.get("/history", (_req: Request, res: Response) => {
   try {
     const runs = getPipelineHistory(20);
-    // Parse JSON fields back to objects
     const parsed = runs.map((r) => ({
       ...r,
-      aura_output: r.aura_output ? JSON.parse(r.aura_output) : null,
-      flux_output: r.flux_output ? JSON.parse(r.flux_output) : null,
-      oracle_output: r.oracle_output ? JSON.parse(r.oracle_output) : null,
-      edge_output: r.edge_output ? JSON.parse(r.edge_output) : null,
-      sigma_output: r.sigma_output ? JSON.parse(r.sigma_output) : null,
-      clause_output: r.clause_output ? JSON.parse(r.clause_output) : null,
-      lucifer_output: r.lucifer_output ? JSON.parse(r.lucifer_output) : null,
+      aura_output: r.aura_output ? (JSON.parse(r.aura_output) as unknown) : null,
+      flux_output: r.flux_output ? (JSON.parse(r.flux_output) as unknown) : null,
+      oracle_output: r.oracle_output
+        ? (JSON.parse(r.oracle_output) as unknown)
+        : null,
+      edge_output: r.edge_output ? (JSON.parse(r.edge_output) as unknown) : null,
+      sigma_output: r.sigma_output
+        ? (JSON.parse(r.sigma_output) as unknown)
+        : null,
+      clause_output: r.clause_output
+        ? (JSON.parse(r.clause_output) as unknown)
+        : null,
+      lucifer_output: r.lucifer_output
+        ? (JSON.parse(r.lucifer_output) as unknown)
+        : null,
     }));
     res.json(parsed);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    const msg = err instanceof CliError ? err.message : String(err);
+    res.status(500).json({ error: msg });
   }
 });
 

@@ -47,10 +47,16 @@ interface PipelineRunRow {
 
 // ── Response interfaces ────────────────────────────────────────
 interface PortfolioSummary {
+  // On-chain EOA balances (primary)
+  onChainUsdc: number;
+  onChainUsdcFormatted: string;
+  clobUsdc: number;
+  pol: number;
+  polFormatted: string;
+  // Legacy / derived fields (keep for frontend compat)
   totalValue: number;
   usdc: number;
   usdcFormatted: string;
-  pol: number;
   pnl: number;
   pnlPct: number;
   pnlToday: number;
@@ -138,12 +144,86 @@ function isoDate(ts: number): string {
   return new Date(ts).toISOString().split("T")[0] ?? "";
 }
 
+// ── Polygon RPC balance helpers ────────────────────────────────
+
+const WALLET_ADDRESS = "0x7EE996AbE9355a126F010EfF93487e84b2cE4b53";
+const USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const POLYGON_RPC_URLS = [
+  "https://polygon-rpc.com",
+  "https://rpc.ankr.com/polygon",
+];
+
+interface RpcResponse {
+  result?: string;
+  error?: { message: string };
+}
+
+async function polygonRpcCall(
+  rpcUrl: string,
+  method: string,
+  params: unknown[]
+): Promise<string> {
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(5000),
+  });
+  const json = (await res.json()) as RpcResponse;
+  if (!json.result) throw new Error(json.error?.message ?? "No result");
+  return json.result;
+}
+
+async function getPolygonBalances(
+  address: string
+): Promise<{ usdc: number; pol: number }> {
+  // balanceOf(address) selector = keccak256("balanceOf(address)")[0:4] = 0x70a08231
+  const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
+  const callData = `0x70a08231${paddedAddr}`;
+
+  for (const rpcUrl of POLYGON_RPC_URLS) {
+    try {
+      const [usdcHex, polHex] = await Promise.all([
+        polygonRpcCall(rpcUrl, "eth_call", [
+          { to: USDC_CONTRACT, data: callData },
+          "latest",
+        ]),
+        polygonRpcCall(rpcUrl, "eth_getBalance", [address, "latest"]),
+      ]);
+
+      // USDC: 6 decimals; POL (MATIC): 18 decimals
+      const usdc = Number(BigInt(usdcHex)) / 1e6;
+      const pol = Number(BigInt(polHex)) / 1e18;
+      return { usdc, pol };
+    } catch {
+      // Try next RPC endpoint
+    }
+  }
+
+  return { usdc: 0, pol: 0 };
+}
+
+function formatUsd(amount: number): string {
+  return `$${amount.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatPol(amount: number): string {
+  return `${amount.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} POL`;
+}
+
 // ── GET /api/portfolio/summary ────────────────────────────────
 router.get("/summary", async (_req: Request, res: Response) => {
-  // Fetch real USDC balance from Polymarket CLI — hard-fail if unavailable
-  let usdc: number;
-  let pol = 0;
+  // 1. On-chain EOA balance via Polygon RPC (primary)
+  const { usdc: onChainUsdc, pol } = await getPolygonBalances(WALLET_ADDRESS);
 
+  // 2. CLOB deposit balance via polymarket CLI (may be 0 if nothing deposited)
+  let clobUsdc = 0;
   try {
     const raw: unknown = await runCli([
       "clob",
@@ -151,36 +231,12 @@ router.get("/summary", async (_req: Request, res: Response) => {
       "--asset-type",
       "collateral",
     ]);
-
-    if (raw === null || typeof raw !== "object") {
-      res
-        .status(502)
-        .json({ error: "Polymarket CLI returned unexpected response format" });
-      return;
+    if (raw !== null && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      clobUsdc = safeNum(obj["balance"] ?? obj["usdc"] ?? obj["USDC"], 0);
     }
-
-    const obj = raw as Record<string, unknown>;
-    const parsed = safeNum(
-      obj["balance"] ?? obj["usdc"] ?? obj["USDC"],
-      NaN
-    );
-
-    if (!isFinite(parsed)) {
-      res.status(502).json({
-        error: "Polymarket CLI response did not contain a valid balance field",
-        raw: obj,
-      });
-      return;
-    }
-
-    usdc = parsed;
-    pol = safeNum(obj["pol"] ?? obj["POL"] ?? obj["matic"], 0);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    res
-      .status(502)
-      .json({ error: `Failed to fetch portfolio balance: ${message}` });
-    return;
+  } catch {
+    // CLOB balance unavailable — report 0
   }
 
   const db = getDb();
@@ -204,8 +260,8 @@ router.get("/summary", async (_req: Request, res: Response) => {
 
   const openPnl = positions.reduce((acc, p) => acc + p.openPnl, 0);
 
-  // Rough portfolio value: USDC + POL * ~$0.40 spot
-  const totalValue = usdc + pol * 0.4;
+  // Total portfolio value: on-chain USDC + CLOB USDC + POL * ~$0.40 spot
+  const totalValue = onChainUsdc + clobUsdc + pol * 0.4;
 
   // Realised P&L: sum net_ev from all settled trades
   const pnl = trades.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
@@ -229,9 +285,10 @@ router.get("/summary", async (_req: Request, res: Response) => {
         )
       : 0;
 
-  // Drawdown: no PnL curve in DB yet — derive from current pnl vs totalValue
   const drawdown =
-    totalValue > 0 && pnl < 0 ? Math.abs(pnl) / (totalValue + Math.abs(pnl)) : 0;
+    totalValue > 0 && pnl < 0
+      ? Math.abs(pnl) / (totalValue + Math.abs(pnl))
+      : 0;
 
   const circuitBreakerStatus: "ARMED" | "WARNING" | "TRIGGERED" =
     drawdown >= DEFAULTS.drawdownLimit
@@ -240,14 +297,20 @@ router.get("/summary", async (_req: Request, res: Response) => {
       ? "WARNING"
       : "ARMED";
 
+  // Primary USDC for legacy fields = on-chain + CLOB
+  const usdc = onChainUsdc + clobUsdc;
+
   const summary: PortfolioSummary = {
+    // New on-chain fields
+    onChainUsdc,
+    onChainUsdcFormatted: formatUsd(onChainUsdc),
+    clobUsdc,
+    pol,
+    polFormatted: formatPol(pol),
+    // Legacy fields
     totalValue,
     usdc,
-    usdcFormatted: `$${usdc.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`,
-    pol,
+    usdcFormatted: formatUsd(usdc),
     pnl,
     pnlPct,
     pnlToday,

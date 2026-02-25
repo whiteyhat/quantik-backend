@@ -142,6 +142,14 @@ function migrate(db: Database.Database): void {
       settled_at INTEGER,
       pnl REAL
     );
+
+    -- ── Markets Cache (stale fallback) ────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS markets_cache (
+      key TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      cached_at INTEGER NOT NULL
+    );
   `);
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
