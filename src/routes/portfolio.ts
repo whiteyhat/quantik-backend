@@ -49,6 +49,7 @@ interface PipelineRunRow {
 interface PortfolioSummary {
   totalValue: number;
   usdc: number;
+  usdcFormatted: string;
   pol: number;
   pnl: number;
   pnlPct: number;
@@ -59,9 +60,18 @@ interface PortfolioSummary {
   circuitBreakerStatus: "ARMED" | "WARNING" | "TRIGGERED";
   drawdown: number;
   drawdownLimit: number;
-  positions: number;
+  positions: PositionEntry[];
+  openPnl: number;
   winRate: number;
   totalTrades: number;
+}
+
+interface PositionEntry {
+  marketSlug: string;
+  direction: string;
+  size: number;
+  price: number;
+  openPnl: number;
 }
 
 interface CorrelationEntry {
@@ -130,57 +140,98 @@ function isoDate(ts: number): string {
 
 // ── GET /api/portfolio/summary ────────────────────────────────
 router.get("/summary", async (_req: Request, res: Response) => {
-  // Try polymarket CLI for live USDC balance — fall back to mock if unavailable
-  let usdc = 1_250.0;
-  let pol = 45.0;
+  // Fetch real USDC balance from Polymarket CLI — hard-fail if unavailable
+  let usdc: number;
+  let pol = 0;
 
   try {
-    const raw: unknown = await runCli(["clob", "balance", "--asset-type", "collateral"]);
-    if (raw !== null && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      usdc = safeNum(obj["balance"] ?? obj["usdc"] ?? obj["USDC"], usdc);
-      pol = safeNum(obj["pol"] ?? obj["POL"] ?? obj["matic"], pol);
+    const raw: unknown = await runCli([
+      "clob",
+      "balance",
+      "--asset-type",
+      "collateral",
+    ]);
+
+    if (raw === null || typeof raw !== "object") {
+      res
+        .status(502)
+        .json({ error: "Polymarket CLI returned unexpected response format" });
+      return;
     }
-  } catch {
-    // CLI unavailable — use mock
+
+    const obj = raw as Record<string, unknown>;
+    const parsed = safeNum(
+      obj["balance"] ?? obj["usdc"] ?? obj["USDC"],
+      NaN
+    );
+
+    if (!isFinite(parsed)) {
+      res.status(502).json({
+        error: "Polymarket CLI response did not contain a valid balance field",
+        raw: obj,
+      });
+      return;
+    }
+
+    usdc = parsed;
+    pol = safeNum(obj["pol"] ?? obj["POL"] ?? obj["matic"], 0);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res
+      .status(502)
+      .json({ error: `Failed to fetch portfolio balance: ${message}` });
+    return;
   }
 
   const db = getDb();
-  const trades = db
-    .prepare<[], TradeRow>("SELECT * FROM trades")
-    .all();
+  const trades = db.prepare<[], TradeRow>("SELECT * FROM trades").all();
 
   const totalTrades = trades.length;
   const wins = trades.filter((t) => safeNum(t.net_ev, 0) > 0).length;
-  const winRate = totalTrades > 0 ? wins / totalTrades : 0.62;
+  const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
-  const openPositions = trades.filter(
+  const openTradeRows = trades.filter(
     (t) => t.status === "submitted" || t.status === "open"
-  ).length;
+  );
+
+  const positions: PositionEntry[] = openTradeRows.map((t) => ({
+    marketSlug: t.market_slug,
+    direction: t.direction,
+    size: safeNum(t.size, 0),
+    price: safeNum(t.price, 0),
+    openPnl: safeNum(t.net_ev, 0),
+  }));
+
+  const openPnl = positions.reduce((acc, p) => acc + p.openPnl, 0);
 
   // Rough portfolio value: USDC + POL * ~$0.40 spot
   const totalValue = usdc + pol * 0.4;
 
-  // P&L: sum net_ev from all trades; fall back to realistic mock
-  const realPnl = trades.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
-  const pnl = totalTrades > 0 ? realPnl : 187.5;
-  const pnlPct = totalValue > 0 ? pnl / (totalValue - pnl) : 0.154;
+  // Realised P&L: sum net_ev from all settled trades
+  const pnl = trades.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
+  const pnlPct = totalValue > 0 ? pnl / Math.max(totalValue - pnl, 1) : 0;
 
   // "Today" trades — last 24 h
   const dayAgo = Date.now() - 86_400_000;
   const todayTrades = trades.filter((t) => t.created_at > dayAgo);
-  const pnlToday = todayTrades.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
-  const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0.019;
+  const pnlToday = todayTrades.reduce(
+    (acc, t) => acc + safeNum(t.net_ev, 0),
+    0
+  );
+  const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0;
 
-  // Kelly utilisation is a function of open positions relative to max size
   const kellyMax = 1.0;
   const kellyUtilization =
-    openPositions > 0
-      ? Math.min((openPositions * DEFAULTS.maxPositionSizePct) / 100, 1)
-      : 0.38;
+    openTradeRows.length > 0
+      ? Math.min(
+          (openTradeRows.length * DEFAULTS.maxPositionSizePct) / 100,
+          1
+        )
+      : 0;
 
-  // Drawdown: mock (no PnL curve in DB yet)
-  const drawdown = 0.04;
+  // Drawdown: no PnL curve in DB yet — derive from current pnl vs totalValue
+  const drawdown =
+    totalValue > 0 && pnl < 0 ? Math.abs(pnl) / (totalValue + Math.abs(pnl)) : 0;
 
   const circuitBreakerStatus: "ARMED" | "WARNING" | "TRIGGERED" =
     drawdown >= DEFAULTS.drawdownLimit
@@ -192,19 +243,24 @@ router.get("/summary", async (_req: Request, res: Response) => {
   const summary: PortfolioSummary = {
     totalValue,
     usdc,
+    usdcFormatted: `$${usdc.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`,
     pol,
     pnl,
     pnlPct,
-    pnlToday: totalTrades > 0 ? pnlToday : 23.4,
-    pnlTodayPct: totalTrades > 0 ? pnlTodayPct : 0.019,
+    pnlToday,
+    pnlTodayPct,
     kellyUtilization,
     kellyMax,
     circuitBreakerStatus,
     drawdown,
     drawdownLimit: DEFAULTS.drawdownLimit,
-    positions: openPositions > 0 ? openPositions : 4,
+    positions,
+    openPnl,
     winRate,
-    totalTrades: totalTrades > 0 ? totalTrades : 47,
+    totalTrades,
   };
 
   res.json(summary);

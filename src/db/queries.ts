@@ -78,3 +78,58 @@ export function insertTrade(trade: Trade): void {
       (@id, @order_id, @market_slug, @direction, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id)
   `).run(trade);
 }
+
+// ── Settings ───────────────────────────────────────────────────
+
+export interface Settings {
+  id: number;
+  paper_mode: boolean;
+}
+
+interface SettingsRow {
+  id: number;
+  paper_mode: number;
+}
+
+export function getSettings(): Settings {
+  const db = getDb();
+  const row = db
+    .prepare<[], SettingsRow>("SELECT * FROM settings WHERE id = 1")
+    .get();
+  if (!row) {
+    return { id: 1, paper_mode: false };
+  }
+  return { id: row.id, paper_mode: row.paper_mode === 1 };
+}
+
+export function setPaperMode(enabled: boolean): Settings {
+  const db = getDb();
+  db.prepare("UPDATE settings SET paper_mode = ? WHERE id = 1").run(
+    enabled ? 1 : 0
+  );
+  return getSettings();
+}
+
+// ── Paper Trades ───────────────────────────────────────────────
+
+export interface PaperTrade {
+  id: string;
+  market_id: string;
+  side: string;
+  size: number;
+  price: number;
+  status: string;
+  created_at: number;
+  settled_at: number | null;
+  pnl: number | null;
+}
+
+export function insertPaperTrade(trade: PaperTrade): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO paper_trades
+      (id, market_id, side, size, price, status, created_at, settled_at, pnl)
+    VALUES
+      (@id, @market_id, @side, @size, @price, @status, @created_at, @settled_at, @pnl)
+  `).run(trade);
+}

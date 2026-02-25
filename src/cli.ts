@@ -13,7 +13,7 @@ export class CliError extends Error {
   }
 }
 
-export async function runCli(args: string[]): Promise<any> {
+export async function runCli(args: string[]): Promise<unknown> {
   const fullArgs = ["-o", "json", ...args];
 
   return new Promise((resolve, reject) => {
@@ -23,10 +23,14 @@ export async function runCli(args: string[]): Promise<any> {
       { maxBuffer: 10 * 1024 * 1024, timeout: 60_000 },
       (error, stdout, stderr) => {
         if (error) {
+          const code =
+            typeof (error as NodeJS.ErrnoException).code === "number"
+              ? (error as { code: number }).code
+              : 1;
           reject(
             new CliError(
               `polymarket ${args.join(" ")} failed: ${stderr || error.message}`,
-              (error as any).code ?? 1,
+              code,
               stderr
             )
           );
@@ -34,7 +38,7 @@ export async function runCli(args: string[]): Promise<any> {
         }
 
         try {
-          const parsed = JSON.parse(stdout.trim());
+          const parsed: unknown = JSON.parse(stdout.trim());
           resolve(parsed);
         } catch {
           // If stdout isn't JSON, return raw string

@@ -45,10 +45,19 @@ async function runOracle(slug: string): Promise<AgentResult> {
   // Oracle: On-chain / price data (real CLI when possible)
   try {
     const market = await runCli(["markets", "get", slug]);
-    const tokens = market?.tokens || market?.clobTokenIds || [];
+    const marketObj =
+      market !== null && typeof market === "object"
+        ? (market as Record<string, unknown>)
+        : {};
+    const rawTokens = marketObj["tokens"] ?? marketObj["clobTokenIds"] ?? [];
+    const tokens = Array.isArray(rawTokens) ? (rawTokens as unknown[]) : [];
     if (tokens.length > 0) {
-      const tokenId = typeof tokens[0] === "object" ? tokens[0].token_id : tokens[0];
-      const spread = await runCli(["clob", "spread", tokenId]);
+      const t0 = tokens[0];
+      const tokenId =
+        t0 !== null && typeof t0 === "object"
+          ? (t0 as Record<string, unknown>)["token_id"]
+          : t0;
+      const spread = await runCli(["clob", "spread", String(tokenId)]);
       return { agent: "oracle", status: "complete", data: { market, spread } };
     }
     return { agent: "oracle", status: "complete", data: { market } };

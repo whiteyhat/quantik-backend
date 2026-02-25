@@ -121,6 +121,27 @@ function migrate(db: Database.Database): void {
       pnl_impact REAL NOT NULL DEFAULT 0,
       FOREIGN KEY (liquidation_report_id) REFERENCES liquidation_reports(id)
     );
+
+    -- ── Application Settings ───────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      paper_mode INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- ── Paper Trades ───────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS paper_trades (
+      id TEXT PRIMARY KEY,
+      market_id TEXT NOT NULL,
+      side TEXT NOT NULL,
+      size REAL NOT NULL,
+      price REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'submitted',
+      created_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      pnl REAL
+    );
   `);
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
@@ -178,4 +199,7 @@ function migrate(db: Database.Database): void {
       VALUES ('gcb-default-001', ?, 0, 0.15, 0.10, 0.25, ?, ?)
     `).run(configId, now, now);
   }
+
+  // Seed default settings row (id=1) if it doesn't exist
+  db.prepare(`INSERT OR IGNORE INTO settings (id, paper_mode) VALUES (1, 0)`).run();
 }
