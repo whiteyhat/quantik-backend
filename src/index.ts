@@ -9,6 +9,8 @@ import streamRouter from "./routes/stream";
 import portfolioRouter from "./routes/portfolio";
 import riskRouter from "./routes/risk";
 import settingsRouter from "./routes/settings";
+import chatRouter from "./routes/chat";
+import agentStatusRouter from "./routes/agentStatus";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -49,6 +51,8 @@ app.use("/api/stream", streamRouter);
 app.use("/api/portfolio", portfolioRouter);
 app.use("/api/v1", riskRouter);
 app.use("/api/v1", settingsRouter);
+app.use("/api/v1", chatRouter);
+app.use("/api/v1", agentStatusRouter);
 
 // Global error handler
 app.use(
