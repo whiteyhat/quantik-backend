@@ -152,7 +152,11 @@ const WALLET_ADDRESS = "0x7EE996AbE9355a126F010EfF93487e84b2cE4b53";
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC.e (bridged)
 const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // USDC (native)
 
+// Working public Polygon RPCs (auth-free, confirmed 2026-02-25).
+// polygon-rpc.com, rpc.ankr.com/polygon, polygon.llamarpc.com all require API keys.
 const POLYGON_RPC_URLS = [
+  "https://1rpc.io/matic",
+  "https://polygon-bor-rpc.publicnode.com",
   "https://polygon-rpc.com",
   "https://rpc.ankr.com/polygon",
   "https://polygon.llamarpc.com",
@@ -168,14 +172,21 @@ async function polygonRpcCall(
   method: string,
   params: unknown[]
 ): Promise<string> {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
+  console.log(`[wallet:rpc] POST ${rpcUrl} method=${method}`);
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(5000),
+    body,
+    signal: AbortSignal.timeout(8000),
   });
   const json = (await res.json()) as RpcResponse;
-  if (!json.result) throw new Error(json.error?.message ?? "No result");
+  console.log(`[wallet:rpc] response from ${rpcUrl}: ${JSON.stringify(json)}`);
+  if (!json.result) {
+    throw new Error(
+      `RPC ${rpcUrl} method=${method} error: ${json.error?.message ?? "No result field in response"}`
+    );
+  }
   return json.result;
 }
 
@@ -183,13 +194,28 @@ async function getPolygonBalances(
   address: string
 ): Promise<{ usdc: number; pol: number }> {
   // balanceOf(address) selector = keccak256("balanceOf(address)")[0:4] = 0x70a08231
-  // Wallet address padded to 32 bytes (no 0x prefix)
+  // Wallet address: strip 0x, lowercase, left-pad to 32 bytes (64 hex chars)
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
 
+  console.log(`[wallet:rpc] === on-chain balance fetch start ===`);
+  console.log(`[wallet:rpc] wallet=${address}`);
+  console.log(`[wallet:rpc] callData=${callData}`);
+  console.log(`[wallet:rpc] USDC.e contract=${USDC_BRIDGED_CONTRACT}`);
+  console.log(`[wallet:rpc] USDC native contract=${USDC_NATIVE_CONTRACT}`);
+
+  const rpcErrors: string[] = [];
+
   for (const rpcUrl of POLYGON_RPC_URLS) {
+    console.log(`[wallet:rpc] → trying ${rpcUrl}`);
+
+    let usdcBridgedHex: string;
+    let usdcNativeHex: string;
+    let polHex: string;
+
+    // Log each failure verbosely; try next RPC endpoint before giving up
     try {
-      const [usdcBridgedHex, usdcNativeHex, polHex] = await Promise.all([
+      [usdcBridgedHex, usdcNativeHex, polHex] = await Promise.all([
         polygonRpcCall(rpcUrl, "eth_call", [
           { to: USDC_BRIDGED_CONTRACT, data: callData },
           "latest",
@@ -200,30 +226,37 @@ async function getPolygonBalances(
         ]),
         polygonRpcCall(rpcUrl, "eth_getBalance", [address, "latest"]),
       ]);
-
-      // Debug: log raw hex before parsing
-      console.log(`[wallet] RPC=${rpcUrl}`);
-      console.log(`[wallet] USDC.e (bridged) hex=${usdcBridgedHex}`);
-      console.log(`[wallet] USDC (native)   hex=${usdcNativeHex}`);
-      console.log(`[wallet] POL (native)    hex=${polHex}`);
-
-      // USDC: 6 decimals; POL (MATIC/POL): 18 decimals
-      const usdcBridged = Number(BigInt(usdcBridgedHex)) / 1e6;
-      const usdcNative  = Number(BigInt(usdcNativeHex))  / 1e6;
-      const usdc = usdcBridged + usdcNative;
-      const pol  = Number(BigInt(polHex)) / 1e18;
-
-      console.log(`[wallet] USDC.e=${usdcBridged}, USDC=${usdcNative}, total USDC=${usdc}, POL=${pol}`);
-
-      return { usdc, pol };
     } catch (err) {
-      console.warn(`[wallet] RPC ${rpcUrl} failed:`, err);
-      // Try next RPC endpoint
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[wallet:rpc] FAILED rpc=${rpcUrl} error=${msg}`);
+      rpcErrors.push(`${rpcUrl}: ${msg}`);
+      continue; // try next RPC
     }
+
+    // Log raw hex before parsing
+    console.log(`[wallet:rpc] USDC.e (bridged) raw hex=${usdcBridgedHex}`);
+    console.log(`[wallet:rpc] USDC (native)   raw hex=${usdcNativeHex}`);
+    console.log(`[wallet:rpc] POL              raw hex=${polHex}`);
+
+    // USDC: 6 decimals; POL: 18 decimals
+    const usdcBridged = Number(BigInt(usdcBridgedHex)) / 1e6;
+    const usdcNative  = Number(BigInt(usdcNativeHex))  / 1e6;
+    const usdc        = usdcBridged + usdcNative;
+    const pol         = Number(BigInt(polHex)) / 1e18;
+
+    console.log(`[wallet:rpc] parsed USDC.e=${usdcBridged}`);
+    console.log(`[wallet:rpc] parsed USDC native=${usdcNative}`);
+    console.log(`[wallet:rpc] parsed total USDC=${usdc}`);
+    console.log(`[wallet:rpc] parsed POL=${pol}`);
+    console.log(`[wallet:rpc] === SUCCESS via ${rpcUrl} ===`);
+
+    return { usdc, pol };
   }
 
-  console.error("[wallet] All Polygon RPC endpoints failed — returning 0 balances");
-  return { usdc: 0, pol: 0 };
+  // All RPCs failed — throw so the error surfaces in Railway logs
+  const detail = rpcErrors.join(" | ");
+  console.error(`[wallet:rpc] ALL RPCs failed: ${detail}`);
+  throw new Error(`All Polygon RPC endpoints failed: ${detail}`);
 }
 
 function formatUsd(amount: number): string {

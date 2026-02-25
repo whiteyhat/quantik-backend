@@ -55,13 +55,65 @@ function writeCache(key: string, data: unknown[]): void {
 
 // ── Gamma API fetch ────────────────────────────────────────────
 
-const GAMMA_BASE = "https://gamma-api.polymarket.com/markets";
+const GAMMA_MARKETS_BASE = "https://gamma-api.polymarket.com/markets";
+const GAMMA_EVENTS_BASE  = "https://gamma-api.polymarket.com/events";
+
+// Valid category → Polymarket tag mapping
+const CATEGORY_TAG_MAP: Record<string, string> = {
+  crypto:       "crypto",
+  politics:     "politics",
+  sports:       "sports",
+  "pop-culture": "pop-culture",
+  science:      "science",
+  world:        "world",
+  business:     "business",
+};
 
 async function fetchGammaMarkets(
   limit: number,
   offset: number,
   category?: string
 ): Promise<unknown[]> {
+  if (category) {
+    // Polymarket Gamma does NOT filter /markets by tag.
+    // Use the /events endpoint with tag= then flatten each event's markets array.
+    const tag = CATEGORY_TAG_MAP[category] ?? category;
+    const params = new URLSearchParams({
+      active: "true",
+      closed: "false",
+      tag,
+      limit: String(limit),
+      offset: String(offset),
+    });
+
+    const url = `${GAMMA_EVENTS_BASE}?${params.toString()}`;
+    const res = await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Gamma Events API returned ${res.status}: ${res.statusText}`);
+    }
+
+    const events: unknown = await res.json();
+    if (!Array.isArray(events)) return [];
+
+    // Flatten all markets from every event
+    const markets: unknown[] = [];
+    for (const event of events) {
+      if (
+        event !== null &&
+        typeof event === "object" &&
+        Array.isArray((event as Record<string, unknown>)["markets"])
+      ) {
+        markets.push(...((event as Record<string, unknown>)["markets"] as unknown[]));
+      }
+    }
+    return markets;
+  }
+
+  // No category — use /markets sorted by volume (default behaviour)
   const params = new URLSearchParams({
     active: "true",
     closed: "false",
@@ -71,18 +123,14 @@ async function fetchGammaMarkets(
     offset: String(offset),
   });
 
-  if (category) {
-    params.set("tag", category);
-  }
-
-  const url = `${GAMMA_BASE}?${params.toString()}`;
+  const url = `${GAMMA_MARKETS_BASE}?${params.toString()}`;
   const res = await fetch(url, {
     headers: { "Accept": "application/json" },
     signal: AbortSignal.timeout(10000),
   });
 
   if (!res.ok) {
-    throw new Error(`Gamma API returned ${res.status}: ${res.statusText}`);
+    throw new Error(`Gamma Markets API returned ${res.status}: ${res.statusText}`);
   }
 
   const data: unknown = await res.json();
