@@ -7,6 +7,7 @@ import pipelineRouter from "./routes/pipeline";
 import tradeRouter from "./routes/trade";
 import streamRouter from "./routes/stream";
 import portfolioRouter from "./routes/portfolio";
+import riskRouter from "./routes/risk";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -45,6 +46,7 @@ app.use("/api/pipeline", pipelineRouter);
 app.use("/api/trade", tradeRouter);
 app.use("/api/stream", streamRouter);
 app.use("/api/portfolio", portfolioRouter);
+app.use("/api/v1", riskRouter);
 
 // Global error handler
 app.use(
