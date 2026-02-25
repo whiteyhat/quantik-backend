@@ -147,10 +147,15 @@ function isoDate(ts: number): string {
 // ── Polygon RPC balance helpers ────────────────────────────────
 
 const WALLET_ADDRESS = "0x7EE996AbE9355a126F010EfF93487e84b2cE4b53";
-const USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+
+// Check BOTH USDC contracts on Polygon — wallet may hold either or both
+const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC.e (bridged)
+const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // USDC (native)
+
 const POLYGON_RPC_URLS = [
   "https://polygon-rpc.com",
   "https://rpc.ankr.com/polygon",
+  "https://polygon.llamarpc.com",
 ];
 
 interface RpcResponse {
@@ -178,28 +183,46 @@ async function getPolygonBalances(
   address: string
 ): Promise<{ usdc: number; pol: number }> {
   // balanceOf(address) selector = keccak256("balanceOf(address)")[0:4] = 0x70a08231
+  // Wallet address padded to 32 bytes (no 0x prefix)
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
 
   for (const rpcUrl of POLYGON_RPC_URLS) {
     try {
-      const [usdcHex, polHex] = await Promise.all([
+      const [usdcBridgedHex, usdcNativeHex, polHex] = await Promise.all([
         polygonRpcCall(rpcUrl, "eth_call", [
-          { to: USDC_CONTRACT, data: callData },
+          { to: USDC_BRIDGED_CONTRACT, data: callData },
+          "latest",
+        ]),
+        polygonRpcCall(rpcUrl, "eth_call", [
+          { to: USDC_NATIVE_CONTRACT, data: callData },
           "latest",
         ]),
         polygonRpcCall(rpcUrl, "eth_getBalance", [address, "latest"]),
       ]);
 
-      // USDC: 6 decimals; POL (MATIC): 18 decimals
-      const usdc = Number(BigInt(usdcHex)) / 1e6;
-      const pol = Number(BigInt(polHex)) / 1e18;
+      // Debug: log raw hex before parsing
+      console.log(`[wallet] RPC=${rpcUrl}`);
+      console.log(`[wallet] USDC.e (bridged) hex=${usdcBridgedHex}`);
+      console.log(`[wallet] USDC (native)   hex=${usdcNativeHex}`);
+      console.log(`[wallet] POL (native)    hex=${polHex}`);
+
+      // USDC: 6 decimals; POL (MATIC/POL): 18 decimals
+      const usdcBridged = Number(BigInt(usdcBridgedHex)) / 1e6;
+      const usdcNative  = Number(BigInt(usdcNativeHex))  / 1e6;
+      const usdc = usdcBridged + usdcNative;
+      const pol  = Number(BigInt(polHex)) / 1e18;
+
+      console.log(`[wallet] USDC.e=${usdcBridged}, USDC=${usdcNative}, total USDC=${usdc}, POL=${pol}`);
+
       return { usdc, pol };
-    } catch {
+    } catch (err) {
+      console.warn(`[wallet] RPC ${rpcUrl} failed:`, err);
       // Try next RPC endpoint
     }
   }
 
+  console.error("[wallet] All Polygon RPC endpoints failed — returning 0 balances");
   return { usdc: 0, pol: 0 };
 }
 

@@ -53,6 +53,42 @@ function writeCache(key: string, data: unknown[]): void {
   }
 }
 
+// ── Gamma API fetch ────────────────────────────────────────────
+
+const GAMMA_BASE = "https://gamma-api.polymarket.com/markets";
+
+async function fetchGammaMarkets(
+  limit: number,
+  offset: number,
+  category?: string
+): Promise<unknown[]> {
+  const params = new URLSearchParams({
+    active: "true",
+    closed: "false",
+    order: "volume",
+    ascending: "false",
+    limit: String(limit),
+    offset: String(offset),
+  });
+
+  if (category) {
+    params.set("tag", category);
+  }
+
+  const url = `${GAMMA_BASE}?${params.toString()}`;
+  const res = await fetch(url, {
+    headers: { "Accept": "application/json" },
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Gamma API returned ${res.status}: ${res.statusText}`);
+  }
+
+  const data: unknown = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
 // ── GET /api/markets?limit=20&offset=0&category=crypto ─────────
 router.get("/", async (req: Request, res: Response) => {
   const limit = Math.min(
@@ -68,50 +104,8 @@ router.get("/", async (req: Request, res: Response) => {
   const key = cacheKey(category);
 
   try {
-    let rawMarkets: unknown[];
-
-    if (category) {
-      // Use events list with --tag for category filtering, then flatten markets
-      const events = await runCli([
-        "events",
-        "list",
-        "--tag",
-        category,
-        "--active",
-        "true",
-        "--closed",
-        "false",
-        "--limit",
-        String(limit + 1),
-        "--offset",
-        String(offset),
-      ]);
-
-      const eventsArr = Array.isArray(events) ? events : [];
-      // Flatten: each event has a `markets` array
-      rawMarkets = eventsArr.flatMap((e) => {
-        const ev = e as Record<string, unknown>;
-        const inner = ev["markets"];
-        return Array.isArray(inner) ? inner : [e];
-      });
-    } else {
-      // Use markets list for general (no category) queries
-      const result = await runCli([
-        "markets",
-        "list",
-        "--active",
-        "true",
-        "--closed",
-        "false",
-        "--order",
-        "volume_num",
-        "--limit",
-        String(limit + 1),
-        "--offset",
-        String(offset),
-      ]);
-      rawMarkets = Array.isArray(result) ? result : [];
-    }
+    // Fetch one extra to determine hasMore
+    const rawMarkets = await fetchGammaMarkets(limit + 1, offset, category);
 
     // Determine pagination
     const hasMore = rawMarkets.length > limit;
@@ -124,7 +118,7 @@ router.get("/", async (req: Request, res: Response) => {
     const response: MarketsListResponse = { markets, total, hasMore };
     res.json(response);
   } catch (err) {
-    // CLI failed — attempt stale cache fallback
+    // Gamma API failed — attempt stale cache fallback
     const cached = readCache(key);
     if (cached) {
       const hasMore = cached.data.length > offset + limit;
@@ -140,12 +134,14 @@ router.get("/", async (req: Request, res: Response) => {
       return;
     }
 
-    // No cache available
-    if (err instanceof CliError) {
-      res.status(502).json({ error: err.message, stderr: err.stderr });
-    } else {
-      res.status(500).json({ error: String(err) });
-    }
+    // No cache available — return empty rather than 502
+    const response: MarketsListResponse = {
+      markets: [],
+      total: 0,
+      hasMore: false,
+      stale: true,
+    };
+    res.json(response);
   }
 });
 
