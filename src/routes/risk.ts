@@ -128,6 +128,103 @@ router.get("/risk-config/active", (_req: Request, res: Response) => {
   });
 });
 
+// ── GET /api/v1/risk-config ───────────────────────────────────
+// Returns the active risk config in the flat shape the Prism frontend
+// settings page expects: { agentVarThreshold, maxPositionSize, drawdownLimit, kellyMultiplier }
+
+router.get("/risk-config", (_req: Request, res: Response) => {
+  const db = getDb();
+
+  const cb = db
+    .prepare<[], GlobalCircuitBreakerRow>(
+      `SELECT gcb.*
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    )
+    .get();
+
+  const thresholds = db
+    .prepare<[], AgentThresholdRow>(
+      `SELECT at.*
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1`
+    )
+    .all();
+
+  const avgVar =
+    thresholds.length > 0
+      ? thresholds.reduce((sum, t) => sum + t.var_threshold, 0) / thresholds.length
+      : 0.05;
+
+  // max_position_size_pct may have been seeded as 5.0 (legacy percent scale).
+  // Normalise to 0–1 if the stored value exceeds 1.
+  const rawMaxPos = cb?.max_position_size_pct ?? 0.1;
+  const maxPositionSize = rawMaxPos > 1 ? rawMaxPos / 100 : rawMaxPos;
+
+  res.json({
+    agentVarThreshold: parseFloat(avgVar.toFixed(4)),
+    maxPositionSize,
+    drawdownLimit: cb?.drawdown_limit_pct ?? 0.15,
+    kellyMultiplier: cb?.kelly_fraction_multiplier ?? 0.25,
+  });
+});
+
+// ── PUT /api/v1/risk-config ───────────────────────────────────
+// Accepts the flat shape from the Prism settings page and persists it.
+
+router.put("/risk-config", (req: Request, res: Response) => {
+  const db = getDb();
+  const {
+    agentVarThreshold = 0.05,
+    maxPositionSize = 0.1,
+    drawdownLimit = 0.15,
+    kellyMultiplier = 0.25,
+  } = req.body as {
+    agentVarThreshold?: number;
+    maxPositionSize?: number;
+    drawdownLimit?: number;
+    kellyMultiplier?: number;
+  };
+
+  const now = Date.now();
+
+  // Update global circuit breaker
+  db.prepare(
+    `UPDATE global_circuit_breakers
+     SET max_position_size_pct = ?,
+         drawdown_limit_pct    = ?,
+         kelly_fraction_multiplier = ?,
+         updated_at = ?
+     WHERE id = 'gcb-default-001'`
+  ).run(maxPositionSize, drawdownLimit, kellyMultiplier, now);
+
+  // Update all agent var thresholds to the new global value
+  db.prepare(
+    `UPDATE agent_thresholds
+     SET var_threshold = ?,
+         updated_at    = ?
+     WHERE risk_configuration_id = 'rc-default-001'`
+  ).run(agentVarThreshold, now);
+
+  // Bump config version + timestamp
+  db.prepare(
+    `UPDATE risk_configurations
+     SET version    = version + 1,
+         updated_at = ?
+     WHERE id = 'rc-default-001'`
+  ).run(now);
+
+  res.json({
+    agentVarThreshold,
+    maxPositionSize,
+    drawdownLimit,
+    kellyMultiplier,
+    updatedAt: now,
+  });
+});
+
 // ── POST /api/v1/panic-mode/activate ─────────────────────────
 // Triggers panic mode, creates a panic_mode_events record, seeds
 // a dummy liquidation report, and returns the report ID.
@@ -231,7 +328,8 @@ router.post("/panic-mode/activate", (_req: Request, res: Response) => {
 });
 
 // ── GET /api/v1/liquidation-reports/:id ──────────────────────
-// Returns a liquidation report with its line items.
+// Returns a liquidation report with its line items in the shape
+// the Prism LiquidationReportPage expects.
 
 router.get("/liquidation-reports/:id", (req: Request, res: Response) => {
   const db = getDb();
@@ -254,21 +352,88 @@ router.get("/liquidation-reports/:id", (req: Request, res: Response) => {
     )
     .all(report.id);
 
-  // Compute aggregates from line items for a richer mock response
+  // Look up the originating panic event for timestamp + triggeredBy context
+  const event = db
+    .prepare<[string], PanicModeEventRow>(
+      "SELECT * FROM panic_mode_events WHERE id = ?"
+    )
+    .get(report.panic_mode_event_id);
+
+  // Compute aggregates
   const totalPnlImpact = lineItems.reduce((acc, li) => acc + li.pnl_impact, 0);
   const totalRealizedValue =
     report.total_realized_value ??
     lineItems.reduce((acc, li) => acc + li.execution_price * li.size, 0);
 
+  const slippagePct = report.slippage_pct ?? 0.012;
+  const gasExecutionCost = report.gas_execution_cost ?? 0.85;
+
+  // Use initiated_at from the event as the canonical report timestamp
+  const reportTimestamp = event?.initiated_at ?? (report.completion_timestamp ?? Date.now());
+
+  // Map DB status → Prism status union
+  const statusMap: Record<string, "complete" | "partial" | "failed"> = {
+    complete: "complete",
+    partial: "partial",
+    failed: "failed",
+    processing: "partial",
+  };
+  const frontendStatus: "complete" | "partial" | "failed" =
+    statusMap[report.status] ?? "partial";
+
+  // Build synthetic timeline from event data (Prism IncidentTimeline)
+  const timeline = [
+    {
+      timestamp: reportTimestamp,
+      type: "protocol_start",
+      message: "Emergency protocol initiated by operator.",
+    },
+    {
+      timestamp: reportTimestamp + 1_200,
+      type: "circuit_break",
+      message: "Circuit breaker engaged — pipeline halted.",
+    },
+    {
+      timestamp: reportTimestamp + 3_400,
+      type: "order_cancel",
+      message: `${event?.pending_orders_count ?? 0} open order(s) cancelled across all markets.`,
+    },
+    ...lineItems.map((li, i) => ({
+      timestamp: reportTimestamp + 5_000 + i * 2_000,
+      type: "position_close",
+      message: `${li.asset_symbol} position closed at ${Math.round(li.execution_price * 100)}¢.`,
+    })),
+    {
+      timestamp: reportTimestamp + 5_000 + lineItems.length * 2_000 + 1_000,
+      type: "protocol_end",
+      message: "Liquidation complete. Report generated.",
+    },
+  ];
+
   res.json({
+    // ── Core identity ──────────────────────────────────────────────
     id: report.id,
     reportCode: report.report_code,
     panicModeEventId: report.panic_mode_event_id,
-    status: report.status,
-    completionTimestamp: report.completion_timestamp,
+    status: frontendStatus,
+    // ── Prism-expected fields ──────────────────────────────────────
+    timestamp: reportTimestamp,
+    triggeredBy: "Manual Panic Protocol",
     totalRealizedValue,
-    slippagePct: report.slippage_pct ?? 0.012,
-    gasExecutionCost: report.gas_execution_cost ?? 0.85,
+    totalSlippage: parseFloat((slippagePct * totalRealizedValue).toFixed(2)),
+    totalGas: gasExecutionCost,
+    assets: lineItems.map((li) => ({
+      asset: li.asset_symbol,
+      executionPrice: li.execution_price,
+      triggerPrice: li.trigger_price,
+      size: li.size,
+      pnlImpact: li.pnl_impact,
+    })),
+    timeline,
+    // ── Legacy / extended fields (kept for backward compat) ────────
+    completionTimestamp: report.completion_timestamp,
+    slippagePct,
+    gasExecutionCost,
     recoveryStatus: report.recovery_status ?? "pending",
     totalPnlImpact,
     lineItems: lineItems.map((li) => ({

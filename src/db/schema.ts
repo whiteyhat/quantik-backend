@@ -123,6 +123,12 @@ function migrate(db: Database.Database): void {
     );
   `);
 
+  // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
+  // Normalise any value > 1.0 to 0–1 scale.
+  db.prepare(
+    `UPDATE global_circuit_breakers SET max_position_size_pct = max_position_size_pct / 100.0 WHERE max_position_size_pct > 1.0`
+  ).run();
+
   // Seed a default active risk configuration if none exists
   const existing = db
     .prepare("SELECT id FROM risk_configurations WHERE is_active = 1 LIMIT 1")
@@ -169,7 +175,7 @@ function migrate(db: Database.Database): void {
     db.prepare(`
       INSERT OR IGNORE INTO global_circuit_breakers
         (id, risk_configuration_id, panic_mode_enabled, drawdown_limit_pct, max_position_size_pct, kelly_fraction_multiplier, created_at, updated_at)
-      VALUES ('gcb-default-001', ?, 0, 0.15, 5.0, 0.25, ?, ?)
+      VALUES ('gcb-default-001', ?, 0, 0.15, 0.10, 0.25, ?, ?)
     `).run(configId, now, now);
   }
 }
