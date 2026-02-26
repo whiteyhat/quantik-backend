@@ -23,6 +23,8 @@ import settingsRouter from "./routes/settings";
 import chatRouter from "./routes/chat";
 import agentStatusRouter from "./routes/agentStatus";
 import { sentryWebhookRouter } from "./routes/sentryWebhook";
+import orchestratorRouter from "./routes/orchestrator";
+import { startScheduler } from "./orchestrator/index";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -66,6 +68,7 @@ app.use("/api/v1", settingsRouter);
 app.use("/api/v1", chatRouter);
 app.use("/api/v1", agentStatusRouter);
 app.use("/api/webhooks/sentry", sentryWebhookRouter);
+app.use("/api/orchestrator", orchestratorRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
@@ -86,4 +89,7 @@ app.use(
 app.listen(PORT, () => {
   console.log(`[quantik-backend] Running on http://localhost:${PORT}`);
   console.log(`[quantik-backend] Health: http://localhost:${PORT}/api/health`);
+
+  // Start orchestrator scheduler (10-minute scan cycle)
+  startScheduler();
 });

@@ -150,6 +150,32 @@ function migrate(db: Database.Database): void {
       data TEXT NOT NULL,
       cached_at INTEGER NOT NULL
     );
+
+    -- ── Orchestrator Candidates ─────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS orchestrator_candidates (
+      slug TEXT PRIMARY KEY,
+      token_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      opportunity_score REAL NOT NULL,
+      volume_score REAL,
+      price_move_score REAL,
+      liquidity_score REAL,
+      recency_score REAL,
+      triggers TEXT,
+      scored_at INTEGER NOT NULL,
+      pipeline_triggered INTEGER DEFAULT 0,
+      pipeline_triggered_at INTEGER
+    );
+
+    -- ── Market Price Snapshots (1hr delta computation) ──────────
+
+    CREATE TABLE IF NOT EXISTS market_price_snapshots (
+      slug TEXT NOT NULL,
+      yes_price REAL NOT NULL,
+      snapshot_at INTEGER NOT NULL,
+      PRIMARY KEY (slug, snapshot_at)
+    );
   `);
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
