@@ -185,6 +185,88 @@ async function fetchGammaMarkets(
   return Array.isArray(data) ? data : [];
 }
 
+// ── Trending markets in-memory cache ──────────────────────────
+interface TrendingCache {
+  data: unknown[];
+  fetchedAt: number;
+}
+let trendingCache: TrendingCache | null = null;
+const TRENDING_TTL = 5 * 60 * 1000; // 5 minutes
+
+interface GammaMarketRaw {
+  slug?: string;
+  conditionId?: string;
+  question?: string;
+  outcomePrices?: string;
+  volume24hr?: number;
+  liquidity?: number;
+  [key: string]: unknown;
+}
+
+function transformTrendingMarket(raw: GammaMarketRaw): unknown {
+  let outcomePrices: number[] = [];
+  try {
+    const parsed = JSON.parse(raw.outcomePrices ?? "[]");
+    if (Array.isArray(parsed)) {
+      outcomePrices = parsed.map((p: unknown) => parseFloat(String(p)) || 0);
+    }
+  } catch { /* ignore parse errors */ }
+
+  const liquidity = raw.liquidity ?? 0;
+  const liquidityGrade =
+    liquidity > 50000 ? "A" : liquidity > 10000 ? "B" : liquidity > 1000 ? "C" : "D";
+
+  return {
+    slug: raw.slug ?? raw.conditionId ?? "",
+    question: raw.question ?? "",
+    yesPrice: outcomePrices[1] ?? 0,
+    noPrice: outcomePrices[0] ?? 0,
+    volume: raw.volume24hr ?? 0,
+    liquidity,
+    liquidityGrade,
+    tokenId: raw.conditionId ?? "",
+  };
+}
+
+// ── GET /api/markets/trending ─────────────────────────────────
+router.get("/trending", async (_req: Request, res: Response) => {
+  // Return cached if fresh
+  if (trendingCache && Date.now() - trendingCache.fetchedAt < TRENDING_TTL) {
+    res.json({ markets: trendingCache.data, total: trendingCache.data.length, hasMore: false });
+    return;
+  }
+
+  try {
+    const url =
+      "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=20";
+    const apiRes = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!apiRes.ok) {
+      throw new Error(`Gamma trending API returned ${apiRes.status}`);
+    }
+
+    const raw: unknown = await apiRes.json();
+    if (!Array.isArray(raw)) throw new Error("Unexpected response shape");
+
+    const markets = raw.map((m: unknown) => transformTrendingMarket(m as GammaMarketRaw));
+
+    // Cache result
+    trendingCache = { data: markets, fetchedAt: Date.now() };
+
+    res.json({ markets, total: markets.length, hasMore: false });
+  } catch {
+    // Return stale cache if available
+    if (trendingCache) {
+      res.json({ markets: trendingCache.data, total: trendingCache.data.length, hasMore: false, stale: true });
+      return;
+    }
+    res.status(503).json({ error: "Polymarket unavailable", fallback: true });
+  }
+});
+
 // ── GET /api/markets?limit=20&offset=0&category=crypto ─────────
 router.get("/", async (req: Request, res: Response) => {
   const limit = Math.min(
