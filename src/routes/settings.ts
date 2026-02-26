@@ -9,6 +9,12 @@ router.get("/settings", (_req: Request, res: Response) => {
   res.json({ paperMode: settings.paper_mode });
 });
 
+// ── GET /api/v1/settings/paper-mode ──────────────────────────
+router.get("/settings/paper-mode", (_req: Request, res: Response) => {
+  const settings = getSettings();
+  res.json({ paperMode: settings.paper_mode });
+});
+
 // ── POST /api/v1/settings/paper-mode ─────────────────────────
 router.post("/settings/paper-mode", (req: Request, res: Response) => {
   const body: unknown = req.body;
