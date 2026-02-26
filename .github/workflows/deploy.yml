@@ -13,10 +13,22 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
-      - name: Deploy to Railway
+      - name: Configure Railway auth
+        run: |
+          mkdir -p ~/.railway
+          echo '{
+            "user": { "token": "${{ secrets.RAILWAY_TOKEN }}" },
+            "projects": {
+              "/home/runner/work/quantik-backend/quantik-backend": {
+                "projectPath": "/home/runner/work/quantik-backend/quantik-backend",
+                "name": "quantik-backend",
+                "project": "e5716b73-1255-4d25-8ef6-8a64f5158289",
+                "environment": "791d862d-8437-44ae-bc70-788c7d3d30fb",
+                "environmentName": "production",
+                "service": "4496550d-a159-4f26-bbd8-7a0217ec1d0e"
+              }
+            }
+          }' > ~/.railway/config.json
+
+      - name: Deploy
         run: railway up --detach
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: e5716b73-1255-4d25-8ef6-8a64f5158289
-          RAILWAY_ENVIRONMENT_ID: 791d862d-8437-44ae-bc70-788c7d3d30fb
-          RAILWAY_SERVICE_ID: 4496550d-a159-4f26-bbd8-7a0217ec1d0e
