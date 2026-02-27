@@ -31,6 +31,8 @@ import sigmaRouter from "./routes/sigma";
 import clauseRouter from "./routes/clause";
 import fluxRouter from "./routes/flux";
 import signalsRouter from "./routes/signals";
+import riskL3Router from "./routes/riskL3";
+import { ensureCircuitBreakerTable } from "./risk";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
 
@@ -58,6 +60,7 @@ app.use(express.json());
 
 // Initialize database on startup
 getDb();
+ensureCircuitBreakerTable();
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -84,6 +87,7 @@ app.use("/api/sigma", sigmaRouter);
 app.use("/api/clause", clauseRouter);
 app.use("/api/flux", fluxRouter);
 app.use("/api/signals", signalsRouter);
+app.use("/api/risk", riskL3Router);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
