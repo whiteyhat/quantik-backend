@@ -297,6 +297,12 @@ function migrate(db: Database.Database): void {
     );
   `);
 
+  // Migration: add signal_state column to pipeline_runs
+  const cols = db.prepare("PRAGMA table_info(pipeline_runs)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "signal_state")) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN signal_state TEXT");
+  }
+
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
   // Normalise any value > 1.0 to 0–1 scale.
   db.prepare(

@@ -348,6 +348,51 @@ router.post("/run", async (req: Request, res: Response) => {
   res.end();
 });
 
+// ── GET /api/pipeline/results — formatted signals for frontend ─
+router.get("/results", (_req: Request, res: Response) => {
+  try {
+    const runs = getPipelineHistory(20);
+    const signals = runs.map((r) => {
+      let edge: number | null = null;
+      if (r.edge_output) {
+        try {
+          const edgeData = JSON.parse(r.edge_output) as Record<string, unknown>;
+          edge = typeof edgeData["edge"] === "number" ? edgeData["edge"]
+               : typeof edgeData["net_edge"] === "number" ? edgeData["net_edge"]
+               : typeof edgeData["net_ev"] === "number" ? edgeData["net_ev"]
+               : null;
+        } catch { /* ignore parse error */ }
+      }
+
+      // Derive signal status from sigma output
+      let status: "TRADE" | "WATCH" | "SKIP" = "WATCH";
+      if (r.sigma_output) {
+        try {
+          const sigma = JSON.parse(r.sigma_output) as Record<string, unknown>;
+          const rec = sigma["recommendation"] ?? sigma["decision"];
+          if (rec === "TRADE" || rec === "BUY_YES" || rec === "BUY_NO") status = "TRADE";
+          else if (rec === "SKIP" || rec === "HOLD") status = "SKIP";
+        } catch { /* ignore */ }
+      }
+
+      return {
+        id: r.id,
+        slug: r.market_slug,
+        question: r.market_question || r.market_slug,
+        decision: r.decision ?? "HOLD",
+        confidence: r.confidence ?? 0,
+        edge: edge ?? 0,
+        timestamp: r.created_at,
+        status,
+      };
+    });
+    res.json(signals);
+  } catch (err) {
+    const msg = err instanceof CliError ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ── GET /api/pipeline/history ──────────────────────────────────
 router.get("/history", (_req: Request, res: Response) => {
   try {
