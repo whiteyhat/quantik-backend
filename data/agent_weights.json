@@ -1,0 +1,10 @@
+{
+  "weights": [
+    { "agent": "Edge",   "weight": 0.30, "brierScore": null, "trend": "stable" },
+    { "agent": "Oracle", "weight": 0.25, "brierScore": null, "trend": "stable" },
+    { "agent": "Clause", "weight": 0.20, "brierScore": null, "trend": "stable" },
+    { "agent": "Aura",   "weight": 0.15, "brierScore": null, "trend": "stable" },
+    { "agent": "Flux",   "weight": 0.10, "brierScore": null, "trend": "stable" }
+  ],
+  "updatedAt": null
+}

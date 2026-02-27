@@ -33,6 +33,7 @@ import fluxRouter from "./routes/flux";
 import signalsRouter from "./routes/signals";
 import riskL3Router from "./routes/riskL3";
 import executionRouter from "./routes/execution";
+import monitoringRouter from "./routes/monitoring";
 import { ensureCircuitBreakerTable } from "./risk";
 import { startFillMonitor } from "./execution";
 import { startScheduler } from "./orchestrator/index";
@@ -91,6 +92,7 @@ app.use("/api/flux", fluxRouter);
 app.use("/api/signals", signalsRouter);
 app.use("/api/risk", riskL3Router);
 app.use("/api/execution", executionRouter);
+app.use("/api/monitoring", monitoringRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());

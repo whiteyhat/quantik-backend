@@ -291,6 +291,20 @@ function migrate(db: Database.Database): void {
       confidence REAL NOT NULL
     );
 
+    -- ── Resolutions (L5 Monitoring) ────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS resolutions (
+      id TEXT PRIMARY KEY,
+      pipeline_run_id TEXT NOT NULL,
+      market_slug TEXT NOT NULL,
+      predicted REAL NOT NULL,
+      outcome INTEGER NOT NULL,
+      brier_score REAL NOT NULL,
+      signal_type TEXT,
+      resolved_at INTEGER NOT NULL,
+      FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id)
+    );
+
     CREATE TABLE IF NOT EXISTS research_notes (
       marketSlug TEXT PRIMARY KEY,
       scoredAt INTEGER NOT NULL,
