@@ -24,7 +24,11 @@ import chatRouter from "./routes/chat";
 import agentStatusRouter from "./routes/agentStatus";
 import { sentryWebhookRouter } from "./routes/sentryWebhook";
 import orchestratorRouter from "./routes/orchestrator";
+import { auraRouter } from "./routes/aura";
+import oracleRouter from "./routes/oracle";
+import edgeRouter from "./routes/edge";
 import { startScheduler } from "./orchestrator/index";
+import { startHotScanner } from "./oracle/hot-scanner";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -69,6 +73,9 @@ app.use("/api/v1", chatRouter);
 app.use("/api/v1", agentStatusRouter);
 app.use("/api/webhooks/sentry", sentryWebhookRouter);
 app.use("/api/orchestrator", orchestratorRouter);
+app.use("/api/aura", auraRouter);
+app.use("/api/oracle", oracleRouter);
+app.use("/api/edge", edgeRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
@@ -92,4 +99,6 @@ app.listen(PORT, () => {
 
   // Start orchestrator scheduler (10-minute scan cycle)
   startScheduler();
+  // Start 60s hot markets scanner
+  startHotScanner();
 });

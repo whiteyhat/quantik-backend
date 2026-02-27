@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@sentry/node": "^10.40.0",
+    "apify-client": "^2.22.2",
     "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",

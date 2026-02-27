@@ -356,6 +356,14 @@ export async function runScan(): Promise<{
     // Persist
     upsertCandidates(candidates);
 
+    // Queue Aura runs for the top 5 candidates
+    candidates.slice(0, 5).forEach((c) => {
+      // Background execution, skip await
+      import("../aura/index").then((m) => m.runAura({ slug: c.slug, question: c.question })).catch((err) => {
+        console.error(`[orchestrator] Aura run failed for ${c.slug}:`, err);
+      });
+    });
+
     state.lastScanAt = Date.now();
     state.nextScanAt = Date.now() + SCAN_INTERVAL_MS;
     state.candidatesFound = candidates.length;

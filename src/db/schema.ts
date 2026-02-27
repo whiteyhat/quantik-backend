@@ -176,6 +176,77 @@ function migrate(db: Database.Database): void {
       snapshot_at INTEGER NOT NULL,
       PRIMARY KEY (slug, snapshot_at)
     );
+
+    -- ── Aura Results ──────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS aura_results (
+      slug TEXT NOT NULL,
+      scored_at INTEGER NOT NULL,
+      sentiment_delta REAL,
+      shift_detected INTEGER,
+      shift_direction TEXT,
+      shift_velocity REAL,
+      shift_trend TEXT,
+      shift_persistence INTEGER,
+      twitter_sentiment REAL,
+      twitter_volume_delta REAL,
+      telegram_bias TEXT,
+      breaking_news INTEGER,
+      news_headlines TEXT,
+      search_trend_spike INTEGER,
+      search_trend_value REAL,
+      whale_pos_yes_pct REAL,
+      whale_positioning TEXT,
+      echo_chamber_risk REAL,
+      data_sufficiency REAL,
+      confidence REAL,
+      sources_used TEXT,
+      source_status TEXT,
+      raw_data TEXT,
+      PRIMARY KEY (slug, scored_at)
+    );
+
+    -- ── Oracle Results ──────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS oracle_results (
+      market_slug TEXT PRIMARY KEY,
+      scored_at INTEGER NOT NULL,
+      raw_prob REAL NOT NULL,
+      calibrated_prob REAL NOT NULL,
+      market_implied REAL NOT NULL,
+      confidence REAL NOT NULL,
+      data_sufficiency REAL NOT NULL,
+      bull_case TEXT NOT NULL,
+      bear_case TEXT NOT NULL,
+      reasoning TEXT NOT NULL,
+      cross_market_signals JSON NOT NULL,
+      cross_market_divergence INTEGER NOT NULL,
+      arb_detected INTEGER NOT NULL,
+      arb_details TEXT,
+      whale_signal_p_yes REAL,
+      days_to_resolution INTEGER NOT NULL,
+      ensemble_variance REAL,
+      longshot_adjusted INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS edge_results (
+      marketSlug TEXT PRIMARY KEY,
+      scoredAt INTEGER NOT NULL,
+      gross_edge REAL NOT NULL,
+      net_edge REAL NOT NULL,
+      ev_grade TEXT NOT NULL,
+      net_ev REAL NOT NULL,
+      kelly_recommended REAL NOT NULL,
+      fractional_kelly REAL NOT NULL,
+      position_size REAL NOT NULL,
+      kelly_multiplier REAL NOT NULL,
+      time_decay_watch INTEGER NOT NULL,
+      arb_opportunities JSON NOT NULL,
+      correlation_penalty REAL NOT NULL,
+      corr_blocked INTEGER NOT NULL,
+      direction TEXT NOT NULL,
+      confidence REAL NOT NULL
+    );
   `);
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
