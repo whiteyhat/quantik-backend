@@ -13,7 +13,7 @@ export async function computeCorrelationPenalty(
   let maxSim = 0;
 
   try {
-    const port = process.env.PORT || 3000;
+    const port = process.env.PORT || 3001;
     const url = `http://localhost:${port}/api/portfolio/positions`;
     const res = await fetch(url);
     if (res.ok) {
