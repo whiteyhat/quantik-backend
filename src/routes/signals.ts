@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { getPipelineHistory, updatePipelineRun, PipelineRun } from "../db/queries";
+import { getPipelineHistory, PipelineRun } from "../db/queries";
 import { getDb } from "../db/schema";
 import { validateSignal, type SignalValidation } from "../signal/validator";
 import { findAnalogues } from "../signal/backtester";
@@ -163,11 +163,7 @@ router.post("/validate", (req: Request, res: Response) => {
       },
     });
 
-    // Store signal_state in pipeline_runs
-    updatePipelineRun(pipelineRunId, {
-      ...(({ signal_state: validation.state } as unknown) as Partial<PipelineRun>),
-    });
-    // Direct SQL update for the new column
+    // Store signal_state in pipeline_runs (new column not in PipelineRun interface)
     db.prepare("UPDATE pipeline_runs SET signal_state = ? WHERE id = ?").run(
       validation.state,
       pipelineRunId
