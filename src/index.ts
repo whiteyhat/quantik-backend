@@ -29,6 +29,7 @@ import oracleRouter from "./routes/oracle";
 import edgeRouter from "./routes/edge";
 import sigmaRouter from "./routes/sigma";
 import clauseRouter from "./routes/clause";
+import fluxRouter from "./routes/flux";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
 
@@ -80,6 +81,7 @@ app.use("/api/oracle", oracleRouter);
 app.use("/api/edge", edgeRouter);
 app.use("/api/sigma", sigmaRouter);
 app.use("/api/clause", clauseRouter);
+app.use("/api/flux", fluxRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
