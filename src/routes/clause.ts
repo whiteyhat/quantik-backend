@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getDb } from "../db/schema";
 import { runClause, ClauseResult, ClauseMarketInput } from "../clause";
+import { fetchMarketBySlug, withTimeout } from "../utils/market-fetch";
 
 const router = Router();
 
@@ -23,35 +24,44 @@ router.get("/status", (req, res) => {
   }
 });
 
-// GET /api/clause/:slug
-router.get("/:slug", (req, res) => {
+// GET /api/clause/:slug — re-runs Clause for a market
+router.get("/:slug", async (req, res) => {
+  const { slug } = req.params;
   try {
-    const { slug } = req.params;
-    const db = getDb();
-
-    const row = db.prepare("SELECT * FROM clause_results WHERE marketSlug = ?").get(slug) as any;
-
-    if (!row) {
-      return res.status(404).json({ error: "Market not scored by Clause yet" });
-    }
-
-    const result: ClauseResult = {
-      marketSlug: row.marketSlug,
-      scoredAt: row.scoredAt,
-      ambiguityScore: row.ambiguityScore,
-      riskLevel: row.riskLevel,
-      veto: Boolean(row.veto),
-      ambiguityFlags: JSON.parse(row.ambiguityFlags),
-      technicality_risks: JSON.parse(row.technicality_risks),
-      resolutionCriteria: row.resolutionCriteria,
-      disputeHistory: Boolean(row.disputeHistory),
-      urgent: Boolean(row.urgent),
-      confidence: row.confidence
+    const market = await fetchMarketBySlug(slug);
+    const input: ClauseMarketInput = {
+      slug,
+      question: market.question,
+      description: market.description,
+      days_to_resolution: market.days_to_resolution,
     };
-
-    res.json(result);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    const result = await withTimeout(runClause(input), 10_000);
+    return res.json(result);
+  } catch {
+    // Fallback to latest DB result
+    try {
+      const db = getDb();
+      const row = db.prepare("SELECT * FROM clause_results WHERE marketSlug = ?").get(slug) as any;
+      if (!row) {
+        return res.status(404).json({ error: "Market not scored by Clause yet" });
+      }
+      const result: ClauseResult = {
+        marketSlug: row.marketSlug,
+        scoredAt: row.scoredAt,
+        ambiguityScore: row.ambiguityScore,
+        riskLevel: row.riskLevel,
+        veto: Boolean(row.veto),
+        ambiguityFlags: JSON.parse(row.ambiguityFlags),
+        technicality_risks: JSON.parse(row.technicality_risks),
+        resolutionCriteria: row.resolutionCriteria,
+        disputeHistory: Boolean(row.disputeHistory),
+        urgent: Boolean(row.urgent),
+        confidence: row.confidence
+      };
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
