@@ -143,6 +143,19 @@ function migrate(db: Database.Database): void {
       pnl REAL
     );
 
+    -- ── Paper Orders (L4 Execution Engine) ────────────────────────
+
+    CREATE TABLE IF NOT EXISTS paper_orders (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      size REAL NOT NULL,
+      entry_price REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at INTEGER NOT NULL,
+      filled_at INTEGER
+    );
+
     -- ── Markets Cache (stale fallback) ────────────────────────────
 
     CREATE TABLE IF NOT EXISTS markets_cache (

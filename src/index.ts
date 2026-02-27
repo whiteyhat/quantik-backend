@@ -32,7 +32,9 @@ import clauseRouter from "./routes/clause";
 import fluxRouter from "./routes/flux";
 import signalsRouter from "./routes/signals";
 import riskL3Router from "./routes/riskL3";
+import executionRouter from "./routes/execution";
 import { ensureCircuitBreakerTable } from "./risk";
+import { startFillMonitor } from "./execution";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
 
@@ -88,6 +90,7 @@ app.use("/api/clause", clauseRouter);
 app.use("/api/flux", fluxRouter);
 app.use("/api/signals", signalsRouter);
 app.use("/api/risk", riskL3Router);
+app.use("/api/execution", executionRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
@@ -113,4 +116,6 @@ app.listen(PORT, () => {
   startScheduler();
   // Start 60s hot markets scanner
   startHotScanner();
+  // Start L4 fill monitor (30s paper order polling)
+  startFillMonitor();
 });
