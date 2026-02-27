@@ -341,7 +341,24 @@ router.get("/:slug", async (req: Request, res: Response) => {
     const data = await runCli(["markets", "get", slug]);
     res.json(data);
   } catch (err) {
-    handleCliError(res, err);
+    try {
+      const url = `https://gamma-api.polymarket.com/markets?slug=${slug}`;
+      const fallbackRes = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!fallbackRes.ok) {
+        throw new Error(`Gamma API fallback failed with status ${fallbackRes.status}`);
+      }
+      const data: unknown = await fallbackRes.json();
+      if (Array.isArray(data) && data.length > 0) {
+        res.json(data[0]);
+      } else {
+        res.json(data);
+      }
+    } catch (fallbackErr) {
+      handleCliError(res, err);
+    }
   }
 });
 
