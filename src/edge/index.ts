@@ -1,3 +1,4 @@
+// src/edge/index.ts - Edge Calibration Agent
 import { getDb } from "../db/schema";
 import { getFeeConfig } from "./fees";
 import { detectArbitrage, ArbOpportunity } from "./arb";
