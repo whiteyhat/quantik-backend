@@ -27,6 +27,7 @@ import orchestratorRouter from "./routes/orchestrator";
 import { auraRouter } from "./routes/aura";
 import oracleRouter from "./routes/oracle";
 import edgeRouter from "./routes/edge";
+import clauseRouter from "./routes/clause";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
 
@@ -76,6 +77,7 @@ app.use("/api/orchestrator", orchestratorRouter);
 app.use("/api/aura", auraRouter);
 app.use("/api/oracle", oracleRouter);
 app.use("/api/edge", edgeRouter);
+app.use("/api/clause", clauseRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());

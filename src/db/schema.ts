@@ -247,6 +247,54 @@ function migrate(db: Database.Database): void {
       direction TEXT NOT NULL,
       confidence REAL NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS clause_results (
+      marketSlug TEXT PRIMARY KEY,
+      scoredAt INTEGER NOT NULL,
+      ambiguityScore REAL NOT NULL,
+      riskLevel TEXT NOT NULL,
+      veto INTEGER NOT NULL,
+      ambiguityFlags JSON NOT NULL,
+      technicality_risks JSON NOT NULL,
+      resolutionCriteria TEXT NOT NULL,
+      disputeHistory INTEGER NOT NULL,
+      urgent INTEGER NOT NULL,
+      confidence REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS flux_results (
+      marketSlug TEXT PRIMARY KEY,
+      scoredAt INTEGER NOT NULL,
+      liquidity_grade TEXT NOT NULL,
+      spread REAL NOT NULL,
+      slippage_10 REAL NOT NULL,
+      slippage_50 REAL NOT NULL,
+      whale_detected INTEGER NOT NULL,
+      whale_signals INTEGER NOT NULL,
+      depth_imbalance REAL NOT NULL,
+      depth_yes_pct REAL NOT NULL,
+      grade_degrading INTEGER NOT NULL,
+      soft_veto INTEGER NOT NULL,
+      total_liquidity REAL NOT NULL,
+      confidence REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS research_notes (
+      marketSlug TEXT PRIMARY KEY,
+      scoredAt INTEGER NOT NULL,
+      composite_prob REAL NOT NULL,
+      confidence REAL NOT NULL,
+      confidence_interval JSON NOT NULL,
+      consistency_score REAL NOT NULL,
+      recommended_direction TEXT NOT NULL,
+      recommendation TEXT NOT NULL,
+      skip_reason TEXT,
+      thesis TEXT NOT NULL,
+      bear_case TEXT NOT NULL,
+      bull_case TEXT NOT NULL,
+      agent_weights JSON NOT NULL,
+      lucifer_da_score REAL,
+      auto_synthesized INTEGER NOT NULL
+    );
   `);
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
