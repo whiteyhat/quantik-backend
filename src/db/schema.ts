@@ -350,6 +350,23 @@ function migrate(db: Database.Database): void {
     positions_found INTEGER NOT NULL DEFAULT 0
   )`);
 
+  // ── Scanner results (Phase 1 autopilot) ───────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scanner_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slug TEXT NOT NULL,
+      scanned_at INTEGER NOT NULL,
+      sigma_confidence REAL,
+      kelly_fraction REAL,
+      recommendation TEXT,
+      probability REAL,
+      alert_sent INTEGER DEFAULT 0,
+      pipeline_result TEXT,
+      UNIQUE(slug, scanned_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_scanner_slug_time ON scanner_results(slug, scanned_at DESC);
+  `);
+
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
   // Normalise any value > 1.0 to 0–1 scale.
   db.prepare(

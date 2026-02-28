@@ -35,10 +35,14 @@ import riskL3Router from "./routes/riskL3";
 import executionRouter from "./routes/execution";
 import monitoringRouter from "./routes/monitoring";
 import relayRouter from "./routes/relay";
+import scannerRouter from "./routes/scanner";
+import { MarketScanner } from "./scanner/marketScanner";
 import { ensureCircuitBreakerTable } from "./risk";
 import { startFillMonitor } from "./execution";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
+import alertsRouter from "./routes/alerts";
+import { AlertPoller, ensureAlertColumns } from "./alerts/telegramAlert";
 import { ResolutionMonitor } from "./monitoring/resolution";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -96,6 +100,8 @@ app.use("/api/risk", riskL3Router);
 app.use("/api/execution", executionRouter);
 app.use("/api/monitoring", monitoringRouter);
 app.use("/api/relay", relayRouter);
+app.use("/api/alerts", alertsRouter);
+app.use("/api/scanner", scannerRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
@@ -123,6 +129,20 @@ app.listen(PORT, () => {
   startHotScanner();
   // Start L4 fill monitor (30s paper order polling)
   startFillMonitor();
+
+  // Start Phase 1 market scanner (15-minute cron)
+  const autoScanner = new MarketScanner();
+  autoScanner.scan().catch(console.error); // initial scan on startup
+  setInterval(() => {
+    autoScanner.scan().catch(console.error);
+  }, 15 * 60 * 1000);
+
+  // Ensure alert columns exist
+  ensureAlertColumns();
+  // Start 60s alert poller
+  const alertPoller = new AlertPoller();
+  setInterval(() => alertPoller.pollAndAlert().catch(console.error), 60 * 1000);
+  alertPoller.pollAndAlert().catch(console.error); // immediate first run
 
   // Start L5 resolution monitor (check on startup + every 15 minutes)
   const resolutionMonitor = new ResolutionMonitor();
