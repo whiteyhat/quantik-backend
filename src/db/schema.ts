@@ -330,6 +330,26 @@ function migrate(db: Database.Database): void {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN signal_state TEXT");
   }
 
+  // Migration: resolution tracking columns on oracle_results
+  const oracleCols = db.prepare("PRAGMA table_info(oracle_results)").all() as Array<{ name: string }>;
+  if (!oracleCols.some((c) => c.name === "resolved_correctly")) {
+    db.exec("ALTER TABLE oracle_results ADD COLUMN resolved_correctly INTEGER DEFAULT NULL");
+  }
+  if (!oracleCols.some((c) => c.name === "resolved_at")) {
+    db.exec("ALTER TABLE oracle_results ADD COLUMN resolved_at INTEGER DEFAULT NULL");
+  }
+
+  // Migration: unique index on resolutions(pipeline_run_id, market_slug)
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resolutions_run_slug ON resolutions(pipeline_run_id, market_slug)`);
+
+  // Migration: resolution backfill log table
+  db.exec(`CREATE TABLE IF NOT EXISTS resolution_backfill_log (
+    slug TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    backfilled_at INTEGER NOT NULL,
+    positions_found INTEGER NOT NULL DEFAULT 0
+  )`);
+
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
   // Normalise any value > 1.0 to 0–1 scale.
   db.prepare(

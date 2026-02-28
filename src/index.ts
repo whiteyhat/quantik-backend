@@ -39,6 +39,7 @@ import { ensureCircuitBreakerTable } from "./risk";
 import { startFillMonitor } from "./execution";
 import { startScheduler } from "./orchestrator/index";
 import { startHotScanner } from "./oracle/hot-scanner";
+import { ResolutionMonitor } from "./monitoring/resolution";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -122,4 +123,11 @@ app.listen(PORT, () => {
   startHotScanner();
   // Start L4 fill monitor (30s paper order polling)
   startFillMonitor();
+
+  // Start L5 resolution monitor (check on startup + every 15 minutes)
+  const resolutionMonitor = new ResolutionMonitor();
+  resolutionMonitor.checkResolutions().catch(console.error);
+  setInterval(() => {
+    resolutionMonitor.checkResolutions().catch(console.error);
+  }, 15 * 60 * 1000);
 });

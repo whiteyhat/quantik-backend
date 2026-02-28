@@ -2,6 +2,7 @@ import { getDb } from "../db/schema";
 import { detectCombinatorial } from "./arb-detector";
 import { applyLongshotBias } from "./longshot";
 import { buildOraclePrompt, OracleContext } from "./prompt";
+import { findAnalogues } from "../signal/backtester";
 
 export interface OracleResult {
   marketSlug: string;
@@ -116,13 +117,27 @@ export async function runOracle(market: any): Promise<OracleResult> {
   const has_whale_data = whale_signal_p_yes != null;
   const data_sufficiency = ((has_news ? 1 : 0) + (has_whale_data ? 1 : 0) + (has_real_cross_market ? 1 : 0)) / 3;
 
+  // Backtester: find analogues for real hit rate
+  let backtesterData = { hit_rate: null as number | null, sample_size: 0, is_live: false };
+  try {
+    const analogues = findAnalogues(question, market_implied);
+    if (analogues && analogues.sample_size > 0) {
+      backtesterData = {
+        hit_rate: Math.round(analogues.hit_rate * 100),
+        sample_size: analogues.sample_size,
+        is_live: true,
+      };
+    }
+  } catch {
+    // backtester unavailable — keep defaults
+  }
+
   // Track data sources for transparency
   const data_sources: Record<string, string> = {
     news: has_news ? "aura_db" : "none",
     whale: has_whale_data ? "aura_db" : "none",
     cross_market: has_real_cross_market ? "aura_sentiment_proxy" : "none",
-    // TODO: wire to resolved oracle_results table once resolution tracking ships
-    backtester: "stub"
+    backtester: backtesterData.is_live ? "live" : "stub"
   };
 
   const context: OracleContext = {
@@ -134,10 +149,9 @@ export async function runOracle(market: any): Promise<OracleResult> {
     divergence_warning: divergence ? "WARNING: High divergence across markets." : undefined,
     whale_signal: whale_signal_p_yes ? `Whale yes %: ${(whale_signal_p_yes * 100).toFixed(1)}%` : undefined,
     news_headlines,
-    // TODO: wire to resolved oracle_results table once resolution tracking ships
-    backtester_hit_rate: 68,
-    sample_size: 150,
-    backtester_is_live: false
+    backtester_hit_rate: backtesterData.hit_rate ?? 68,
+    sample_size: backtesterData.sample_size,
+    backtester_is_live: backtesterData.is_live
   };
 
   const prompt = buildOraclePrompt(context);
@@ -207,7 +221,7 @@ export async function runOracle(market: any): Promise<OracleResult> {
     days_to_resolution,
     ensemble_variance,
     longshot_adjusted,
-    backtester_is_live: false,
+    backtester_is_live: backtesterData.is_live,
     data_sources
   };
 
