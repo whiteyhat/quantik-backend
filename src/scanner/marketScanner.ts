@@ -407,7 +407,7 @@ export class MarketScanner {
     }
 
     // Live execution via polymarket CLI
-    const { runCli } = await import("../lib/cli");
+    const { runCli } = await import("../cli");
     try {
       const cliArgs = ["clob", "create-order",
         "--token-id", result.slug,
