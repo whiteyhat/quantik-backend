@@ -329,6 +329,9 @@ function migrate(db: Database.Database): void {
   if (!cols.some((c) => c.name === "signal_state")) {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN signal_state TEXT");
   }
+  if (!cols.some((c) => c.name === "alert_sent")) {
+    db.exec("ALTER TABLE pipeline_runs ADD COLUMN alert_sent INTEGER DEFAULT 0");
+  }
 
   // Migration: resolution tracking columns on oracle_results
   const oracleCols = db.prepare("PRAGMA table_info(oracle_results)").all() as Array<{ name: string }>;
