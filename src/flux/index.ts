@@ -1,5 +1,5 @@
 // src/flux/index.ts - Flux Liquidity Agent
-// CLI primary → CLOB API fallback → Grade D soft veto
+// CLI primary → graceful degradation (empty book → Grade D) — no CLOB API
 import { runCli } from "../cli";
 import { getDb } from "../db/schema";
 
@@ -31,29 +31,20 @@ interface OrderbookData {
   asks?: OrderbookLevel[];
 }
 
-// ── Fetch orderbook: CLI primary, API fallback ────────────────
-
-async function fetchOrderbookCli(tokenId: string): Promise<OrderbookData> {
-  const raw = await runCli(["clob", "orderbook", tokenId]);
-  return raw as OrderbookData;
-}
-
-async function fetchOrderbookApi(tokenId: string): Promise<OrderbookData> {
-  const url = `https://clob.polymarket.com/orderbook/${tokenId}`;
-  const resp = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  if (!resp.ok) throw new Error(`CLOB API ${resp.status}`);
-  return (await resp.json()) as OrderbookData;
-}
+// ── Fetch orderbook: CLI only (no CLOB API) ────────────────────
+// Per architecture decision: Polymarket CLI is the sole data source.
+// If CLI fails (token unavailable, network), degrade gracefully to empty book.
 
 async function fetchOrderbook(
   tokenId: string
 ): Promise<{ book: OrderbookData; source: "cli" | "api" }> {
   try {
-    const book = await fetchOrderbookCli(tokenId);
-    return { book, source: "cli" };
-  } catch {
-    const book = await fetchOrderbookApi(tokenId);
-    return { book, source: "api" };
+    const raw = await runCli(["clob", "orderbook", tokenId]);
+    return { book: raw as OrderbookData, source: "cli" };
+  } catch (err) {
+    console.warn(`[Flux] CLI orderbook failed for ${tokenId}: ${(err as Error).message} — degrading to empty book`);
+    // Return empty book — Flux will grade as D with soft_veto=false
+    return { book: { bids: [], asks: [] }, source: "cli" };
   }
 }
 
