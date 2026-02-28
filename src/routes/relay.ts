@@ -32,8 +32,8 @@ interface SessionEntry {
 // ── Config ─────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
-const GEMINI_MODEL = "gemini-2.5-flash-preview-04-17";
-const GEMINI_FALLBACK = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_FALLBACK = "gemini-2.0-flash-lite";
 const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_HISTORY = 10;
