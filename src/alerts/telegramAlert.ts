@@ -1,6 +1,6 @@
 /**
  * telegramAlert.ts — Quantik Telegram Signal Alert Engine
- * Sends formatted signal alerts to Carlos with inline Execute/Skip buttons.
+ * Sends informational FYI alerts to Carlos. No buttons, no approval required.
  */
 
 import { getDb } from "../db/schema";
@@ -78,13 +78,8 @@ function esc(text: string): string {
 
 // ── Inline keyboard ────────────────────────────────────────────────────────
 
-function buildInlineKeyboard(r: ScanResult) {
-  const side = r.recommendation === "BET YES" ? "YES" : "NO";
-  return {
-    inline_keyboard: [
-      [
-        { text: "✅ Execute", callback_data: `exec:${r.slug}:${side}:${r.kelly_amount.toFixed(2)}` },
-        { text: "❌ Skip",    callback_data: `skip:${r.slug}` },
+:${side}:${r.kelly_amount.toFixed(2)}` },
+        // { text: "❌ Skip",    callback_data: `skip:${r.slug}` },
       ],
       [
         { text: "📊 Details",  callback_data: `details:${r.slug}` },
@@ -102,7 +97,6 @@ export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
       chat_id: CHAT_ID,
       text: formatSignalAlert(result),
       parse_mode: "HTML",
-      reply_markup: buildInlineKeyboard(result),
     });
     return true;
   } catch (err) {
