@@ -416,8 +416,8 @@ export class MarketScanner {
         "--size", amount.toFixed(2),
         "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
       ];
-      const output = await runCli(cliArgs, { timeout: 15000 });
-      const orderId = (output.match(/order[_-]?id[:\s]+([a-f0-9-]+)/i) ?? [])[1] ?? "unknown";
+      const output = await runCli(cliArgs) as Record<string, unknown>;
+      const orderId = String((output as any)?.id ?? (output as any)?.order_id ?? "unknown");
 
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id) VALUES (?, ?, ?, ?, 'placed', ?)").run(
         result.slug, side, amount, Date.now(), orderId
