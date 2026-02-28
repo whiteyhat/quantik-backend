@@ -173,22 +173,75 @@ async function runClause(_slug: string): Promise<AgentResult> {
   };
 }
 
-async function runLucifer(_slug: string): Promise<AgentResult> {
-  return {
-    agent: "lucifer",
-    status: "complete",
-    data: {
-      devils_advocate_score: 0.31,
-      bias_flags: [
-        "Recency bias — recent news may not reflect long-term base rate",
-        "Liquidity illusion — thin orderbook may not absorb large positions",
-      ],
-      counter_thesis: "Market may be underpricing tail risk of regulatory intervention. Similar markets resolved ambiguously in Q3.",
-      worst_case: "Full loss if resolution is disputed or event cancelled",
-      adjusted_confidence: -0.05,
-      pass: true,
-    },
-  };
+async function runLucifer(slug: string, agentResults?: Record<string, unknown>): Promise<AgentResult> {
+  try {
+    // Pull live data from other agents already computed
+    const clause = agentResults?.clause as any;
+    const edge = agentResults?.edge as any;
+    const aura = agentResults?.aura as any;
+    const oracle = agentResults?.oracle as any;
+
+    // Dynamic risk factors based on real agent data
+    const ambiguityScore: number = clause?.ambiguityScore ?? 0.4;
+    const kellyFrac: number = edge?.kelly_fraction ?? edge?.kelly_recommended ?? 0;
+    const veto: boolean = clause?.veto ?? false;
+    const shiftDetected: boolean = aura?.shiftDetected ?? false;
+    const riskLevel: string = clause?.riskLevel ?? "UNKNOWN";
+
+    // Build dynamic bias flags
+    const biasFlags: string[] = [];
+
+    if (ambiguityScore > 0.5) biasFlags.push(`High resolution ambiguity (score=${ambiguityScore.toFixed(2)}) — resolution criteria may be disputed`);
+    if (kellyFrac > 0.3) biasFlags.push("Overconfidence risk — Kelly fraction is unusually high, check if model is overfitting recent data");
+    if (shiftDetected) biasFlags.push("Sentiment shift detected — crowd may be chasing momentum, not fundamentals");
+    if (riskLevel === "HIGH") biasFlags.push("Clause flagged HIGH resolution risk — historical analogues show dispute probability > 20%");
+    if (!biasFlags.length) biasFlags.push("Recency bias — check if recent news is driving edge or just noise");
+    biasFlags.push("Liquidity illusion — thin orderbook may not absorb position without slippage");
+
+    // Dynamic devil's advocate score
+    const baseAdversarialScore = Math.min(0.9, 0.25 + ambiguityScore * 0.4 + (veto ? 0.3 : 0));
+    const adjustedConf = veto ? -0.20 : ambiguityScore > 0.6 ? -0.10 : -0.03;
+
+    // Dynamic counter-thesis
+    const counterThesis = veto
+      ? `Clause vetoed this trade — resolution criteria are ambiguous enough that a dispute is likely. Market may resolve differently than expected.`
+      : ambiguityScore > 0.5
+      ? `Resolution ambiguity score ${ambiguityScore.toFixed(2)} suggests the criteria could be interpreted multiple ways. Consider the downside scenario carefully.`
+      : `Edge looks clean but base rates for similar markets often disappoint. Verify the Kelly estimate is not overfit to recent data.`;
+
+    const worstCase = veto
+      ? "Full loss with dispute risk — Clause recommends no position"
+      : `Partial loss if resolution is disputed or event timing slips`;
+
+    return {
+      agent: "lucifer",
+      status: "complete",
+      data: {
+        devils_advocate_score: parseFloat(baseAdversarialScore.toFixed(2)),
+        bias_flags: biasFlags,
+        counter_thesis: counterThesis,
+        worst_case: worstCase,
+        adjusted_confidence: parseFloat(adjustedConf.toFixed(3)),
+        pass: !veto && ambiguityScore < 0.7,
+        slug,
+        riskLevel,
+        ambiguityScore,
+      },
+    };
+  } catch {
+    return {
+      agent: "lucifer",
+      status: "complete",
+      data: {
+        devils_advocate_score: 0.35,
+        bias_flags: ["Data unavailable — applying conservative adversarial penalty"],
+        counter_thesis: "Unable to run full devil's advocate analysis. Treat signal with additional caution.",
+        worst_case: "Full loss if underlying assumptions are wrong",
+        adjusted_confidence: -0.08,
+        pass: true,
+      },
+    };
+  }
 }
 
 function toAgentData<T>(raw: unknown): T | undefined {
@@ -320,7 +373,7 @@ router.post("/run", async (req: Request, res: Response) => {
     { name: "oracle", fn: runOracle },
     { name: "edge", fn: runEdge },
     { name: "clause", fn: runClause },
-    { name: "lucifer", fn: runLucifer },
+    { name: "lucifer", fn: (slug) => runLucifer(slug, results) },
   ];
 
   const results: Record<string, unknown> = {};

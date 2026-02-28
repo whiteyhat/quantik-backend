@@ -37,7 +37,7 @@ auraRouter.get("/:slug", async (req, res) => {
     const market = await fetchMarketBySlug(slug);
     const result = await withTimeout(
       runAura({ slug, question: market.question, category: market.category }),
-      10_000
+      25_000
     );
     return res.json(result);
   } catch {
