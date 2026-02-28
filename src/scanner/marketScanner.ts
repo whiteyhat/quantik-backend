@@ -169,17 +169,13 @@ export class MarketScanner {
   async fetchTopMarkets(limit: number): Promise<Market[]> {
     let rawMarkets: unknown[];
 
-    try {
-      const result = await runPolymarketCli(["markets", "list", "--limit", String(limit)]);
-      rawMarkets = Array.isArray(result) ? result : [];
-      if (rawMarkets.length === 0) throw new Error("Empty CLI result");
-    } catch (err) {
-      console.warn("[Scanner] polymarket-cli unavailable, using Gamma API:", err);
-      // Gamma API — fetch 200 markets ordered by volume, then sort by competitiveness
-      const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&limit=200&order=volume24hr&ascending=false`);
-      const data = await res.json() as unknown[];
-      rawMarkets = Array.isArray(data) ? data : [];
-    }
+    // Always use Gamma API (polymarket-cli returns oldest markets by ID, not active ones)
+    console.log("[Scanner] Fetching from Gamma API...");
+    const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=200&order=volume24hr&ascending=false`);
+    if (!res.ok) throw new Error(`Gamma API error: ${res.status}`);
+    const data = await res.json() as unknown[];
+    rawMarkets = Array.isArray(data) ? data : [];
+    console.log(`[Scanner] Gamma API returned ${rawMarkets.length} raw markets`);
 
     const now = Date.now();
     // date filter: only skip already-closed markets
