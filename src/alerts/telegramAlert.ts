@@ -76,18 +76,7 @@ function esc(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
-// ── Inline keyboard ────────────────────────────────────────────────────────
-
-:${side}:${r.kelly_amount.toFixed(2)}` },
-        // { text: "❌ Skip",    callback_data: `skip:${r.slug}` },
-      ],
-      [
-        { text: "📊 Details",  callback_data: `details:${r.slug}` },
-        { text: "🔕 Mute 1hr", callback_data: `mute:3600` },
-      ],
-    ],
-  };
-}
+// No inline keyboard — FYI only alerts, zero human approval required
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
