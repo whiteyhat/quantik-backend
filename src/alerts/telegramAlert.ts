@@ -25,6 +25,11 @@ export interface ScanResult {
   sigma_thesis: string;
   clause_risk_level: string;
   clause_summary: string;
+  // Execution metadata
+  orderId?: string;
+  executionStatus?: "placed" | "failed" | "paper";
+  pnlToday?: number;
+  tradesToday?: number;
 }
 
 // ── Core HTTP helper ───────────────────────────────────────────────────────
@@ -48,10 +53,10 @@ async function tgPost(method: string, body: Record<string, unknown>): Promise<un
 function formatSignalAlert(r: ScanResult): string {
   const confPct   = Math.round(r.sigma_confidence * 100);
   const kellyFmt  = (r.kelly_fraction * 100).toFixed(1);
-  const oraclePct = Math.round((r.oracle_prob ?? r.probability) * 100);
-  const mktPct    = Math.round((r.market_price ?? r.probability) * 100);
+  const oraclePct = Math.round((r.oracle_prob ?? 0) * 100);
+  const mktPct    = Math.round((r.market_price ?? 0) * 100);
   const edgePct   = Math.round((r.edge ?? 0) * 100);
-  const betAmt    = (r.kelly_amount ?? r.kellyFraction * 10).toFixed(2);
+  const betAmt    = (r.kelly_amount ?? 0).toFixed(2);
   const side      = r.recommendation.replace("BET_", "");
   const status    = r.executionStatus === "paper" ? "PAPER" : r.executionStatus === "placed" ? "LIVE" : "?";
   const orderId   = r.orderId ?? "unknown";
