@@ -387,6 +387,12 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
   `);
 
+  // Dedup executions + unique index per slug per day
+  try {
+    db.exec(`DELETE FROM executions WHERE rowid NOT IN (SELECT MIN(rowid) FROM executions GROUP BY slug, DATE(executed_at/1000,"unixepoch"))`);
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_executions_slug_day ON executions (slug, DATE(executed_at/1000,"unixepoch"))`);
+  } catch (e) { console.log("[schema] executions index:", e); }
+
   // Add execution columns to scanner_results if missing
   try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_status TEXT DEFAULT NULL"); } catch {}
   try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_id INTEGER DEFAULT NULL"); } catch {}

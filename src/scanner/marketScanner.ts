@@ -39,9 +39,89 @@ export interface ScanResult {
   clause_summary?: string;
 }
 
+// ── Real Agent Pipeline ───────────────────────────────────────
+
+interface AgentBundle {
+  oracle: { estimated_true_prob: number; confidence: number; edge: number };
+  edge_agent: { kelly_fraction: number; kelly_amount: number };
+  sigma: { confidence: number; decision: string; thesis: string };
+  clause: { risk_level: string; summary: string; veto: boolean };
+}
+const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
+const AGENT_CACHE_TTL = 15 * 60 * 1000;
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:3001";
+
+async function fetchWithTimeout(url: string, ms = 8000): Promise<any> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) return null;
+    return r.json();
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
+async function runRealPipeline(slug: string, yesPrice: number): Promise<{
+  sigma: { confidence: number; decision: string; thesis: string };
+  edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount: number };
+  clause: { veto: boolean; risk_level: string; summary: string };
+  pipelineResult: object;
+}> {
+  const cached = agentCache.get(slug);
+  if (cached && Date.now() - cached.ts < AGENT_CACHE_TTL) {
+    const d = cached.data;
+    return {
+      sigma: d.sigma,
+      edge: { kelly_fraction: d.edge_agent.kelly_fraction, estimated_true_prob: d.oracle.estimated_true_prob, kelly_amount: d.edge_agent.kelly_amount },
+      clause: d.clause,
+      pipelineResult: d,
+    };
+  }
+
+  const [oracleRes, edgeRes, sigmaRes, clauseRes] = await Promise.allSettled([
+    fetchWithTimeout(`${BACKEND_URL}/api/oracle/${slug}`),
+    fetchWithTimeout(`${BACKEND_URL}/api/edge/${slug}`),
+    fetchWithTimeout(`${BACKEND_URL}/api/sigma/${slug}`),
+    fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`),
+  ]);
+
+  const oracle = (oracleRes.status === "fulfilled" && oracleRes.value) ? oracleRes.value : { estimated_true_prob: yesPrice, confidence: 0.3, edge: 0 };
+  const edgeData = (edgeRes.status === "fulfilled" && edgeRes.value) ? edgeRes.value : { kelly_fraction: 0, kelly_amount: 0 };
+  const sigmaData = (sigmaRes.status === "fulfilled" && sigmaRes.value) ? sigmaRes.value : { confidence: 0, decision: "SKIP", thesis: "Agent unavailable" };
+  const clauseData = (clauseRes.status === "fulfilled" && clauseRes.value) ? clauseRes.value : { risk_level: "UNKNOWN", summary: "Clause unavailable", veto: false };
+
+  // Clause veto overrides everything
+  if (clauseData.veto) {
+    sigmaData.confidence = 0;
+    sigmaData.decision = "SKIP";
+  }
+
+  const bundle: AgentBundle = { oracle, edge_agent: edgeData, sigma: sigmaData, clause: clauseData };
+  agentCache.set(slug, { ts: Date.now(), data: bundle });
+
+  return {
+    sigma: sigmaData,
+    edge: { kelly_fraction: edgeData.kelly_fraction ?? 0, estimated_true_prob: oracle.estimated_true_prob ?? yesPrice, kelly_amount: edgeData.kelly_amount ?? 0 },
+    clause: clauseData,
+    pipelineResult: bundle,
+  };
+}
+
+// ── Market Scoring ────────────────────────────────────────────
+
+function scoreMarket(volume: number, daysToExpiry: number, yesPrice: number, liquidity: number, maxVol: number, maxLiq: number): number {
+  const volScore = maxVol > 0 ? Math.log10(Math.max(volume, 1)) / Math.log10(Math.max(maxVol, 2)) : 0;
+  const urgencyScore = Math.min(1, 3 / Math.max(daysToExpiry, 0.1));
+  const centralityScore = 1 - Math.abs(yesPrice - 0.5) / 0.5;
+  const liqScore = maxLiq > 0 ? Math.log10(Math.max(liquidity, 1)) / Math.log10(Math.max(maxLiq, 2)) : 0;
+  return (volScore * 0.35) + (urgencyScore * 0.25) + (centralityScore * 0.20) + (liqScore * 0.20);
+}
+
 // ── State ──────────────────────────────────────────────────────
 
 let scannerRunning = false;
+let scannerHealthy = false;
 let lastScanAt = 0;
 let scannedToday = 0;
 let alertsTriggered = 0;
@@ -128,6 +208,24 @@ export class MarketScanner {
 
     scannerRunning = true;
     lastScanAt = Date.now();
+
+    // Health check: verify DB is accessible before scanning
+    try {
+      const db = getDb();
+      db.prepare("SELECT COUNT(*) FROM executions").get();
+      scannerHealthy = true;
+    } catch (e) {
+      console.error("[Scanner] Health check failed, skipping scan:", e);
+      scannerHealthy = false;
+      scannerRunning = false;
+      return;
+    }
+
+    if (!scannerHealthy) {
+      console.log("[Scanner] Scanner unhealthy, skipping cycle");
+      scannerRunning = false;
+      return;
+    }
 
     // Reset daily counter if day changed
     const today = new Date().toDateString();
@@ -224,17 +322,18 @@ export class MarketScanner {
       }
 
       // Filter criteria:
-      // 1. Not already closed
+      // 1. Not already closed + must close within 96h
       if (endDate) {
         const closeTime = new Date(endDate).getTime();
         if (closeTime < now) continue; // already closed
+        if (closeTime - now > 96 * 60 * 60 * 1000) continue; // too far out
       }
 
-      // 2. Volume > $5k (lowered to surface more candidates)
-      if (volume < 5000) continue;
+      // 2. Volume > $30k
+      if (volume < 30000) continue;
 
-      // 3. Price between 0.10 and 0.90 (avoid near-certain only)
-      if (yesPrice < 0.10 || yesPrice > 0.90) continue;
+      // 3. Price between 0.18 and 0.82
+      if (yesPrice < 0.18 || yesPrice > 0.82) continue;
 
       markets.push({
         slug,
@@ -246,10 +345,17 @@ export class MarketScanner {
       });
     }
 
-    // Sort: closing soonest first (highest urgency)
-    markets.sort((a, b) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
+    // Score and rank markets
+    const maxVol = Math.max(...markets.map(m => m.volume), 1);
+    const maxLiq = Math.max(...markets.map(m => m.liquidity), 1);
 
-    return markets.slice(0, limit);
+    const scored = markets.map(m => ({
+      market: m,
+      score: scoreMarket(m.volume, daysUntilClose(m.endDate), m.yesPrice, m.liquidity, maxVol, maxLiq),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+
+    return scored.slice(0, Math.min(limit, 20)).map(s => s.market);
   }
 
   async shouldSkip(slug: string): Promise<boolean> {
@@ -264,18 +370,38 @@ export class MarketScanner {
   }
 
   async runPipelineForMarket(slug: string, yesPrice: number = 0.5): Promise<ScanResult> {
-    const { sigma, edge, pipelineResult } = buildPipelineResult(slug, yesPrice);
+    let sigma: { confidence: number; decision: string; thesis?: string };
+    let edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount?: number };
+    let pipelineResult: object;
+    let clause: { veto?: boolean; risk_level?: string; summary?: string } | undefined;
 
-    const recommendation = sigma.decision === "BET_YES"
-      ? "BET_YES"
-      : sigma.decision === "BET_NO"
-        ? "BET_NO"
-        : "SKIP";
+    try {
+      const real = await runRealPipeline(slug, yesPrice);
+      sigma = real.sigma;
+      edge = real.edge;
+      pipelineResult = real.pipelineResult;
+      clause = real.clause;
+    } catch {
+      // Fallback to simulated pipeline
+      const fallback = buildPipelineResult(slug, yesPrice);
+      sigma = fallback.sigma;
+      edge = fallback.edge;
+      pipelineResult = fallback.pipelineResult;
+    }
+
+    const recommendation = clause?.veto
+      ? "VETO"
+      : sigma.decision === "BET_YES"
+        ? "BET_YES"
+        : sigma.decision === "BET_NO"
+          ? "BET_NO"
+          : "SKIP";
 
     const shouldAlert =
       sigma.confidence >= 0.50 &&
       edge.kelly_fraction >= 0.05 &&
-      recommendation !== "SKIP";
+      recommendation !== "SKIP" &&
+      recommendation !== "VETO";
 
     return {
       slug,
@@ -382,25 +508,33 @@ export class MarketScanner {
     const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "5", 10);
     const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");
 
-    // Circuit breaker: daily trade count
+    // Circuit breaker reads — fail closed on DB errors
+    let tradesRow: { cnt: number };
+    let pnlRow: { total: number };
+    let recent: unknown;
     const today = new Date(); today.setHours(0,0,0,0);
     const todayTs = today.getTime();
-    const tradesRow = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+
+    try {
+      tradesRow = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+      pnlRow = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
+      const sixHAgo = Date.now() - 6 * 60 * 60 * 1000;
+      recent = db.prepare("SELECT id FROM executions WHERE slug = ? AND executed_at >= ?").get(result.slug, sixHAgo);
+    } catch (e) {
+      console.error("[autoExecute] Circuit breaker DB read failed — fail closed:", e);
+      return;
+    }
+
     if (tradesRow.cnt >= maxPerDay) {
       console.log(`[autoExecute] MAX_TRADES_PER_DAY (${maxPerDay}) reached — skipping ${result.slug}`);
       return;
     }
 
-    // Circuit breaker: daily P&L loss limit
-    const pnlRow = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
     if (pnlRow.total <= -dailyLossLimit) {
       console.log(`[autoExecute] DAILY_LOSS_LIMIT hit ($${pnlRow.total.toFixed(2)}) — pausing`);
       return;
     }
 
-    // Circuit breaker: rate limit 1 trade per slug per 6h
-    const sixHAgo = Date.now() - 6 * 60 * 60 * 1000;
-    const recent = db.prepare("SELECT id FROM executions WHERE slug = ? AND executed_at >= ?").get(result.slug, sixHAgo);
     if (recent) {
       console.log(`[autoExecute] Rate limit: already traded ${result.slug} in last 6h`);
       return;

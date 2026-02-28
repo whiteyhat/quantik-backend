@@ -34,7 +34,8 @@ import signalsRouter from "./routes/signals";
 import riskL3Router from "./routes/riskL3";
 import executionRouter from "./routes/execution";
 import monitoringRouter from "./routes/monitoring";
-import relayRouter from "./routes/relay";
+import relayRouter, { warmGemini } from "./routes/relay";
+import performanceRouter from "./routes/performance";
 import scannerRouter from "./routes/scanner";
 import { MarketScanner } from "./scanner/marketScanner";
 import { ensureCircuitBreakerTable } from "./risk";
@@ -44,6 +45,7 @@ import { startHotScanner } from "./oracle/hot-scanner";
 import alertsRouter from "./routes/alerts";
 import { AlertPoller, ensureAlertColumns } from "./alerts/telegramAlert";
 import { ResolutionMonitor } from "./monitoring/resolution";
+import { startPnlSettler } from "./settlers/pnlSettler";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -102,6 +104,7 @@ app.use("/api/monitoring", monitoringRouter);
 app.use("/api/relay", relayRouter);
 app.use("/api/alerts", alertsRouter);
 app.use("/api/scanner", scannerRouter);
+app.use("/api/performance", performanceRouter);
 
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
@@ -129,6 +132,10 @@ app.listen(PORT, () => {
   startHotScanner();
   // Start L4 fill monitor (30s paper order polling)
   startFillMonitor();
+
+  // Pre-warm Gemini + start PnL settler
+  warmGemini().catch(() => {});
+  startPnlSettler();
 
   // Start Phase 1 market scanner (15-minute cron)
   const autoScanner = new MarketScanner();

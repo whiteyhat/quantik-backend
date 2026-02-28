@@ -336,6 +336,7 @@ router.post("/stream", async (req: Request, res: Response) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
+  res.write(`data: ${JSON.stringify({ type: "heartbeat" })}\n\n`);
 
   const sessionId = (req.headers["x-session-id"] as string) || uuidv4();
 
@@ -496,5 +497,16 @@ router.get("/health", async (_req: Request, res: Response) => {
     activeSessions: sessions.size,
   });
 });
+
+export async function warmGemini(): Promise<void> {
+  try {
+    await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: "hi" }] }], generationConfig: { maxOutputTokens: 1 } }) }
+    );
+    console.log("[relay] Gemini pre-warm OK");
+  } catch { console.log("[relay] Gemini pre-warm failed (non-fatal)"); }
+}
 
 export default router;
