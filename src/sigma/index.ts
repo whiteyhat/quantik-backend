@@ -24,6 +24,7 @@ export interface ResearchNote {
   agent_weights: Record<string, number>;
   lucifer_da_score?: number;
   auto_synthesized: boolean;
+  data_sources?: Record<string, string>;
 }
 
 export interface SigmaInputs {
@@ -89,8 +90,8 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
   const edge_dir_mult = edge?.direction === "YES" ? 1 : -1;
   const p_edge = edge?.net_edge ? Math.max(0, Math.min(1, p_market + edge_dir_mult * edge.net_edge)) : p_oracle;
   const p_aura = aura?.sentimentDelta ? Math.max(0, Math.min(1, p_market + aura.sentimentDelta)) : p_market;
-  const p_clause = p_market;
-  const p_flux = p_market;
+  const p_clause = clause?.veto === true ? 0.2 : (clause?.adjusted_probability ?? p_market);
+  const p_flux = (flux && flux.depth_yes_pct != null) ? flux.depth_yes_pct : p_market;
 
   const agent_probs = [p_oracle, p_edge, p_aura, p_clause, p_flux];
   const mean_p = agent_probs.reduce((a, b) => a + b, 0) / agent_probs.length;
@@ -175,6 +176,14 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
 
   let resultNote: ResearchNote;
 
+  // Build data_sources map showing what's live vs proxy
+  const data_sources: Record<string, string> = {
+    p_flux: (flux && flux.depth_yes_pct != null) ? "flux_depth_live" : "market_proxy",
+    p_clause: clause?.veto === true ? "veto_penalty" : (clause?.adjusted_probability != null ? "clause_adjusted" : "market_proxy"),
+    p_oracle: oracle?.calibrated_prob != null ? "oracle_calibrated" : "market_proxy",
+    p_aura: aura?.sentimentDelta != null ? "aura_sentiment" : "market_proxy"
+  };
+
   if (variance < 0.1) {
     // Auto-synthesis
     resultNote = {
@@ -192,7 +201,8 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
       bull_case: "Unanimous quantitative edge.",
       agent_weights,
       lucifer_da_score: lucifer?.devils_advocate_score,
-      auto_synthesized: true
+      auto_synthesized: true,
+      data_sources
     };
   } else {
     // LLM Fallback
@@ -234,7 +244,8 @@ Provide a JSON object with:
         bull_case: llmResult.bull_case || "Fallback bull",
         agent_weights,
         lucifer_da_score: lucifer?.devils_advocate_score,
-        auto_synthesized: false
+        auto_synthesized: false,
+        data_sources
       };
     } catch (err: any) {
       console.error("Gemini fallback failed:", err);
@@ -254,7 +265,8 @@ Provide a JSON object with:
         bull_case: "N/A",
         agent_weights,
         lucifer_da_score: lucifer?.devils_advocate_score,
-        auto_synthesized: true
+        auto_synthesized: true,
+        data_sources
       };
     }
   }
