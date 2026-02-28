@@ -1,6 +1,8 @@
-import { ApifyClient } from "apify-client";
 import { getDb } from "../db/schema";
 import { extractKeywords, extractMainKeyword } from "./keywords";
+
+const EXA_API_KEY = process.env.EXA_API_KEY || "";
+const NEWS_API_KEY = process.env.NEWS_API_KEY || "";
 
 export interface AuraResult {
   marketSlug: string;
@@ -28,16 +30,6 @@ export interface AuraResult {
   error?: string;
 }
 
-const apifyClient = new ApifyClient({
-  token: process.env.APIFY_API_TOKEN || "mock-token",
-});
-
-const ACTOR_TWITTER = process.env.APIFY_ACTOR_TWITTER || "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest";
-const ACTOR_TELEGRAM = process.env.APIFY_ACTOR_TELEGRAM || "data_dino/telegram-group-scraper";
-const ACTOR_NEWS = process.env.APIFY_ACTOR_NEWS || "lhotanova/google-news-scraper";
-const ACTOR_TRENDS = process.env.APIFY_ACTOR_TRENDS || "apify/google-trends-scraper";
-const ACTOR_LEADERBOARD = process.env.APIFY_ACTOR_LEADERBOARD || "saswave/polymarket-leaderboard-scraper";
-
 function parseWeights(envVar: string | undefined, defaultWeights: Record<string, number>) {
   if (envVar) {
     try {
@@ -63,119 +55,250 @@ async function runWithTimeout<T>(promise: Promise<T>, ms: number = 20000): Promi
   return Promise.race([promise, timeout<T>(ms)]);
 }
 
-// Leaderboard Cache TTL: 30 mins
-let leaderboardCache: { data: any; timestamp: number } | null = null;
-const LEADERBOARD_CACHE_TTL = 30 * 60 * 1000;
+// Market data cache TTL: 10 mins
+let marketDataCache: { data: { yesProbability: number; volume24h: number }; slug: string; timestamp: number } | null = null;
+const MARKET_CACHE_TTL = 10 * 60 * 1000;
+
+// --- Free data source functions ---
+
+const POSITIVE_KEYWORDS = ["likely", "will", "yes", "bullish", "confirmed", "happening", "surge", "rally", "up", "win"];
+const NEGATIVE_KEYWORDS = ["unlikely", "no", "bearish", "cancelled", "delayed", "doubt", "crash", "down", "lose", "fail"];
+
+async function searchExa(query: string, daysBack: number): Promise<{ title: string; snippet: string; url: string }[]> {
+  try {
+    const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    const res = await fetch("https://api.exa.ai/search", {
+      method: "POST",
+      headers: { "x-api-key": EXA_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        numResults: 10,
+        startPublishedDate: startDate,
+      }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { results?: { title?: string; text?: string; url?: string }[] };
+    return (data.results || []).map((r) => ({
+      title: r.title || "",
+      snippet: r.text || "",
+      url: r.url || "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchNews(keyword: string): Promise<{ title: string; publishedAt: string }[]> {
+  try {
+    const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keyword)}&pageSize=5&sortBy=publishedAt&apiKey=${NEWS_API_KEY}`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json() as { articles?: { title?: string; publishedAt?: string }[] };
+    return (data.articles || []).map((a) => ({
+      title: a.title || "",
+      publishedAt: a.publishedAt || "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function getMarketData(slug: string): Promise<{ yesProbability: number; volume24h: number }> {
+  try {
+    const res = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}&order=volume24hr&limit=5`);
+    if (!res.ok) return { yesProbability: 0.5, volume24h: 0 };
+    const data = await res.json() as { outcomePrices?: string; volume24hr?: number }[];
+    if (!Array.isArray(data) || data.length === 0) return { yesProbability: 0.5, volume24h: 0 };
+    const market = data[0];
+    let yesProbability = 0.5;
+    if (market.outcomePrices) {
+      try {
+        const prices = JSON.parse(market.outcomePrices) as string[];
+        yesProbability = parseFloat(prices[0]) || 0.5;
+      } catch {
+        yesProbability = 0.5;
+      }
+    }
+    return { yesProbability, volume24h: market.volume24hr || 0 };
+  } catch {
+    return { yesProbability: 0.5, volume24h: 0 };
+  }
+}
+
+async function computeSocialSentiment(query: string): Promise<{ score: number; volumeDelta: number; resultCount: number }> {
+  const socialQuery = `${query} site:twitter.com OR site:x.com`;
+  const [recent, older] = await Promise.all([
+    searchExa(socialQuery, 7),
+    searchExa(socialQuery, 30),
+  ]);
+
+  if (recent.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
+
+  // Sentiment from result text
+  let positiveCount = 0;
+  let negativeCount = 0;
+  for (const item of recent) {
+    const text = `${item.title} ${item.snippet}`.toLowerCase();
+    for (const kw of POSITIVE_KEYWORDS) {
+      if (text.includes(kw)) { positiveCount++; break; }
+    }
+    for (const kw of NEGATIVE_KEYWORDS) {
+      if (text.includes(kw)) { negativeCount++; break; }
+    }
+  }
+
+  const rawScore = (positiveCount - negativeCount) / Math.max(recent.length, 1);
+  const score = Math.max(-1, Math.min(1, rawScore));
+
+  // Volume delta: compare 7d vs 30d result counts
+  const olderCount = Math.max(older.length, 1);
+  const volumeDelta = (recent.length / olderCount) - 1;
+
+  return { score, volumeDelta, resultCount: recent.length };
+}
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
   if (process.env.APIFY_MOCK === "true") {
     return getMockResult(market.slug);
   }
 
-  const keywords = extractKeywords(market.question);
   const mainKeyword = extractMainKeyword(market.question);
   const sourceStatus: Record<string, "ok" | "unavailable" | "timeout"> = {};
   const sourcesUsed: string[] = [];
-  
-  // Apify Inputs
-  const twitterInput = {
-    searchTerms: [market.question.slice(0, 100)],
-    maxItems: 50,
-    lang: "en",
-    sort: "Latest"
-  };
-  
-  const telegramInput = {
-    channels: ["polymarketwhales", "polymarket_signals", "predictionmarkets"],
-    limit: 100,
-    filterByKeywords: keywords
-  };
-  
-  const newsInput = {
-    query: market.question.slice(0, 80),
-    maxItems: 20,
-    language: "en",
-    dateRange: "past24hours"
-  };
-  
-  const trendsInput = {
-    searchTerms: [mainKeyword],
-    timeRange: "now 7-d",
-    geo: "US"
+
+  // Fetch market data with cache
+  const fetchMarketDataCached = async () => {
+    if (marketDataCache && marketDataCache.slug === market.slug && Date.now() - marketDataCache.timestamp < MARKET_CACHE_TTL) {
+      sourceStatus["leaderboard"] = "ok";
+      sourcesUsed.push("leaderboard");
+      return marketDataCache.data;
+    }
+    const data = await getMarketData(market.slug);
+    if (data.volume24h > 0) {
+      marketDataCache = { data, slug: market.slug, timestamp: Date.now() };
+      sourceStatus["leaderboard"] = "ok";
+      sourcesUsed.push("leaderboard");
+    } else {
+      sourceStatus["leaderboard"] = "unavailable";
+    }
+    return data;
   };
 
-  const runActor = async (id: string, name: string, input: any) => {
+  // Social sentiment via Exa
+  const fetchSocial = async () => {
     try {
-      const run = await apifyClient.actor(id).call(input);
-      const { items } = await apifyClient.dataset(run.defaultDatasetId).listItems();
-      sourceStatus[name] = items.length > 0 ? "ok" : "unavailable";
-      if (items.length > 0) sourcesUsed.push(name);
-      return items;
+      const result = await computeSocialSentiment(market.question.slice(0, 100));
+      if (result.resultCount > 0) {
+        sourceStatus["twitter"] = "ok";
+        sourcesUsed.push("twitter");
+      } else {
+        sourceStatus["twitter"] = "unavailable";
+      }
+      return result;
     } catch (err: any) {
-      sourceStatus[name] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
+      sourceStatus["twitter"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
+      return { score: 0, volumeDelta: 0, resultCount: 0 };
+    }
+  };
+
+  // News via NewsAPI
+  const fetchNewsData = async () => {
+    try {
+      const articles = await fetchNews(mainKeyword);
+      if (articles.length > 0) {
+        sourceStatus["news"] = "ok";
+        sourcesUsed.push("news");
+      } else {
+        sourceStatus["news"] = "unavailable";
+      }
+      return articles;
+    } catch (err: any) {
+      sourceStatus["news"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
       return [];
     }
   };
 
-  const getLeaderboard = async () => {
-    if (leaderboardCache && Date.now() - leaderboardCache.timestamp < LEADERBOARD_CACHE_TTL) {
-      sourceStatus["leaderboard"] = "ok";
-      sourcesUsed.push("leaderboard");
-      return leaderboardCache.data;
+  // Trends via Exa search volume proxy
+  const fetchTrends = async () => {
+    try {
+      const [recent, older] = await Promise.all([
+        searchExa(mainKeyword, 7),
+        searchExa(mainKeyword, 30),
+      ]);
+      const ratio = older.length > 0 ? recent.length / older.length : 0;
+      const spike = ratio > 1.5;
+      const value = Math.min(100, Math.round(ratio * 50));
+      if (recent.length > 0) {
+        sourceStatus["trends"] = "ok";
+        sourcesUsed.push("trends");
+      } else {
+        sourceStatus["trends"] = "unavailable";
+      }
+      return { spike, value };
+    } catch (err: any) {
+      sourceStatus["trends"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
+      return { spike: false, value: 50 };
     }
-    const items = await runActor(ACTOR_LEADERBOARD, "leaderboard", { limit: 20 });
-    if (items.length > 0) {
-      leaderboardCache = { data: items, timestamp: Date.now() };
-    }
-    return items;
   };
 
-  const [twitterRes, telegramRes, newsRes, trendsRes, leaderboardRes] = await Promise.allSettled([
-    runWithTimeout(runActor(ACTOR_TWITTER, "twitter", twitterInput)),
-    runWithTimeout(runActor(ACTOR_TELEGRAM, "telegram", telegramInput)),
-    runWithTimeout(runActor(ACTOR_NEWS, "news", newsInput)),
-    runWithTimeout(runActor(ACTOR_TRENDS, "trends", trendsInput)),
-    runWithTimeout(getLeaderboard())
+  // Telegram — always UNAVAILABLE (removed to save cost)
+  sourceStatus["telegram"] = "unavailable";
+
+  const [socialRes, newsRes, trendsRes, marketRes] = await Promise.allSettled([
+    runWithTimeout(fetchSocial()),
+    runWithTimeout(fetchNewsData()),
+    runWithTimeout(fetchTrends()),
+    runWithTimeout(fetchMarketDataCached()),
   ]);
 
-  const twitterItems = twitterRes.status === "fulfilled" ? twitterRes.value : [];
-  const telegramItems = telegramRes.status === "fulfilled" ? telegramRes.value : [];
-  const newsItems = newsRes.status === "fulfilled" ? newsRes.value : [];
-  const trendsItems = trendsRes.status === "fulfilled" ? trendsRes.value : [];
-  const leaderboardItems = leaderboardRes.status === "fulfilled" ? leaderboardRes.value : [];
+  const social = socialRes.status === "fulfilled" ? socialRes.value : { score: 0, volumeDelta: 0, resultCount: 0 };
+  const newsArticles = newsRes.status === "fulfilled" ? newsRes.value : [];
+  const trends = trendsRes.status === "fulfilled" ? trendsRes.value : { spike: false, value: 50 };
+  const marketData = marketRes.status === "fulfilled" ? marketRes.value : { yesProbability: 0.5, volume24h: 0 };
+
+  // Mark timeout on failed promises
+  if (socialRes.status === "rejected") sourceStatus["twitter"] = "timeout";
+  if (newsRes.status === "rejected") sourceStatus["news"] = "timeout";
+  if (trendsRes.status === "rejected") sourceStatus["trends"] = "timeout";
+  if (marketRes.status === "rejected") sourceStatus["leaderboard"] = "timeout";
+
+  const twitterSentiment = social.score;
+  const twitterVolumeDelta = social.volumeDelta;
+  const telegramBias: "BULLISH" | "BEARISH" | "NEUTRAL" | "UNAVAILABLE" = "UNAVAILABLE";
+
+  // News
+  const newsHeadlines = newsArticles.slice(0, 3).map((a) => a.title);
+  const now = Date.now();
+  const breakingNews = newsArticles.some((a) => {
+    const published = new Date(a.publishedAt).getTime();
+    return now - published < 24 * 60 * 60 * 1000;
+  });
+
+  // Trends
+  const searchTrendSpike = trends.spike;
+  const searchTrendValue = trends.value;
+
+  // Whale positioning from Gamma API
+  const whalePosYesPct = Math.round(marketData.yesProbability * 100);
+  const whalePositioning: "LONG" | "SHORT" | "NEUTRAL" | "MIXED" =
+    whalePosYesPct > 60 ? "LONG" : whalePosYesPct < 40 ? "SHORT" : "NEUTRAL";
 
   // Data sufficiency
-  const dataSufficiency = computeDataSufficiency(twitterItems.length, telegramItems.length, newsItems.length);
-  
-  // Conf
-  let confidence = Math.min(1.0, dataSufficiency + 0.2); // Base confidence floor
-  if (twitterItems.length < 10) confidence = Math.min(confidence, 0.4);
-  
-  let breakingNews = false;
-  if (newsItems.length === 0) {
-    confidence -= 0.1; // Cap news contribution
-  } else {
-    breakingNews = true; // Assume true if we have recent news
-  }
-  
-  const twitterSentiment = twitterItems.length > 0 ? 0.41 : 0; // Mock calculation from items
-  const telegramBias: any = telegramItems.length >= 5 ? "BULLISH" : "UNAVAILABLE";
-  const newsHeadlines = newsItems.slice(0, 3).map((item: any) => item.title || "Headline");
-  
-  const searchTrendSpike = trendsItems.length > 0 ? true : false;
-  const searchTrendValue = trendsItems.length > 0 ? 87 : 50;
-  
-  const whalePosYesPct = leaderboardItems.length > 0 ? 65 : 50;
-  const whalePositioning = whalePosYesPct > 60 ? "LONG" : whalePosYesPct < 40 ? "SHORT" : "NEUTRAL";
-  
+  const dataSufficiency = computeDataSufficiency(social.resultCount, 0, newsArticles.length);
+
+  // Confidence
+  let confidence = Math.min(1.0, dataSufficiency + 0.2);
+  if (social.resultCount < 3) confidence = Math.min(confidence, 0.4);
+  if (newsArticles.length === 0) confidence -= 0.1;
+
   // Weight computation based on category
   const cat = market.category?.toLowerCase() || "default";
   const weights = WEIGHTS[cat as keyof typeof WEIGHTS] || WEIGHTS.default;
-  
-  const tBiasScore = telegramBias === "BULLISH" ? 1 : telegramBias === "BEARISH" ? -1 : 0;
+
+  const tBiasScore = 0; // telegram always unavailable
   const nScore = breakingNews ? 0.5 : 0;
   const trScore = searchTrendSpike ? 0.5 : 0;
-  
+
   const totalWeight = weights.twitter + weights.telegram + weights.news + weights.trends;
   const sentimentDelta = (
     (twitterSentiment * weights.twitter) +
@@ -186,20 +309,20 @@ export async function runAura(market: { slug: string; question: string; category
 
   const shiftDetected = Math.abs(sentimentDelta) > 0.15;
   const shiftDirection = sentimentDelta > 0.15 ? "YES" : sentimentDelta < -0.15 ? "NO" : "NEUTRAL";
-  
+
   // Historical data
   const db = getDb();
-  const lastRuns = db.prepare<[string], { sentiment_delta: number, shift_direction: string, scored_at: number }>(
-    `SELECT sentiment_delta, shift_direction, scored_at FROM aura_results 
+  const lastRuns = db.prepare<[string], { sentiment_delta: number; shift_direction: string; scored_at: number }>(
+    `SELECT sentiment_delta, shift_direction, scored_at FROM aura_results
      WHERE slug = ? ORDER BY scored_at DESC LIMIT 3`
   ).all(market.slug);
-  
+
   const baselineRun = lastRuns.length > 0 ? lastRuns[lastRuns.length - 1] : null;
   const hoursSinceBaseline = baselineRun ? Math.max((Date.now() - baselineRun.scored_at) / (1000 * 60 * 60), 1.0) : 1.0;
-  
+
   const shiftVelocity = sentimentDelta / hoursSinceBaseline;
   let shiftPersistence = 0;
-  
+
   for (const run of lastRuns) {
     if (run.shift_direction === shiftDirection) {
       shiftPersistence++;
@@ -232,7 +355,7 @@ export async function runAura(market: { slug: string; question: string; category
     shiftTrend,
     shiftPersistence,
     twitterSentiment,
-    twitterVolumeDelta: 0.1, // mock
+    twitterVolumeDelta,
     telegramBias,
     breakingNews,
     newsHeadlines,
@@ -244,7 +367,7 @@ export async function runAura(market: { slug: string; question: string; category
     dataSufficiency,
     confidence,
     sourcesUsed,
-    sourceStatus
+    sourceStatus,
   };
 
   // Persist
@@ -268,14 +391,14 @@ export async function runAura(market: { slug: string; question: string; category
   return result;
 }
 
-function computeDataSufficiency(twitterLen: number, telegramLen: number, newsLen: number): number {
+function computeDataSufficiency(socialLen: number, telegramLen: number, newsLen: number): number {
   let score = 0;
-  if (twitterLen >= 10) score += 0.4;
-  else if (twitterLen > 0) score += 0.2;
-  
+  if (socialLen >= 5) score += 0.4;
+  else if (socialLen > 0) score += 0.2;
+
   if (telegramLen >= 5) score += 0.3;
   if (newsLen > 0) score += 0.3;
-  
+
   return Math.min(score, 1.0);
 }
 
@@ -303,8 +426,8 @@ function getMockResult(slug: string): AuraResult {
     confidence: 0.85,
     sourcesUsed: ["twitter", "googlenews", "trends", "leaderboard"],
     sourceStatus: {
-      twitter: "ok", telegram: "timeout", news: "ok", trends: "ok", leaderboard: "ok"
-    }
+      twitter: "ok", telegram: "timeout", news: "ok", trends: "ok", leaderboard: "ok",
+    },
   };
 
   const db = getDb();
