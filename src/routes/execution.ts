@@ -74,4 +74,49 @@ router.delete("/orders/:id", (req: Request, res: Response) => {
   }
 });
 
+
+// ── POST /api/execution/dry-run — preview order without placing it ──
+router.post("/dry-run", (req: Request, res: Response) => {
+  try {
+    const { slug, side, amount } = req.body as Record<string, unknown>;
+
+    if (!slug || !side || amount == null) {
+      res.status(400).json({ error: "Missing required fields: slug, side, amount" });
+      return;
+    }
+
+    const dir = String(side).toUpperCase();
+    if (dir !== "YES" && dir !== "NO") {
+      res.status(400).json({ error: "side must be YES or NO" });
+      return;
+    }
+
+    const MAX_BET_USDC = Number(process.env.MAX_BET_USDC ?? 10);
+    const rawSize = Number(amount);
+    const size = Math.min(rawSize, MAX_BET_USDC);
+    const PAPER_TRADING = process.env.PAPER_TRADING !== "false";
+
+    const cliArgs = [
+      "clob", "create-order",
+      "--token-id", String(slug),
+      "--side", dir,
+      "--price", "0.5",
+      "--size", String(size),
+    ];
+
+    res.json({
+      dry_run: true,
+      would_execute: `polymarket ${cliArgs.join(" ")}`,
+      slug: String(slug),
+      side: dir,
+      amount: size,
+      capped_from: rawSize > MAX_BET_USDC ? rawSize : undefined,
+      max_bet_usdc: MAX_BET_USDC,
+      execution_mode: PAPER_TRADING ? "paper" : "live",
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;
