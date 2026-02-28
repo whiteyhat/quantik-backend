@@ -87,9 +87,12 @@ export async function runOracle(market: any): Promise<OracleResult> {
   let has_real_cross_market = false;
 
   // Fetch Aura data from DB: news headlines, whale positioning, sentimentDelta
-  const aura = db.prepare(
-    "SELECT whale_pos_yes_pct, news_headlines, sentiment_delta FROM aura_results WHERE slug = ? ORDER BY scored_at DESC LIMIT 1"
+  const auraRow = db.prepare(
+    "SELECT whale_pos_yes_pct, news_headlines, sentiment_delta, scored_at, is_mock FROM aura_results WHERE slug = ? AND is_mock = 0 ORDER BY scored_at DESC LIMIT 1"
   ).get(slug) as any;
+  const AURA_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+  const auraIsStale = !auraRow || !auraRow.scored_at || (Date.now() - auraRow.scored_at) > AURA_MAX_AGE_MS;
+  const aura = auraIsStale ? null : auraRow;
 
   if (aura) {
     if (aura.whale_pos_yes_pct != null) {
@@ -168,6 +171,11 @@ export async function runOracle(market: any): Promise<OracleResult> {
   // Ensemble variance check
   let ensemble_variance: number | undefined = undefined;
   let final_confidence = confidence;
+
+  // Cap confidence based on data sufficiency — prevents overconfident signals with no supporting data
+  const data_confidence_cap = 0.40 + (data_sufficiency * 0.45);
+  final_confidence = Math.min(final_confidence, data_confidence_cap);
+
   const edge = Math.abs(raw_prob - market_implied);
   
   if (edge >= 0.05 && edge <= 0.10 && confidence < 0.75) {

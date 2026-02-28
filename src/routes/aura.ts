@@ -41,11 +41,18 @@ auraRouter.get("/:slug", async (req, res) => {
     );
     return res.json(result);
   } catch {
-    // Fallback to latest DB result
+    // Fallback to latest non-mock DB result
     const db = getDb();
-    const row = db.prepare("SELECT * FROM aura_results WHERE slug = ? ORDER BY scored_at DESC LIMIT 1").get(slug) as any;
+    const row = db.prepare("SELECT * FROM aura_results WHERE slug = ? AND is_mock = 0 ORDER BY scored_at DESC LIMIT 1").get(slug) as any;
     if (!row) {
-      return res.status(404).json({ error: "No aura results found for slug" });
+      // Return neutral fallback — never serve mock as real
+      return res.json({
+        marketSlug: slug, scoredAt: Date.now(),
+        sentimentDelta: 0, twitterSentiment: 0, confidence: 0.2, dataSufficiency: 0,
+        shiftDetected: false, shiftDirection: "NEUTRAL",
+        sourcesUsed: [], sourceStatus: { twitter: "unavailable", news: "unavailable" },
+        error: "no_data_available"
+      });
     }
     res.json({
       slug: row.slug,

@@ -11,6 +11,7 @@ export interface Market {
   liquidity: number;
   endDate: string;
   yesPrice: number;
+  tokenId: string;
 }
 
 export interface ScanResult {
@@ -363,6 +364,14 @@ export class MarketScanner {
       // 3. Price between 0.18 and 0.82
       if (yesPrice < 0.18 || yesPrice > 0.82) continue;
 
+      let tokenId = "";
+      const clobTokenIds = m["clobTokenIds"];
+      if (Array.isArray(clobTokenIds) && clobTokenIds.length > 0) {
+        tokenId = String(clobTokenIds[0]);
+      } else if (typeof clobTokenIds === "string") {
+        try { const p = JSON.parse(clobTokenIds); tokenId = Array.isArray(p) ? String(p[0]) : ""; } catch { tokenId = ""; }
+      }
+
       markets.push({
         slug,
         question: (m["question"] as string) || slug,
@@ -370,6 +379,7 @@ export class MarketScanner {
         liquidity,
         endDate,
         yesPrice,
+        tokenId,
       });
     }
 

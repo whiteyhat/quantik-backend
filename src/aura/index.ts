@@ -125,36 +125,21 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
   }
 }
 
-async function computeSocialSentiment(query: string): Promise<{ score: number; volumeDelta: number; resultCount: number }> {
-  const socialQuery = `${query} site:twitter.com OR site:x.com`;
-  const [recent, older] = await Promise.all([
-    searchExa(socialQuery, 7),
-    searchExa(socialQuery, 30),
-  ]);
+async function computeSocialSentimentFromNews(query: string): Promise<{ score: number; volumeDelta: number; resultCount: number }> {
+  const articles = await fetchNews(query);
+  if (articles.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
 
-  if (recent.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
+  const POSITIVE = ["likely","will","yes","bullish","confirmed","happening","surge","rally","up","win","passes","approved","elected","won","milestone","record"];
+  const NEGATIVE = ["unlikely","no","bearish","cancelled","delayed","doubt","crash","down","lose","fail","vetoed","rejected","lost","withdrawn","suspended","dropped"];
 
-  // Sentiment from result text
-  let positiveCount = 0;
-  let negativeCount = 0;
-  for (const item of recent) {
-    const text = `${item.title} ${item.snippet}`.toLowerCase();
-    for (const kw of POSITIVE_KEYWORDS) {
-      if (text.includes(kw)) { positiveCount++; break; }
-    }
-    for (const kw of NEGATIVE_KEYWORDS) {
-      if (text.includes(kw)) { negativeCount++; break; }
-    }
+  let pos = 0, neg = 0;
+  for (const a of articles) {
+    const text = a.title.toLowerCase();
+    if (POSITIVE.some(k => text.includes(k))) pos++;
+    if (NEGATIVE.some(k => text.includes(k))) neg++;
   }
-
-  const rawScore = (positiveCount - negativeCount) / Math.max(recent.length, 1);
-  const score = Math.max(-1, Math.min(1, rawScore));
-
-  // Volume delta: compare 7d vs 30d result counts
-  const olderCount = Math.max(older.length, 1);
-  const volumeDelta = (recent.length / olderCount) - 1;
-
-  return { score, volumeDelta, resultCount: recent.length };
+  const score = (pos - neg) / Math.max(articles.length, 1);
+  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length };
 }
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
@@ -187,7 +172,7 @@ export async function runAura(market: { slug: string; question: string; category
   // Social sentiment via Exa
   const fetchSocial = async () => {
     try {
-      const result = await computeSocialSentiment(market.question.slice(0, 100));
+      const result = await computeSocialSentimentFromNews(market.question.slice(0, 100));
       if (result.resultCount > 0) {
         sourceStatus["twitter"] = "ok";
         sourcesUsed.push("twitter");
@@ -436,8 +421,8 @@ function getMockResult(slug: string): AuraResult {
       slug, scored_at, sentiment_delta, shift_detected, shift_direction, shift_velocity, shift_trend,
       shift_persistence, twitter_sentiment, twitter_volume_delta, telegram_bias, breaking_news,
       news_headlines, search_trend_spike, search_trend_value, whale_pos_yes_pct, whale_positioning,
-      echo_chamber_risk, data_sufficiency, confidence, sources_used, source_status, raw_data
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      echo_chamber_risk, data_sufficiency, confidence, sources_used, source_status, raw_data, is_mock
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
   `).run(
     result.marketSlug, result.scoredAt, result.sentimentDelta, result.shiftDetected ? 1 : 0,
     result.shiftDirection, result.shiftVelocity, result.shiftTrend, result.shiftPersistence,

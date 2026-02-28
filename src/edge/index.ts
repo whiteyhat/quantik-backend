@@ -32,6 +32,12 @@ export interface EdgeResult {
  * Never silently falls back to $1000 — always logs a warning.
  */
 function fetchPortfolioUsdc(slug: string): { value: number; source: string } {
+  // Priority 0: PORTFOLIO_USDC env var (set via Railway)
+  const envValue = parseFloat(process.env.PORTFOLIO_USDC ?? "");
+  if (!isNaN(envValue) && envValue > 0) {
+    return { value: envValue, source: "env_var" };
+  }
+
   // Try polymarket-cli with 3s timeout
   try {
     const output = execSync("polymarket-cli wallet balance", { timeout: 3000, encoding: "utf8" });

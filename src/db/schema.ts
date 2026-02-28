@@ -219,6 +219,12 @@ function migrate(db: Database.Database): void {
       PRIMARY KEY (slug, scored_at)
     );
 
+  `);
+
+  // Migration: add is_mock column to aura_results
+  try { db.exec("ALTER TABLE aura_results ADD COLUMN is_mock INTEGER NOT NULL DEFAULT 0"); } catch {}
+
+  db.exec(`
     -- ── Oracle Results ──────────────────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS oracle_results (

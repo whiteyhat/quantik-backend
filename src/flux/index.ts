@@ -35,16 +35,16 @@ interface OrderbookData {
 // Per architecture decision: Polymarket CLI is the sole data source.
 // If CLI fails (token unavailable, network), degrade gracefully to empty book.
 
-async function fetchOrderbook(
-  tokenId: string
-): Promise<{ book: OrderbookData; source: "cli" | "api" }> {
+async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | null; source: "cli"; reason?: string }> {
+  if (!tokenId) {
+    return { book: null, source: "cli", reason: "no_token_id" };
+  }
   try {
     const raw = await runCli(["clob", "orderbook", tokenId]);
     return { book: raw as OrderbookData, source: "cli" };
   } catch (err) {
-    console.warn(`[Flux] CLI orderbook failed for ${tokenId}: ${(err as Error).message} — degrading to empty book`);
-    // Return empty book — Flux will grade as D with soft_veto=false
-    return { book: { bids: [], asks: [] }, source: "cli" };
+    console.warn(`[Flux] CLI orderbook failed for ${tokenId}: ${(err as Error).message}`);
+    return { book: { bids: [], asks: [] }, source: "cli", reason: "cli_error" };
   }
 }
 
@@ -151,38 +151,37 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
   }
 
   // Live mode
-  let book: OrderbookData;
-  let source: "cli" | "api" | "mock";
+  const gammaLiquidity = (market as any).liquidity ?? 0;
 
-  try {
-    const ob = await fetchOrderbook(tokenId);
-    book = ob.book;
-    source = ob.source;
-  } catch {
-    // Both CLI and API failed → Grade D soft veto
-    const fallback: FluxResult = {
-      marketSlug: slug,
-      scoredAt,
-      liquidity_grade: "D",
-      spread: 100,
-      slippage_10: 100,
-      slippage_50: 100,
-      whale_detected: false,
-      whale_signals: 0,
-      depth_imbalance: 0.5,
-      depth_yes_pct: 0.5,
-      grade_degrading: false,
-      soft_veto: true,
-      total_liquidity: 0,
-      confidence: 0.1,
+  // If genuinely illiquid by Gamma data
+  if (gammaLiquidity < 500 && !tokenId) {
+    const result: FluxResult = {
+      marketSlug: slug, scoredAt, liquidity_grade: "D", spread: 100,
+      slippage_10: 0, slippage_50: 0, whale_detected: false, whale_signals: 0,
+      depth_imbalance: 0, depth_yes_pct: 0.5, grade_degrading: false,
+      soft_veto: true, total_liquidity: gammaLiquidity, confidence: 0.1,
       data_source: "mock",
     };
-    persist(fallback);
-    return fallback;
+    persist(result); return result;
   }
 
-  const bids = parseLevels(book.bids);
-  const asks = parseLevels(book.asks);
+  const { book, reason } = await fetchOrderbook(tokenId);
+
+  // tokenId missing but market may have liquidity — grade C, no veto
+  if (book === null && reason === "no_token_id") {
+    const result: FluxResult = {
+      marketSlug: slug, scoredAt, liquidity_grade: "C", spread: 3.0,
+      slippage_10: 1.0, slippage_50: 2.5, whale_detected: false, whale_signals: 0,
+      depth_imbalance: 0, depth_yes_pct: 0.5, grade_degrading: false,
+      soft_veto: false, total_liquidity: gammaLiquidity, confidence: 0.4,
+      data_source: "mock",
+    };
+    persist(result); return result;
+  }
+
+  const safeBook = book ?? { bids: [], asks: [] };
+  const bids = parseLevels(safeBook.bids);
+  const asks = parseLevels(safeBook.asks);
 
   // Sort: bids descending, asks ascending
   bids.sort((a, b) => b.price - a.price);
@@ -230,7 +229,7 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
     soft_veto,
     total_liquidity: Math.round(total * 100) / 100,
     confidence: Math.round(confidence * 100) / 100,
-    data_source: source,
+    data_source: "cli",
   };
 
   persist(result);
