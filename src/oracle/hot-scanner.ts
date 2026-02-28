@@ -14,7 +14,7 @@ export function startHotScanner(): void {
     try {
       // Mocking fetch of top 50 markets by volume
       // In reality, this would be a CLI call sorted by volume
-      const res: any = await runCli(["markets", "list", "--active"]);
+      const res: any = await runCli(["markets", "list", "--active", "true"]);
       let markets = Array.isArray(res) ? res : (res.markets || []);
       
       // Sort by volume descending if volume exists
