@@ -46,26 +46,37 @@ async function tgPost(method: string, body: Record<string, unknown>): Promise<un
 // ── Alert formatting ───────────────────────────────────────────────────────
 
 function formatSignalAlert(r: ScanResult): string {
-  const confPct  = Math.round(r.sigma_confidence * 100);
-  const kellyFmt = r.kelly_fraction.toFixed(3);
+  const confPct   = Math.round(r.sigma_confidence * 100);
+  const kellyFmt  = (r.kelly_fraction * 100).toFixed(1);
   const oraclePct = Math.round(r.oracle_prob * 100);
   const mktPct    = Math.round(r.market_price * 100);
   const edgePct   = Math.round(r.edge * 100);
+  const betAmt    = r.kelly_amount.toFixed(2);
+  const side      = r.recommendation.replace("BET_", "");
 
   return [
-    `🎯 <b>QUANTIK SIGNAL</b>`,
+    `⚡ <b>QUANTIK AUTO-TRADE</b>`,
     ``,
-    `<b>Market:</b> ${esc(r.question)}`,
-    `<code>${esc(r.slug)}</code>`,
-    `<b>Recommendation:</b> ${esc(r.recommendation)}`,
-    `<b>Confidence:</b> ${confPct}% | <b>Kelly:</b> ${kellyFmt}`,
-    `<b>Probability:</b> Oracle ${oraclePct}% vs Market ${mktPct}%`,
-    `<b>Edge:</b> ${edgePct}%`,
+    `📍 ${esc(r.question)}`,
+    `🎯 <b>${side}</b> $${betAmt} USDC`,
+    `📊 Confidence <b>${confPct}%</b> · Kelly <b>${kellyFmt}%</b>`,
+    `🔢 Oracle <b>${oraclePct}%</b> vs Market <b>${mktPct}%</b> · Edge <b>${edgePct}%</b>`,
     ``,
-    `<b>Thesis:</b> ${esc(r.sigma_thesis)}`,
-    `<b>Risk:</b> ${esc(r.clause_risk_level)} — ${esc(r.clause_summary)}`,
+    `💡 ${esc(r.sigma_thesis)}`,
+    `⚠️ Risk: ${esc(r.clause_risk_level)} — ${esc(r.clause_summary)}`,
+  ].join("\n");
+}
+
+function formatTradeExecuted(slug: string, side: string, amount: string, pnlToday: number, tradesToday: number): string {
+  const pnlSign = pnlToday >= 0 ? "+" : "";
+  return [
+    `✅ <b>TRADE PLACED</b>`,
     ``,
-    `<i>⏱ Expires: 30 min</i>`,
+    `📍 <code>${esc(slug)}</code>`,
+    `🎯 <b>${side}</b> $${amount} USDC`,
+    ``,
+    `📈 <b>Today P&L:</b> ${pnlSign}$${pnlToday.toFixed(2)} USDC`,
+    `🔢 <b>Trades today:</b> ${tradesToday}`,
   ].join("\n");
 }
 
