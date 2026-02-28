@@ -111,13 +111,10 @@ setInterval(() => {
 
 // ── Gemini Flash Client ────────────────────────────────────────
 
-async function cascadeChat(
-  messages: OllamaMessage[]
-): Promise<{ reply: string; model: string }> {
+function buildGeminiBody(messages: OllamaMessage[]) {
   const systemMsg = messages.find(m => m.role === "system");
   const chatMsgs = messages.filter(m => m.role !== "system");
-
-  const body = {
+  return {
     ...(systemMsg ? { system_instruction: { parts: [{ text: systemMsg.content }] } } : {}),
     contents: chatMsgs.map(m => ({
       role: m.role === "assistant" ? "model" : "user",
@@ -125,6 +122,12 @@ async function cascadeChat(
     })),
     generationConfig: { maxOutputTokens: 200, temperature: 0.7 },
   };
+}
+
+async function cascadeChat(
+  messages: OllamaMessage[]
+): Promise<{ reply: string; model: string }> {
+  const body = buildGeminiBody(messages);
 
   for (const model of [GEMINI_MODEL, GEMINI_FALLBACK]) {
     try {
@@ -310,6 +313,173 @@ router.post("/chat", async (req: Request, res: Response) => {
   };
 
   res.json(response);
+});
+
+
+// ── POST /api/relay/stream ─────────────────────────────────────
+
+router.post("/stream", async (req: Request, res: Response) => {
+  const start = Date.now();
+  const body = req.body as RelayRequestBody;
+
+  if (!body.message || typeof body.message !== "string") {
+    res.status(400).json({ error: "message is required" });
+    return;
+  }
+
+  // SSE headers — sent immediately
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders();
+
+  const sessionId = (req.headers["x-session-id"] as string) || uuidv4();
+
+  // Detect slug + agent routes (sync)
+  const slug = detectSlug(body.message, body.slug);
+  const { routedTo, endpoints } = detectAgentRoutes(body.message, slug);
+
+  // Start agent fetch Promise in parallel (non-blocking)
+  const agentFetchPromise: Promise<Record<string, unknown>> =
+    endpoints.length > 0 ? fetchAgentData(endpoints) : Promise.resolve({});
+
+  // Build messages
+  const sessionMessages = getSession(sessionId);
+  const messages: OllamaMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...sessionMessages,
+    { role: "user", content: body.message },
+  ];
+
+  const geminiBody = buildGeminiBody(messages);
+  let fullReply = "";
+  let wordCount = 0;
+  let stopped = false;
+  let usedModel = GEMINI_MODEL;
+
+  try {
+    // Start Gemini streamGenerateContent immediately
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?key=${GEMINI_API_KEY}&alt=sse`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(geminiBody) }
+    );
+
+    if (!geminiRes.ok || !geminiRes.body) {
+      throw new Error(`Gemini stream failed: ${geminiRes.status}`);
+    }
+
+    const reader = geminiRes.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (!stopped) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr || jsonStr === "[DONE]") { stopped = true; break; }
+
+        try {
+          const chunk = JSON.parse(jsonStr) as {
+            candidates?: { content?: { parts?: { text?: string }[] } }[];
+          };
+          const token = chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+          if (!token) continue;
+
+          // Enforce 90-word limit mid-stream (stop at word boundary)
+          const newWordCount = token.split(/\s+/).filter(Boolean).length;
+          let tokenToSend = token;
+
+          if (wordCount + newWordCount >= 90) {
+            const remaining = 90 - wordCount;
+            if (remaining <= 0) {
+              stopped = true;
+              break;
+            }
+            // Trim token to remaining words
+            const tokenWords = token.split(/\s+/).filter(Boolean);
+            tokenToSend = tokenWords.slice(0, remaining).join(" ");
+            stopped = true;
+          }
+
+          fullReply += tokenToSend;
+          wordCount = fullReply.split(/\s+/).filter(Boolean).length;
+
+          // Pipe token → client
+          res.write(`data: ${JSON.stringify({ type: "token", token: tokenToSend })}\n\n`);
+
+          if (stopped) break;
+        } catch {
+          // skip malformed JSON chunks
+        }
+      }
+    }
+
+    // Wait for agent data, then write metadata event
+    const agentData = await agentFetchPromise;
+    if (Object.keys(agentData).length > 0) {
+      res.write(`data: ${JSON.stringify({ type: "metadata", routedTo, agentData })}\n\n`);
+    }
+
+    // Final word-limit enforcement
+    const words = fullReply.split(/\s+/).filter(Boolean);
+    if (words.length > 90) {
+      fullReply = words.slice(0, 90).join(" ").replace(/[,;:]$/, "") + "\u2026";
+    }
+
+    // Store in session memory
+    appendToSession(sessionId, { role: "user", content: body.message });
+    appendToSession(sessionId, { role: "assistant", content: fullReply });
+
+    const latencyMs = Date.now() - start;
+    res.write(`data: ${JSON.stringify({
+      type: "done",
+      reply: fullReply,
+      latencyMs,
+      model: usedModel,
+      routedTo,
+      agentData: Object.keys(agentData).length > 0 ? agentData : null,
+    })}\n\n`);
+    res.end();
+
+  } catch (_streamErr) {
+    // Fallback: use cascadeChat and send as single token event
+    try {
+      const { reply, model } = await cascadeChat(messages);
+      usedModel = model;
+
+      res.write(`data: ${JSON.stringify({ type: "token", token: reply })}\n\n`);
+
+      const agentData = await agentFetchPromise;
+      if (Object.keys(agentData).length > 0) {
+        res.write(`data: ${JSON.stringify({ type: "metadata", routedTo, agentData })}\n\n`);
+      }
+
+      const latencyMs = Date.now() - start;
+      appendToSession(sessionId, { role: "user", content: body.message });
+      appendToSession(sessionId, { role: "assistant", content: reply });
+
+      res.write(`data: ${JSON.stringify({
+        type: "done",
+        reply,
+        latencyMs,
+        model,
+        routedTo,
+        agentData: Object.keys(agentData).length > 0 ? agentData : null,
+      })}\n\n`);
+      res.end();
+    } catch {
+      res.write(`data: ${JSON.stringify({ type: "error", error: "Relay is momentarily offline." })}\n\n`);
+      res.end();
+    }
+  }
 });
 
 // ── GET /api/relay/health ──────────────────────────────────────

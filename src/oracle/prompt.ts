@@ -10,6 +10,7 @@ export interface OracleContext {
   alt_data?: string;
   backtester_hit_rate: number;
   sample_size: number;
+  backtester_is_live?: boolean;
 }
 
 export function buildOraclePrompt(context: OracleContext): string {

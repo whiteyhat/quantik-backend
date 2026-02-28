@@ -22,6 +22,8 @@ export interface OracleResult {
   days_to_resolution: number;
   ensemble_variance?: number;
   longshot_adjusted: boolean;
+  backtester_is_live: boolean;
+  data_sources: Record<string, string>;
 }
 
 async function askGemini(prompt: string): Promise<any> {
@@ -68,7 +70,9 @@ export async function runOracle(market: any): Promise<OracleResult> {
       cross_market_divergence: false,
       arb_detected: false,
       days_to_resolution,
-      longshot_adjusted: raw !== 0.65
+      longshot_adjusted: raw !== 0.65,
+      backtester_is_live: false,
+      data_sources: { news: "mock", portfolio: "mock", brier: "mock" }
     };
     saveOracleResult(mockRes);
     return mockRes;
@@ -78,28 +82,62 @@ export async function runOracle(market: any): Promise<OracleResult> {
   
   const db = getDb();
   let whale_signal_p_yes: number | undefined = undefined;
-  const aura = db.prepare("SELECT whale_pos_yes_pct FROM aura_results WHERE slug = ? ORDER BY scored_at DESC LIMIT 1").get(slug) as any;
-  if (aura && aura.whale_pos_yes_pct != null) {
-    whale_signal_p_yes = aura.whale_pos_yes_pct;
+  let news_headlines = "";
+  let has_real_cross_market = false;
+
+  // Fetch Aura data from DB: news headlines, whale positioning, sentimentDelta
+  const aura = db.prepare(
+    "SELECT whale_pos_yes_pct, news_headlines, sentiment_delta FROM aura_results WHERE slug = ? ORDER BY scored_at DESC LIMIT 1"
+  ).get(slug) as any;
+
+  if (aura) {
+    if (aura.whale_pos_yes_pct != null) {
+      whale_signal_p_yes = aura.whale_pos_yes_pct;
+    }
+    // Use real news from Aura DB — do NOT invent headlines
+    if (aura.news_headlines) {
+      news_headlines = aura.news_headlines;
+    }
   }
 
-  // Cross-market signals mock (in real app, we would fetch Metaculus/Manifold/Kalshi API here if keys available)
-  const crossSignals = [
-    { source: "Manifold (Mock)", price: market_implied + 0.05, liquidity: 500 }
-  ];
-  const divergence = Math.abs(crossSignals[0].price - market_implied) > 0.15;
+  // Cross-market signals: use Aura sentimentDelta as proxy if available; omit if not
+  let crossSignals: { source: string; price: number; liquidity: number }[] = [];
+  if (aura && aura.sentiment_delta != null) {
+    const proxy_price = Math.max(0, Math.min(1, market_implied + aura.sentiment_delta));
+    crossSignals = [{ source: "Aura SentimentDelta (proxy)", price: proxy_price, liquidity: 0 }];
+    has_real_cross_market = true;
+  }
+  // No Manifold mock — if no real signal, crossSignals stays empty
+
+  const divergence = crossSignals.length > 0 && Math.abs(crossSignals[0].price - market_implied) > 0.15;
+
+  // Dynamically compute data_sufficiency from available real signals
+  const has_news = news_headlines.length > 0;
+  const has_whale_data = whale_signal_p_yes != null;
+  const data_sufficiency = ((has_news ? 1 : 0) + (has_whale_data ? 1 : 0) + (has_real_cross_market ? 1 : 0)) / 3;
+
+  // Track data sources for transparency
+  const data_sources: Record<string, string> = {
+    news: has_news ? "aura_db" : "none",
+    whale: has_whale_data ? "aura_db" : "none",
+    cross_market: has_real_cross_market ? "aura_sentiment_proxy" : "none",
+    // TODO: wire to resolved oracle_results table once resolution tracking ships
+    backtester: "stub"
+  };
 
   const context: OracleContext = {
     question,
     resolution_date: resolutionDate,
     days_to_resolution,
     yes_price: market_implied,
-    cross_market_signals: JSON.stringify(crossSignals),
+    cross_market_signals: crossSignals.length > 0 ? JSON.stringify(crossSignals) : "None",
     divergence_warning: divergence ? "WARNING: High divergence across markets." : undefined,
     whale_signal: whale_signal_p_yes ? `Whale yes %: ${(whale_signal_p_yes * 100).toFixed(1)}%` : undefined,
-    news_headlines: "1. Recent positive catalyst\\n2. Competitor failed",
+    news_headlines,
+    // TODO: wire to resolved oracle_results table once resolution tracking ships
     backtester_hit_rate: 68,
-    sample_size: 150
+    sample_size: 150,
+    backtester_is_live: false
   };
 
   const prompt = buildOraclePrompt(context);
@@ -112,7 +150,6 @@ export async function runOracle(market: any): Promise<OracleResult> {
 
   let raw_prob = geminiOutput.p_yes;
   const confidence = geminiOutput.confidence;
-  const data_sufficiency = 0.8; // Stubbed for now
 
   // Ensemble variance check
   let ensemble_variance: number | undefined = undefined;
@@ -169,7 +206,9 @@ export async function runOracle(market: any): Promise<OracleResult> {
     whale_signal_p_yes,
     days_to_resolution,
     ensemble_variance,
-    longshot_adjusted
+    longshot_adjusted,
+    backtester_is_live: false,
+    data_sources
   };
 
   saveOracleResult(result);
