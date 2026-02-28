@@ -224,7 +224,7 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
     volume: raw.volume24hr ?? 0,
     liquidity,
     liquidityGrade,
-    tokenId: raw.conditionId ?? "",
+    tokenId: (Array.isArray(raw.clobTokenIds) && raw.clobTokenIds.length > 0 ? raw.clobTokenIds[0] : null) ?? raw.conditionId ?? "",
   };
 }
 

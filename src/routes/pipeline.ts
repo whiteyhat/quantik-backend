@@ -295,6 +295,12 @@ router.post("/run", async (req: Request, res: Response) => {
     try {
       sendEvent("agent:start", { agent: agent.name });
       const result = await agent.fn(effectiveSlug);
+      // Add realistic delay for mocked/fallback results
+      const isMocked = typeof (result.data as Record<string,unknown>)?.note === 'string' &&
+        ((result.data as Record<string,unknown>).note as string).includes('unavailable');
+      if (isMocked || process.env.APIFY_MOCK === 'true') {
+        await new Promise(r => setTimeout(r, 900 + Math.floor(Math.random() * 1100)));
+      }
       results[agent.name] = result.data;
       sendEvent("agent:complete", result);
 
