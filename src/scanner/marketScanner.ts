@@ -172,16 +172,17 @@ export class MarketScanner {
     try {
       const result = await runPolymarketCli(["markets", "list", "--limit", String(limit)]);
       rawMarkets = Array.isArray(result) ? result : [];
+      if (rawMarkets.length === 0) throw new Error("Empty CLI result");
     } catch (err) {
-      console.warn("[Scanner] polymarket-cli failed, using Gamma API fallback:", err);
-      // Fallback to Gamma API
-      const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&limit=${limit}&order=volume24hr&ascending=false`);
+      console.warn("[Scanner] polymarket-cli unavailable, using Gamma API:", err);
+      // Gamma API — fetch 200 markets ordered by volume, then sort by competitiveness
+      const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&limit=200&order=volume24hr&ascending=false`);
       const data = await res.json() as unknown[];
       rawMarkets = Array.isArray(data) ? data : [];
     }
 
     const now = Date.now();
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    // date filter: only skip already-closed markets
 
     const markets: Market[] = [];
 
@@ -208,10 +209,9 @@ export class MarketScanner {
       }
 
       // Filter criteria:
-      // 1. Closing within 30 days
+      // 1. Not already closed
       if (endDate) {
         const closeTime = new Date(endDate).getTime();
-        if (closeTime - now > thirtyDaysMs) continue; // closes too far out
         if (closeTime < now) continue; // already closed
       }
 
