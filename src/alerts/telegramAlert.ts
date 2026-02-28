@@ -48,23 +48,33 @@ async function tgPost(method: string, body: Record<string, unknown>): Promise<un
 function formatSignalAlert(r: ScanResult): string {
   const confPct   = Math.round(r.sigma_confidence * 100);
   const kellyFmt  = (r.kelly_fraction * 100).toFixed(1);
-  const oraclePct = Math.round(r.oracle_prob * 100);
-  const mktPct    = Math.round(r.market_price * 100);
-  const edgePct   = Math.round(r.edge * 100);
-  const betAmt    = r.kelly_amount.toFixed(2);
+  const oraclePct = Math.round((r.oracle_prob ?? r.probability) * 100);
+  const mktPct    = Math.round((r.market_price ?? r.probability) * 100);
+  const edgePct   = Math.round((r.edge ?? 0) * 100);
+  const betAmt    = (r.kelly_amount ?? r.kellyFraction * 10).toFixed(2);
   const side      = r.recommendation.replace("BET_", "");
+  const status    = r.executionStatus === "paper" ? "PAPER" : r.executionStatus === "placed" ? "LIVE" : "?";
+  const orderId   = r.orderId ?? "unknown";
+  const pnlSign   = (r.pnlToday ?? 0) >= 0 ? "+" : "";
+  const polyUrl   = `https://polymarket.com/event/${r.slug}`;
 
-  return [
-    `⚡ <b>QUANTIK AUTO-TRADE</b>`,
+  const lines = [
+    `⚡ <b>QUANTIK AUTO-TRADE [${status}]</b>`,
     ``,
-    `📍 ${esc(r.question)}`,
+    `📍 ${esc(r.question ?? r.slug)}`,
     `🎯 <b>${side}</b> $${betAmt} USDC`,
     `📊 Confidence <b>${confPct}%</b> · Kelly <b>${kellyFmt}%</b>`,
     `🔢 Oracle <b>${oraclePct}%</b> vs Market <b>${mktPct}%</b> · Edge <b>${edgePct}%</b>`,
     ``,
-    `💡 ${esc(r.sigma_thesis)}`,
-    `⚠️ Risk: ${esc(r.clause_risk_level)} — ${esc(r.clause_summary)}`,
-  ].join("\n");
+    `💡 ${esc(r.sigma_thesis ?? "")}`,
+    `⚠️ Risk: ${esc(r.clause_risk_level ?? "UNKNOWN")}`,
+    ``,
+    `📈 <b>Today P&amp;L:</b> ${pnlSign}$${(r.pnlToday ?? 0).toFixed(2)} · Trades: ${r.tradesToday ?? 0}`,
+    `🔗 <b>Order ID:</b> <code>${esc(orderId)}</code>`,
+    `🌐 <a href="${polyUrl}">Verify on Polymarket</a>`,
+  ];
+
+  return lines.join("\n");
 }
 
 function formatTradeExecuted(slug: string, side: string, amount: string, pnlToday: number, tradesToday: number): string {

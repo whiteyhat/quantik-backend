@@ -23,6 +23,20 @@ export interface ScanResult {
   alertSent: boolean;
   shouldAlert: boolean;
   pipelineResult: object;
+  // Populated after execution
+  orderId?: string;
+  executionStatus?: "placed" | "failed" | "paper";
+  pnlToday?: number;
+  tradesToday?: number;
+  // Fields from alert caller
+  question?: string;
+  oracle_prob?: number;
+  market_price?: number;
+  edge?: number;
+  kelly_amount?: number;
+  sigma_thesis?: string;
+  clause_risk_level?: string;
+  clause_summary?: string;
 }
 
 // ── State ──────────────────────────────────────────────────────
@@ -401,8 +415,10 @@ export class MarketScanner {
         result.slug, side, amount, Date.now()
       );
       console.log(`[autoExecute] PAPER trade: ${result.slug} ${side} $${amount.toFixed(2)}`);
+      const pnlRowP = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
+      const tradeRowP = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({ ...result, question } as any);
+      await sendSignalAlert({ ...result, question, orderId: "PAPER-MODE", executionStatus: "paper", pnlToday: pnlRowP.total, tradesToday: tradeRowP.cnt } as any);
       return;
     }
 
@@ -424,8 +440,11 @@ export class MarketScanner {
       );
       console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${side} $${amount.toFixed(2)} orderId=${orderId}`);
 
+      const pnlRow2 = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
+      const tradeRow2 = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({ ...result, question } as any);
+      await sendSignalAlert({ ...result, question, orderId, executionStatus: "placed", pnlToday: pnlRow2.total, tradesToday: tradeRow2.cnt } as any);
     } catch (err) {
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'failed')").run(
         result.slug, side, amount, Date.now()
