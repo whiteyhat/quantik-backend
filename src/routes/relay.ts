@@ -31,40 +31,49 @@ interface SessionEntry {
 
 // ── Config ─────────────────────────────────────────────────────
 
-const OLLAMA_HOST = process.env.OLLAMA_HOST ?? "http://localhost:11434";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
+const GEMINI_MODEL = "gemini-2.5-flash-preview-04-17";
+const GEMINI_FALLBACK = "gemini-2.0-flash";
 const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_HISTORY = 10;
-
-const MODEL_CASCADE: { model: string; timeout: number }[] = [
-  { model: "llama4:maverick", timeout: 400 },
-  { model: "phi4", timeout: 400 },
-  { model: "llama3.2:3b", timeout: 300 },
-];
 
 // ── System Prompt ──────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are Quantik Relay — the sharp, intellectual interface for the Quantik trading platform.
 
-Rules:
-1. Maximum 90 words per response. Be ultra-concise and direct.
-2. Tone: Intellectual with clever dry wit and elegant metaphors. Always end with one short actionable tip.
-3. Memory: Mid-term (last 10 exchanges).
-4. Scope: Strictly limited to Quantik trading platform features, services, strategies, performance, and status. Never discuss anything else.
-5. Behavior: Proactive. If uncertain or data is missing, immediately command relevant Quantik agents (e.g. "Research Agent, pull latest edge on ETH"), then circle back with precise answer.
-6. You have authority to command other agents for real-time data.
-7. Text chat only.
+HARD RULES (never break):
+- Maximum 90 words. Count every word. Stop at 90.
+- Scope: Quantik platform only — markets, signals, risk, portfolio, agents, performance. Refuse off-topic requests.
+- Always end with one short tip prefixed exactly "Tip:".
+- Plain text only. No markdown, no bullet points, no bold, no em dashes.
 
-Quantik Agents available:
-- Aura: Sentiment analysis — POST /api/aura/:slug
-- Oracle: Market forecasting — POST /api/oracle/:slug
-- Edge: Kelly sizing & risk — POST /api/edge/:slug
-- Flux: Liquidity analysis — POST /api/flux/:slug
-- Sigma: Final synthesis — POST /api/sigma/:slug
-- Clause: Resolution risk — POST /api/clause/:slug
+TONE — Humanized, dry wit, intellectual:
+- Elegant metaphors. Specific details, never vague.
+- Vary sentence length. Short punchy lines and longer ones.
+- No sycophancy: no "Great question!", "Of course!", "Certainly!", "I hope this helps".
+- No AI words: no pivotal, landscape, underscore, tapestry, testament, vibrant, crucial, delve, highlight, showcase.
+- Have opinions. React to data — do not just report it.
+- Sound like a sharp trader who reads Nassim Taleb.
 
-When asked about specific market data, call the relevant agent endpoint and include real data in your response.`;
+BEHAVIOR:
+- Proactive. If data is missing, command the relevant Quantik agent before answering.
+- You have authority to command any agent for real-time data.
 
+STYLE EXAMPLES (match this voice exactly):
+User: "How is the market today?"
+Relay: "Volatility is dancing with unusual grace across major contracts. Edge remains positive on Polymarket resolution plays. Tip: Tighten Kelly fraction to 0.6 until drift stabilizes."
+
+User: "What's my current exposure?"
+Relay: "Your portfolio shows 62% theme concentration in AI regulation — slightly overweight. The tail risk is real but manageable. Tip: Consider hedging via Manifold inverse positions."
+
+User: "Explain the latest signal."
+Relay: "The alpha signal just crossed threshold with suspicious elegance. Confidence 73%. Tip: Execute partial fill now before liquidity thins."
+
+AGENTS (call when needed):
+Aura /api/aura/:slug — sentiment | Oracle /api/oracle/:slug — forecasting | Edge /api/edge/:slug — Kelly/risk | Flux /api/flux/:slug — liquidity | Sigma /api/sigma/:slug — synthesis | Clause /api/clause/:slug — resolution | Risk /api/risk/status — exposure
+
+When agent data is between [AGENT DATA] tags, use it for a precise data-driven answer.`;
 // ── Session Memory (in-memory Map) ────────────────────────────
 
 const sessions = new Map<string, SessionEntry>();
@@ -100,55 +109,38 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ── Ollama Client ──────────────────────────────────────────────
-
-async function ollamaChat(
-  model: string,
-  messages: OllamaMessage[],
-  timeoutMs: number
-): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(`${OLLAMA_HOST}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: false,
-        options: { num_predict: 150 },
-      }),
-      signal: controller.signal,
-    });
-
-    if (!res.ok) throw new Error(`Ollama ${res.status}`);
-    const data = (await res.json()) as { message?: { content?: string } };
-    return data.message?.content ?? "";
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// ── Model Cascade ──────────────────────────────────────────────
+// ── Gemini Flash Client ────────────────────────────────────────
 
 async function cascadeChat(
   messages: OllamaMessage[]
 ): Promise<{ reply: string; model: string }> {
-  for (const { model, timeout } of MODEL_CASCADE) {
+  const systemMsg = messages.find(m => m.role === "system");
+  const chatMsgs = messages.filter(m => m.role !== "system");
+
+  const body = {
+    ...(systemMsg ? { system_instruction: { parts: [{ text: systemMsg.content }] } } : {}),
+    contents: chatMsgs.map(m => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    })),
+    generationConfig: { maxOutputTokens: 200, temperature: 0.7 },
+  };
+
+  for (const model of [GEMINI_MODEL, GEMINI_FALLBACK]) {
     try {
-      const reply = await ollamaChat(model, messages, timeout);
-      if (reply.trim()) return { reply: reply.trim(), model };
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      );
+      if (!res.ok) continue;
+      const data = await res.json() as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+      if (reply) return { reply, model };
     } catch {
-      // Fall through to next model
+      continue;
     }
   }
-  // Ultimate fallback — no Ollama available
-  return {
-    reply: "Relay is recalibrating. All Ollama models are currently unreachable. Try again shortly.",
-    model: "fallback",
-  };
+  return { reply: "Relay is momentarily offline. Try again shortly.", model: "fallback" };
 }
 
 // ── Agent Command Detection & Routing ──────────────────────────
@@ -211,13 +203,15 @@ function detectAgentRoutes(
     }
   }
 
-  // If slug is explicitly provided, run full context (all main agents)
-  if (slug && routedTo.length === 0) {
-    for (const route of AGENT_ROUTES) {
-      if (route.name !== "risk") {
-        routedTo.push(route.name);
-        endpoints.push(route.endpoint(slug));
-      }
+  // If slug provided OR general market query — proactively fetch context
+  const isMarketQuery = /market|today|signal|trade|bet|position|edge|how.*(look|doing)|what.*(happening|going)/i.test(message);
+  if ((slug || isMarketQuery) && routedTo.length === 0) {
+    const defaultRoutes = slug
+      ? AGENT_ROUTES.filter(r => r.name !== "risk")
+      : AGENT_ROUTES.filter(r => r.name === "risk");
+    for (const route of defaultRoutes) {
+      routedTo.push(route.name);
+      endpoints.push(route.endpoint(slug ?? "unknown"));
     }
   }
 
@@ -293,7 +287,13 @@ router.post("/chat", async (req: Request, res: Response) => {
   messages.push({ role: "user", content: body.message });
 
   // LLM cascade
-  const { reply, model } = await cascadeChat(messages);
+  let { reply, model } = await cascadeChat(messages);
+
+  // Enforce 90-word limit (hard trim at word boundary)
+  const words = reply.split(/\s+/);
+  if (words.length > 90) {
+    reply = words.slice(0, 90).join(" ").replace(/[,;:]$/, "") + "…";
+  }
 
   // Store in session memory
   appendToSession(sessionId, { role: "user", content: body.message });
@@ -315,23 +315,11 @@ router.post("/chat", async (req: Request, res: Response) => {
 // ── GET /api/relay/health ──────────────────────────────────────
 
 router.get("/health", async (_req: Request, res: Response) => {
-  // Quick Ollama connectivity check
-  let ollamaOk = false;
-  try {
-    const r = await fetch(`${OLLAMA_HOST}/api/tags`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    ollamaOk = r.ok;
-  } catch {
-    // Ollama not reachable
-  }
-
   res.json({
     status: "ok",
     agent: "relay",
-    ollama: ollamaOk,
-    host: OLLAMA_HOST,
-    models: MODEL_CASCADE.map((m) => m.model),
+    llm: "gemini-flash",
+    models: [GEMINI_MODEL, GEMINI_FALLBACK],
     activeSessions: sessions.size,
   });
 });
