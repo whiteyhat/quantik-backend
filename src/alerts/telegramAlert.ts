@@ -46,7 +46,6 @@ async function tgPost(method: string, body: Record<string, unknown>): Promise<un
 // ── Alert formatting ───────────────────────────────────────────────────────
 
 function formatSignalAlert(r: ScanResult): string {
-  const side = r.recommendation === "BET YES" ? "YES" : "NO";
   const confPct  = Math.round(r.sigma_confidence * 100);
   const kellyFmt = r.kelly_fraction.toFixed(3);
   const oraclePct = Math.round(r.oracle_prob * 100);
@@ -54,24 +53,27 @@ function formatSignalAlert(r: ScanResult): string {
   const edgePct   = Math.round(r.edge * 100);
 
   return [
-    `🎯 *QUANTIK SIGNAL*`,
+    `🎯 <b>QUANTIK SIGNAL</b>`,
     ``,
-    `Market: ${escMd(r.question)} (\`${r.slug}\`)`,
-    `Recommendation: *${r.recommendation}*`,
-    `Confidence: ${confPct}% | Kelly: ${kellyFmt}`,
-    `Probability: Oracle ${oraclePct}% vs Market ${mktPct}%`,
-    `Edge: ${edgePct}%`,
+    `<b>Market:</b> ${esc(r.question)}`,
+    `<code>${esc(r.slug)}</code>`,
+    `<b>Recommendation:</b> ${esc(r.recommendation)}`,
+    `<b>Confidence:</b> ${confPct}% | <b>Kelly:</b> ${kellyFmt}`,
+    `<b>Probability:</b> Oracle ${oraclePct}% vs Market ${mktPct}%`,
+    `<b>Edge:</b> ${edgePct}%`,
     ``,
-    `Thesis: ${escMd(r.sigma_thesis)}`,
-    `Risk: *${escMd(r.clause_risk_level)}* — ${escMd(r.clause_summary)}`,
+    `<b>Thesis:</b> ${esc(r.sigma_thesis)}`,
+    `<b>Risk:</b> ${esc(r.clause_risk_level)} — ${esc(r.clause_summary)}`,
     ``,
-    `_Expires: 30 min_`,
+    `<i>⏱ Expires: 30 min</i>`,
   ].join("\n");
 }
 
-function escMd(text: string): string {
-  // Escape MarkdownV2 special chars
-  return (text ?? "").replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+function esc(text: string): string {
+  return (text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // ── Inline keyboard ────────────────────────────────────────────────────────
@@ -99,7 +101,7 @@ export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
     await tgPost("sendMessage", {
       chat_id: CHAT_ID,
       text: formatSignalAlert(result),
-      parse_mode: "MarkdownV2",
+      parse_mode: "HTML",
       reply_markup: buildInlineKeyboard(result),
     });
     return true;
