@@ -149,6 +149,10 @@ export class MarketScanner {
               if (result.shouldAlert) {
                 alertsTriggered++;
                 console.log(`[Scanner] ALERT triggered for ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)}`);
+                // AUTO-EXECUTE — no human approval needed
+                await this.autoExecute(result, m.question).catch(e =>
+                  console.error(`[Scanner] autoExecute failed for ${m.slug}:`, e)
+                );
               }
             } catch (err) {
               console.error(`[Scanner] Pipeline error for ${m.slug}:`, err);
@@ -354,6 +358,79 @@ export class MarketScanner {
         result.recommendation === "BET_YES" ? "YES" : "NO",
         result.sigmaConfidence,
       );
+    }
+  }
+
+  async autoExecute(result: ScanResult, question: string): Promise<void> {
+    const db = getDb();
+    const paperMode = process.env.PAPER_TRADING === "true";
+    const maxBet = parseFloat(process.env.MAX_BET_USDC ?? "10");
+    const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "5", 10);
+    const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");
+
+    // Circuit breaker: daily trade count
+    const today = new Date(); today.setHours(0,0,0,0);
+    const todayTs = today.getTime();
+    const tradesRow = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+    if (tradesRow.cnt >= maxPerDay) {
+      console.log(`[autoExecute] MAX_TRADES_PER_DAY (${maxPerDay}) reached — skipping ${result.slug}`);
+      return;
+    }
+
+    // Circuit breaker: daily P&L loss limit
+    const pnlRow = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
+    if (pnlRow.total <= -dailyLossLimit) {
+      console.log(`[autoExecute] DAILY_LOSS_LIMIT hit ($${pnlRow.total.toFixed(2)}) — pausing`);
+      return;
+    }
+
+    // Circuit breaker: rate limit 1 trade per slug per 6h
+    const sixHAgo = Date.now() - 6 * 60 * 60 * 1000;
+    const recent = db.prepare("SELECT id FROM executions WHERE slug = ? AND executed_at >= ?").get(result.slug, sixHAgo);
+    if (recent) {
+      console.log(`[autoExecute] Rate limit: already traded ${result.slug} in last 6h`);
+      return;
+    }
+
+    const side = result.recommendation === "BET_YES" ? "YES" : "NO";
+    const amount = Math.min(result.kellyFraction * 100, maxBet);
+
+    if (paperMode) {
+      // Paper mode — log only
+      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'paper')").run(
+        result.slug, side, amount, Date.now()
+      );
+      console.log(`[autoExecute] PAPER trade: ${result.slug} ${side} $${amount.toFixed(2)}`);
+      const { sendSignalAlert } = await import("../alerts/telegramAlert");
+      await sendSignalAlert({ ...result, question } as any);
+      return;
+    }
+
+    // Live execution via polymarket CLI
+    const { runCli } = await import("../lib/cli");
+    try {
+      const cliArgs = ["clob", "create-order",
+        "--token-id", result.slug,
+        "--side", side,
+        "--price", result.probability.toFixed(4),
+        "--size", amount.toFixed(2),
+        "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
+      ];
+      const output = await runCli(cliArgs, { timeout: 15000 });
+      const orderId = (output.match(/order[_-]?id[:\s]+([a-f0-9-]+)/i) ?? [])[1] ?? "unknown";
+
+      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id) VALUES (?, ?, ?, ?, 'placed', ?)").run(
+        result.slug, side, amount, Date.now(), orderId
+      );
+      console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${side} $${amount.toFixed(2)} orderId=${orderId}`);
+
+      const { sendSignalAlert } = await import("../alerts/telegramAlert");
+      await sendSignalAlert({ ...result, question } as any);
+    } catch (err) {
+      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'failed')").run(
+        result.slug, side, amount, Date.now()
+      );
+      console.error(`[autoExecute] LIVE trade FAILED for ${result.slug}:`, err);
     }
   }
 }

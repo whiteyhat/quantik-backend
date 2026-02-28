@@ -370,6 +370,27 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_scanner_slug_time ON scanner_results(slug, scanned_at DESC);
   `);
 
+  // Autopilot execution log
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS executions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slug TEXT NOT NULL,
+      side TEXT NOT NULL,
+      amount REAL NOT NULL,
+      executed_at INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      order_id TEXT,
+      fill_price REAL,
+      pnl REAL DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
+  `);
+
+  // Add execution columns to scanner_results if missing
+  try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_status TEXT DEFAULT NULL"); } catch {}
+  try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_id INTEGER DEFAULT NULL"); } catch {}
+
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
   // Normalise any value > 1.0 to 0–1 scale.
   db.prepare(
