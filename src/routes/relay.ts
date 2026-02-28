@@ -71,7 +71,7 @@ Relay: "62% concentrated in AI regulation — overweight by any sensible measure
 AGENTS (call when needed):
 Aura /api/aura/:slug | Oracle /api/oracle/:slug | Edge /api/edge/:slug | Flux /api/flux/:slug | Sigma /api/sigma/:slug | Clause /api/clause/:slug | Risk /api/risk/status
 
-When [AGENT DATA] is present, use the numbers. Make them mean something.\`;
+When [AGENT DATA] is present, use the numbers. Make them mean something.`;
 // ── Session Memory (in-memory Map) ────────────────────────────
 
 const sessions = new Map<string, SessionEntry>();
