@@ -243,8 +243,8 @@ export class AlertPoller {
       FROM pipeline_runs pr
       LEFT JOIN edge_results er ON er.marketSlug = pr.market_slug
       WHERE pr.alert_sent = 0
-        AND pr.confidence >= 0.65
-        AND COALESCE(er.fractional_kelly, 0) >= 0.30
+        AND pr.confidence >= 0.55
+        AND COALESCE(er.fractional_kelly, 0) >= 0.05
         AND (
           pr.signal_state = 'TRADE'
           OR pr.decision IN ('BUY_YES','BUY_NO','TRADE','BET_YES','BET_NO')
