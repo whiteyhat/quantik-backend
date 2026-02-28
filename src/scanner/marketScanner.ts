@@ -42,10 +42,10 @@ export interface ScanResult {
 // ── Real Agent Pipeline ───────────────────────────────────────
 
 interface AgentBundle {
-  oracle: { estimated_true_prob: number; confidence: number; edge: number };
-  edge_agent: { kelly_fraction: number; kelly_amount: number };
+  oracle: { confidence: number; estimated_true_prob?: number };
+  edge_agent: { fractional_kelly: number; position_size: number; direction: string; kelly_recommended?: number };
   sigma: { confidence: number; decision: string; thesis: string };
-  clause: { risk_level: string; summary: string; veto: boolean };
+  clause: { riskLevel: string; resolutionCriteria: string; veto: boolean; urgent: boolean; ambiguityScore?: number };
 }
 const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
 const AGENT_CACHE_TTL = 15 * 60 * 1000;
@@ -71,39 +71,64 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
   const cached = agentCache.get(slug);
   if (cached && Date.now() - cached.ts < AGENT_CACHE_TTL) {
     const d = cached.data;
+    const kellyFrac = d.edge_agent.fractional_kelly ?? 0;
+    const trueProbEstimate = d.oracle.estimated_true_prob ?? d.oracle.confidence ?? yesPrice;
     return {
       sigma: d.sigma,
-      edge: { kelly_fraction: d.edge_agent.kelly_fraction, estimated_true_prob: d.oracle.estimated_true_prob, kelly_amount: d.edge_agent.kelly_amount },
-      clause: d.clause,
+      edge: { kelly_fraction: kellyFrac, estimated_true_prob: trueProbEstimate, kelly_amount: d.edge_agent.position_size ?? 0 },
+      clause: { veto: d.clause.veto, risk_level: d.clause.riskLevel ?? "UNKNOWN", summary: d.clause.resolutionCriteria?.slice(0, 120) ?? "No summary" },
       pipelineResult: d,
     };
   }
 
-  const [oracleRes, edgeRes, sigmaRes, clauseRes] = await Promise.allSettled([
+  const [oracleRes, edgeRes, clauseRes] = await Promise.allSettled([
     fetchWithTimeout(`${BACKEND_URL}/api/oracle/${slug}`),
     fetchWithTimeout(`${BACKEND_URL}/api/edge/${slug}`),
-    fetchWithTimeout(`${BACKEND_URL}/api/sigma/${slug}`),
     fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`),
   ]);
 
-  const oracle = (oracleRes.status === "fulfilled" && oracleRes.value) ? oracleRes.value : { estimated_true_prob: yesPrice, confidence: 0.3, edge: 0 };
-  const edgeData = (edgeRes.status === "fulfilled" && edgeRes.value) ? edgeRes.value : { kelly_fraction: 0, kelly_amount: 0 };
-  const sigmaData = (sigmaRes.status === "fulfilled" && sigmaRes.value) ? sigmaRes.value : { confidence: 0, decision: "SKIP", thesis: "Agent unavailable" };
-  const clauseData = (clauseRes.status === "fulfilled" && clauseRes.value) ? clauseRes.value : { risk_level: "UNKNOWN", summary: "Clause unavailable", veto: false };
+  // Normalize Oracle — returns { confidence } only
+  const rawOracle = (oracleRes.status === "fulfilled" && oracleRes.value) ? oracleRes.value as any : null;
+  const oracle = { confidence: rawOracle?.confidence ?? 0.3, estimated_true_prob: rawOracle?.estimated_true_prob ?? rawOracle?.confidence ?? yesPrice };
 
-  // Clause veto overrides everything
-  if (clauseData.veto) {
-    sigmaData.confidence = 0;
-    sigmaData.decision = "SKIP";
-  }
+  // Normalize Edge — returns fractional_kelly, position_size, direction
+  const rawEdge = (edgeRes.status === "fulfilled" && edgeRes.value) ? edgeRes.value as any : null;
+  const edgeData = {
+    fractional_kelly: rawEdge?.fractional_kelly ?? 0,
+    position_size: rawEdge?.position_size ?? 0,
+    direction: rawEdge?.direction ?? "NO",
+    kelly_recommended: rawEdge?.kelly_recommended ?? 0,
+  };
+
+  // Normalize Clause — returns riskLevel (camelCase), resolutionCriteria, veto, urgent
+  const rawClause = (clauseRes.status === "fulfilled" && clauseRes.value) ? clauseRes.value as any : null;
+  const clauseData = {
+    riskLevel: rawClause?.riskLevel ?? "UNKNOWN",
+    resolutionCriteria: rawClause?.resolutionCriteria ?? "",
+    veto: rawClause?.veto ?? false,
+    urgent: rawClause?.urgent ?? false,
+    ambiguityScore: rawClause?.ambiguityScore ?? 0,
+  };
+
+  // Synthesize Sigma from Oracle + Edge (Sigma endpoint requires prior pipeline run)
+  const kellyFrac = edgeData.fractional_kelly;
+  const trueProbEstimate = oracle.estimated_true_prob;
+  const edgeStrong = kellyFrac >= 0.05 && oracle.confidence >= 0.55;
+  const sigmaDecision = clauseData.veto ? "VETO" : edgeStrong ? `BET_${edgeData.direction}` : "SKIP";
+  const sigmaConfidence = clauseData.veto ? 0 : edgeStrong ? Math.min(oracle.confidence * 0.9, 0.95) : 0;
+  const sigmaData = {
+    confidence: sigmaConfidence,
+    decision: sigmaDecision,
+    thesis: `Oracle=${Math.round(oracle.confidence * 100)}% true prob. Edge=${edgeData.direction} Kelly=${(kellyFrac * 100).toFixed(1)}%. ${clauseData.veto ? "VETOED by Clause." : ""}`,
+  };
 
   const bundle: AgentBundle = { oracle, edge_agent: edgeData, sigma: sigmaData, clause: clauseData };
   agentCache.set(slug, { ts: Date.now(), data: bundle });
 
   return {
     sigma: sigmaData,
-    edge: { kelly_fraction: edgeData.kelly_fraction ?? 0, estimated_true_prob: oracle.estimated_true_prob ?? yesPrice, kelly_amount: edgeData.kelly_amount ?? 0 },
-    clause: clauseData,
+    edge: { kelly_fraction: kellyFrac, estimated_true_prob: trueProbEstimate, kelly_amount: edgeData.position_size },
+    clause: { veto: clauseData.veto, risk_level: clauseData.riskLevel, summary: clauseData.resolutionCriteria?.slice(0, 120) ?? "No summary" },
     pipelineResult: bundle,
   };
 }
