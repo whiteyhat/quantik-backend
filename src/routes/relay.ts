@@ -76,7 +76,7 @@ User: "What's my exposure?"
 Relay: "62% concentrated in AI regulation — overweight by any sensible measure. Tip: Open Portfolio → Risk to see your correlation breakdown before adding more."
 
 AGENTS: Aura /api/aura/:slug | Oracle /api/oracle/:slug | Edge /api/edge/:slug | Flux /api/flux/:slug | Sigma /api/sigma/:slug | Clause /api/clause/:slug | Risk /api/risk/status
-When [AGENT DATA] present, use the numbers. Make them mean something.`;
+When [AGENT DATA] is present: extract the numbers, cite them naturally in plain English. NEVER quote, echo, or repeat the raw JSON — not even a single field.`;
 // ── Session Memory (in-memory Map) ────────────────────────────
 
 const sessions = new Map<string, SessionEntry>();
