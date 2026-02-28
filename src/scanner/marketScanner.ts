@@ -181,7 +181,7 @@ export class MarketScanner {
     }
 
     const now = Date.now();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
     const markets: Market[] = [];
 
@@ -208,18 +208,18 @@ export class MarketScanner {
       }
 
       // Filter criteria:
-      // 1. Closing within 7 days (urgency)
+      // 1. Closing within 30 days
       if (endDate) {
         const closeTime = new Date(endDate).getTime();
-        if (closeTime - now > sevenDaysMs) continue; // closes too far out
+        if (closeTime - now > thirtyDaysMs) continue; // closes too far out
         if (closeTime < now) continue; // already closed
       }
 
-      // 2. Volume > $10k
-      if (volume < 10000) continue;
+      // 2. Volume > $5k (lowered to surface more candidates)
+      if (volume < 5000) continue;
 
-      // 3. Price between 0.15 and 0.85 (avoid near-certain)
-      if (yesPrice < 0.15 || yesPrice > 0.85) continue;
+      // 3. Price between 0.10 and 0.90 (avoid near-certain only)
+      if (yesPrice < 0.10 || yesPrice > 0.90) continue;
 
       markets.push({
         slug,
