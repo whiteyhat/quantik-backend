@@ -220,14 +220,16 @@ export class AlertPoller {
       return; // Muted
     }
 
-    // Query pipeline_runs joined with research_notes + edge_results for TRADE signals
-    // that haven't been alerted yet and meet the confidence/kelly thresholds
+    // Query pipeline_runs joined with edge_results for high-confidence signals
+    // Derive signal state from decision/sigma_output (orchestrator doesn't set signal_state directly)
     const rows = db.prepare(`
       SELECT
         pr.id,
         pr.market_slug       AS slug,
         pr.market_question   AS question,
         pr.confidence        AS sigma_confidence,
+        pr.decision,
+        pr.signal_state,
         pr.sigma_output,
         pr.clause_output,
         pr.oracle_output,
@@ -239,9 +241,12 @@ export class AlertPoller {
       FROM pipeline_runs pr
       LEFT JOIN edge_results er ON er.marketSlug = pr.market_slug
       WHERE pr.alert_sent = 0
-        AND pr.signal_state = 'TRADE'
-        AND pr.confidence >= 0.70
-        AND COALESCE(er.fractional_kelly, 0) >= 0.40
+        AND pr.confidence >= 0.65
+        AND COALESCE(er.fractional_kelly, 0) >= 0.30
+        AND (
+          pr.signal_state = 'TRADE'
+          OR pr.decision IN ('BUY_YES','BUY_NO','TRADE','BET_YES','BET_NO')
+        )
       ORDER BY pr.created_at DESC
       LIMIT 10
     `).all() as Array<Record<string, unknown>>;

@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ export class MarketScanner {
           batch.map(async (m) => {
             try {
               const result = await this.runPipelineForMarket(m.slug, m.yesPrice);
-              await this.storeScanResult(result);
+              await this.storeScanResult(result, m.question);
               scannedToday++;
 
               if (result.shouldAlert) {
@@ -254,8 +255,8 @@ export class MarketScanner {
         : "SKIP";
 
     const shouldAlert =
-      sigma.confidence >= 0.70 &&
-      edge.kelly_fraction >= 0.40 &&
+      sigma.confidence >= 0.50 &&
+      edge.kelly_fraction >= 0.05 &&
       recommendation !== "SKIP";
 
     return {
@@ -271,7 +272,7 @@ export class MarketScanner {
     };
   }
 
-  async storeScanResult(result: ScanResult): Promise<void> {
+  async storeScanResult(result: ScanResult, question?: string): Promise<void> {
     const db = getDb();
     db.prepare(`
       INSERT OR IGNORE INTO scanner_results
@@ -287,6 +288,73 @@ export class MarketScanner {
       result.alertSent ? 1 : 0,
       JSON.stringify(result.pipelineResult),
     );
+
+    // If this market should alert, write a pipeline_runs entry so the alert poller catches it
+    if (result.shouldAlert) {
+      const pr = result.pipelineResult as Record<string, unknown>;
+      const edgeData = (pr["edge"] ?? {}) as Record<string, unknown>;
+      const sigmaData = (pr["sigma"] ?? {}) as Record<string, unknown>;
+      const runId = `scanner-${result.slug}-${result.scannedAt}`;
+
+      // Only insert if not already present
+      const existing = db.prepare("SELECT id FROM pipeline_runs WHERE id = ?").get(runId);
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO pipeline_runs
+            (id, market_slug, market_question, created_at, completed_at, decision, confidence,
+             edge_output, sigma_output, alert_sent, signal_state)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'TRADE')
+        `).run(
+          runId,
+          result.slug,
+          question ?? result.slug,
+          result.scannedAt,
+          result.scannedAt,
+          result.recommendation,
+          result.sigmaConfidence,
+          JSON.stringify({
+            net_edge: edgeData["kelly_fraction"] ?? 0,
+            fractional_kelly: result.kellyFraction,
+            position_size: result.kellyFraction * 10,
+            direction: result.recommendation === "BET_YES" ? "YES" : "NO",
+            estimated_true_prob: result.probability,
+          }),
+          JSON.stringify({
+            recommendation: result.recommendation,
+            confidence: result.sigmaConfidence,
+            thesis: (sigmaData["thesis"] as string) ?? `Scanner signal: ${result.recommendation} @ p=${result.probability.toFixed(2)}`,
+            decision: result.recommendation,
+          }),
+        );
+        console.log(`[Scanner] Wrote pipeline_runs entry for alert: ${result.slug}`);
+      }
+
+      // Also insert/update edge_results so the alert poller JOIN works
+      db.prepare(`
+        INSERT OR REPLACE INTO edge_results
+          (marketSlug, scoredAt, gross_edge, net_edge, ev_grade, net_ev, kelly_recommended,
+           fractional_kelly, position_size, kelly_multiplier, time_decay_watch,
+           arb_opportunities, correlation_penalty, corr_blocked, direction, confidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        result.slug,
+        result.scannedAt,
+        result.kellyFraction,
+        result.kellyFraction,
+        result.sigmaConfidence >= 0.7 ? "A" : result.sigmaConfidence >= 0.5 ? "B" : "C",
+        result.kellyFraction * result.probability,
+        result.kellyFraction,
+        result.kellyFraction,
+        result.kellyFraction * 10,
+        0.25,
+        0,
+        "[]",
+        0,
+        0,
+        result.recommendation === "BET_YES" ? "YES" : "NO",
+        result.sigmaConfidence,
+      );
+    }
   }
 }
 
