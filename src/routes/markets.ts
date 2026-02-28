@@ -402,8 +402,9 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
     res.json(data);
   } catch {
     // CLI failed — return synthetic candlestick data as fallback
+    // synthetic: true flags this as generated data, not real market history
     const synthetic = generateSyntheticPriceHistory(0.5, 30);
-    res.json(synthetic);
+    res.json({ data: synthetic, synthetic: true });
   }
 });
 

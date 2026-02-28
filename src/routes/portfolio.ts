@@ -356,7 +356,8 @@ router.get("/summary", async (_req: Request, res: Response) => {
   // Primary USDC for legacy fields = on-chain + CLOB
   const usdc = onChainUsdc + clobUsdc;
 
-  const summary: PortfolioSummary = {
+  // synthetic: false — summary always reflects real on-chain + DB data
+  const summary: PortfolioSummary & { synthetic: boolean; data_source: string } = {
     // New on-chain fields
     onChainUsdc,
     onChainUsdcFormatted: formatUsd(onChainUsdc),
@@ -380,6 +381,8 @@ router.get("/summary", async (_req: Request, res: Response) => {
     openPnl,
     winRate,
     totalTrades,
+    synthetic: false,
+    data_source: "on_chain_and_db",
   };
 
   res.json(summary);
@@ -419,26 +422,7 @@ router.get("/risk", async (_req: Request, res: Response) => {
             exposure: totalExposure,
           };
         })
-      : [
-          {
-            theme: "politics",
-            positions: ["us-election-2026", "senate-majority"],
-            clusterRisk: 0.32,
-            exposure: 125.0,
-          },
-          {
-            theme: "crypto",
-            positions: ["btc-100k-eoy", "eth-merge-v2"],
-            clusterRisk: 0.58,
-            exposure: 87.5,
-          },
-          {
-            theme: "sports",
-            positions: ["nba-finals-2026"],
-            clusterRisk: 0.12,
-            exposure: 40.0,
-          },
-        ];
+      : []; // No open positions — return empty rather than fake data
 
   // Try CLI for gas/platform status — fall back to mock
   let gasBalance = 0.05;
@@ -535,6 +519,7 @@ router.get("/attribution", (_req: Request, res: Response) => {
   // Build bySignal — use real data if we have any, otherwise realistic mock
   const hasRealData = runs.some((r) => runTradeMap.get(r.id)?.length ?? 0 > 0);
 
+  // bySignal: only populated from real pipeline data — never fake numbers
   const bySignal: SignalAttribution[] = hasRealData
     ? AGENTS.map((agent) => {
         const s = agentStats.get(agent)!;
@@ -545,12 +530,7 @@ router.get("/attribution", (_req: Request, res: Response) => {
           winRate: s.trades > 0 ? s.wins / s.trades : 0,
         };
       }).filter((s) => s.trades > 0)
-    : [
-        { agent: "edge", pnl: 94.2, trades: 21, winRate: 0.71 },
-        { agent: "oracle", pnl: 62.1, trades: 14, winRate: 0.64 },
-        { agent: "aura", pnl: 31.7, trades: 8, winRate: 0.625 },
-        { agent: "flux", pnl: -0.5, trades: 4, winRate: 0.5 },
-      ];
+    : []; // No real data — return empty
 
   // Alpha curve — daily cumulative PnL over last 30 days
   const alphaCurve: AlphaPoint[] = (() => {
@@ -572,17 +552,8 @@ router.get("/attribution", (_req: Request, res: Response) => {
         });
     }
 
-    // Mock: 30-day realistic alpha curve
-    const points: AlphaPoint[] = [];
-    let alpha = 0;
-    for (let i = 29; i >= 0; i--) {
-      const ts = Date.now() - i * 86_400_000;
-      const day = isoDate(ts);
-      const delta = (Math.random() * 20 - 6) * (0.8 + Math.random() * 0.4);
-      alpha += delta;
-      points.push({ date: day, alpha: Math.round(alpha * 100) / 100 });
-    }
-    return points;
+    // No trade history yet — return empty rather than fake numbers
+    return [];
   })();
 
   // P&L by category — derived from market_slug first word
@@ -600,6 +571,7 @@ router.get("/attribution", (_req: Request, res: Response) => {
     categoryMap.set(category, s);
   }
 
+  // byCategory: derived from real trade data only — never fake numbers
   const byCategory: CategoryAttribution[] =
     categoryMap.size > 0
       ? Array.from(categoryMap.entries()).map(([category, s]) => ({
@@ -608,14 +580,20 @@ router.get("/attribution", (_req: Request, res: Response) => {
           trades: s.trades,
           winRate: s.trades > 0 ? s.wins / s.trades : 0,
         }))
-      : [
-          { category: "politics", pnl: 98.3, trades: 22, winRate: 0.68 },
-          { category: "crypto", pnl: 61.2, trades: 13, winRate: 0.62 },
-          { category: "sports", pnl: 28.0, trades: 7, winRate: 0.57 },
-          { category: "science", pnl: -0.0, trades: 5, winRate: 0.4 },
-        ];
+      : []; // No trade history yet
 
-  const attribution: PortfolioAttribution = { bySignal, alphaCurve, byCategory };
+  const isRealAttribution = hasRealData && trades.length > 0;
+  if (!isRealAttribution) {
+    console.warn("[portfolio:attribution] No real pipeline/trade data — returning empty attribution (data_source: no_data)");
+  }
+
+  const attribution = {
+    bySignal,
+    alphaCurve,
+    byCategory,
+    synthetic: !isRealAttribution,
+    data_source: isRealAttribution ? "db" : "no_data",
+  };
   res.json(attribution);
 });
 
