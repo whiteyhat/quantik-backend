@@ -119,4 +119,16 @@ router.post("/dry-run", (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/execution/log — autopilot execution history ────────
+router.get("/log", (_req: Request, res: Response) => {
+  try {
+    const { getDb } = require("../db/schema");
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 50").all();
+    res.json({ ok: true, count: rows.length, log: rows });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;

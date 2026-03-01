@@ -130,15 +130,15 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
   const kellyFrac = edgeData.fractional_kelly;
   const sentimentAmplifier = Math.abs(sentimentDelta) * 0.15; // Aura adds up to 15% confidence
   const priceOffCenter = Math.abs(yesPrice - 0.5) > 0.05;
-  // hasEdge: either Kelly > 1% OR strong Aura signal (>0.1) with price off-center
-  const hasEdge = priceOffCenter && (kellyFrac >= 0.01 || Math.abs(sentimentDelta) >= 0.10);
+  // hasEdge: Kelly > 1% OR strong Aura signal (>0.1) OR reasonable Oracle confidence (>0.3)
+  const hasEdge = priceOffCenter && (kellyFrac >= 0.01 || Math.abs(sentimentDelta) >= 0.10 || oracleConf > 0.3);
   // Sentiment-aligned direction: if Aura is bullish and Oracle > yesPrice → YES; else follow Kelly
   let direction = edgeData.direction;
   if (Math.abs(sentimentDelta) >= 0.10) {
     direction = sentimentDelta > 0 ? "YES" : "NO";
   }
   const sigmaDecision = clauseData.veto ? "VETO" : hasEdge ? `BET_${direction}` : "SKIP";
-  const baseConf = hasEdge ? 0.45 + kellyFrac * 1.5 + sentimentAmplifier : 0;
+  const baseConf = hasEdge ? 0.45 + kellyFrac * 1.5 + sentimentAmplifier + oracleConf * 0.10 : 0;
   const sigmaConfidence = clauseData.veto ? 0 : Math.min(baseConf, 0.85);
   const sigmaData = {
     confidence: sigmaConfidence,
@@ -384,8 +384,8 @@ export class MarketScanner {
         if (closeTime - now > 30 * 24 * 60 * 60 * 1000) continue; // too far out (30 days)
       }
 
-      // 2. Volume > $30k
-      if (volume < 30000) continue;
+      // 2. Volume > $5k
+      if (volume < 5000) continue;
 
       // 3. Price between 0.05 and 0.95 (exclude near-certain resolved markets)
       if (yesPrice < 0.05 || yesPrice > 0.95) continue;
@@ -419,7 +419,7 @@ export class MarketScanner {
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    return scored.slice(0, Math.min(limit, 20)).map(s => s.market);
+    return scored.slice(0, limit).map(s => s.market);
   }
 
   async shouldSkip(slug: string): Promise<boolean> {
