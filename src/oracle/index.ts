@@ -150,22 +150,34 @@ export async function runOracle(market: any): Promise<OracleResult> {
     yes_price: market_implied,
     cross_market_signals: crossSignals.length > 0 ? JSON.stringify(crossSignals) : "None",
     divergence_warning: divergence ? "WARNING: High divergence across markets." : undefined,
-    whale_signal: whale_signal_p_yes ? `Whale yes %: ${(whale_signal_p_yes * 100).toFixed(1)}%` : undefined,
+    whale_signal: whale_signal_p_yes != null ? `Whale yes %: ${whale_signal_p_yes.toFixed(1)}%` : undefined,
     news_headlines,
     backtester_hit_rate: backtesterData.hit_rate ?? 68,
     sample_size: backtesterData.sample_size,
     backtester_is_live: backtesterData.is_live
   };
 
+  function validateOracleOutput(output: any, slug: string): void {
+    const { p_yes, confidence } = output;
+    if (typeof p_yes !== "number" || isNaN(p_yes) || p_yes < 0.01 || p_yes > 0.99) {
+      throw new Error(`[Oracle:${slug}] p_yes out of bounds: ${p_yes}`);
+    }
+    if (typeof confidence !== "number" || isNaN(confidence) || confidence < 0 || confidence > 1) {
+      throw new Error(`[Oracle:${slug}] confidence out of bounds: ${confidence}`);
+    }
+  }
+
   const prompt = buildOraclePrompt(context);
   let geminiOutput = { p_yes: market_implied, confidence: 0.5, bull_case: "N/A", bear_case: "N/A", reasoning: "N/A" };
   try {
     geminiOutput = await askGemini(prompt);
+    validateOracleOutput(geminiOutput, slug);
   } catch (err) {
     console.error("Gemini failed, using fallback:", err);
   }
 
   let raw_prob = geminiOutput.p_yes;
+  raw_prob = Math.min(0.99, Math.max(0.01, raw_prob));
   const confidence = geminiOutput.confidence;
 
   // Ensemble variance check
@@ -208,6 +220,7 @@ export async function runOracle(market: any): Promise<OracleResult> {
   // Longshot bias
   const prev_calibrated = calibrated_prob;
   calibrated_prob = applyLongshotBias(calibrated_prob);
+  calibrated_prob = Math.min(0.99, Math.max(0.01, calibrated_prob));
   const longshot_adjusted = prev_calibrated !== calibrated_prob;
 
   const result: OracleResult = {

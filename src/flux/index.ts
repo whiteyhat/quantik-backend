@@ -35,15 +35,36 @@ interface OrderbookData {
 // Per architecture decision: Polymarket CLI is the sole data source.
 // If CLI fails (token unavailable, network), degrade gracefully to empty book.
 
-async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | null; source: "cli"; reason?: string }> {
+async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | null; source: "cli" | "api"; reason?: string }> {
   if (!tokenId) {
     return { book: null, source: "cli", reason: "no_token_id" };
   }
+
+  // Try CLOB REST API directly (public endpoint, no auth needed)
+  try {
+    const res = await fetch(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(tokenId)}`, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      const data = await res.json() as any;
+      // CLOB API returns { bids: [{price, size},...], asks: [{price, size},...] }
+      const book: OrderbookData = {
+        bids: data.bids || [],
+        asks: data.asks || [],
+      };
+      return { book, source: "api" };
+    }
+  } catch (err) {
+    console.warn(`[Flux] CLOB REST failed for ${tokenId}: ${(err as Error).message}`);
+  }
+
+  // Fallback: try CLI
   try {
     const raw = await runCli(["clob", "orderbook", tokenId]);
     return { book: raw as OrderbookData, source: "cli" };
   } catch (err) {
-    console.warn(`[Flux] CLI orderbook failed for ${tokenId}: ${(err as Error).message}`);
+    console.warn(`[Flux] CLI orderbook also failed for ${tokenId}: ${(err as Error).message}`);
     return { book: { bids: [], asks: [] }, source: "cli", reason: "cli_error" };
   }
 }
@@ -165,7 +186,7 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
     persist(result); return result;
   }
 
-  const { book, reason } = await fetchOrderbook(tokenId);
+  const { book, source: bookSource, reason } = await fetchOrderbook(tokenId);
 
   // tokenId missing but market may have liquidity — grade C, no veto
   if (book === null && reason === "no_token_id") {
@@ -229,7 +250,7 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
     soft_veto,
     total_liquidity: Math.round(total * 100) / 100,
     confidence: Math.round(confidence * 100) / 100,
-    data_source: "cli",
+    data_source: bookSource,
   };
 
   persist(result);

@@ -203,17 +203,23 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
-  // Trends via Exa search volume proxy
+  // Trends via Gamma volume (replaces broken Exa ratio — numResults cap made ratio always 1.0)
   const fetchTrends = async () => {
     try {
-      const [recent, older] = await Promise.all([
-        searchExa(mainKeyword, 7),
-        searchExa(mainKeyword, 30),
-      ]);
-      const ratio = older.length > 0 ? recent.length / older.length : 0;
-      const spike = ratio > 1.5;
-      const value = Math.min(100, Math.round(ratio * 50));
-      if (recent.length > 0) {
+      // Use volume24hr from Gamma as trend proxy — already fetched in getMarketData
+      // Re-fetch or use from marketRes — normalize volume24hr to 0-100
+      const res = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&limit=1`);
+      if (!res.ok) {
+        sourceStatus["trends"] = "unavailable";
+        return { spike: false, value: 50 };
+      }
+      const data = await res.json() as any[];
+      const m = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      const vol24h = Number(m?.volume24hr ?? m?.volume ?? 0);
+      // Normalize: $0 = 0, $100k = 100 (log scale feels better but linear is simpler)
+      const value = Math.min(100, Math.round(vol24h / 1000)); // $1k volume = 1 point
+      const spike = vol24h > 50000; // >$50k/day = trend spike
+      if (vol24h > 0) {
         sourceStatus["trends"] = "ok";
         sourcesUsed.push("trends");
       } else {
@@ -221,8 +227,8 @@ export async function runAura(market: { slug: string; question: string; category
       }
       return { spike, value };
     } catch (err: any) {
-      sourceStatus["trends"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
-      return { spike: false, value: 50 };
+      sourceStatus["trends"] = "unavailable";
+      return { spike: false, value: 0 };
     }
   };
 

@@ -13,7 +13,7 @@ router.get("/:slug", async (req: Request, res: Response) => {
     const market = await fetchMarketBySlug(slug);
     const result = await withTimeout(
       runOracle({ slug, question: market.question, yes_price: market.yes_price, resolution_date: market.resolution_date }),
-      10_000
+      45_000
     );
     return res.json(result);
   } catch {

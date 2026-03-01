@@ -135,7 +135,7 @@ export async function runEdge(market: any, oracleResult: any): Promise<EdgeResul
   const m_target = direction === "YES" ? p_market : (1 - p_market);
   
   // Kelly formula: f* = (P_true - P_market) / (1 - P_market)
-  const kelly_recommended = m_target < 1 ? Math.max(0, (p_target - m_target) / (1 - m_target)) : 0;
+  const kelly_recommended = Math.min(1, Math.max(0, m_target < 1 ? (p_target - m_target) / (1 - m_target) : 0));
   
   // Fee model
   const config = getFeeConfig();

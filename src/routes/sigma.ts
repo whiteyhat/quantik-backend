@@ -54,12 +54,23 @@ router.get("/:slug", async (req: Request, res: Response) => {
     marketData = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
   } catch { /* ignore */ }
 
-  if (!oracleRow || !edgeRow || !marketData) {
-    return res.status(404).json({ error: "Insufficient data to compute Sigma — run the pipeline first for this market" });
+  if (!edgeRow || !marketData) {
+    return res.status(404).json({ error: "Insufficient data to compute Sigma — run Edge and Oracle first for this market" });
   }
+  // Use Oracle from DB if available, else proxy from market yes_price
+  let rawPrices: string[] = [];
+  try { rawPrices = typeof marketData.outcomePrices === "string" ? JSON.parse(marketData.outcomePrices) : (marketData.outcomePrices ?? []); } catch {}
+  const yesPrice = parseFloat(String(rawPrices[0] ?? "0.5")) || 0.5;
+  const effectiveOracle = oracleRow ?? {
+    calibrated_prob: yesPrice,
+    market_implied: yesPrice,
+    confidence: 0.3,
+    data_sufficiency: 0,
+    source: "price_proxy",
+  };
 
   const sigmaInputs: SigmaInputs = {
-    oracle: oracleRow,
+    oracle: effectiveOracle,
     edge: edgeRow,
     clause: clauseRow ?? null,
     flux: fluxRow ?? null,
