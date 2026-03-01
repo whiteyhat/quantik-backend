@@ -1,5 +1,6 @@
 import { getDb } from "../db/schema";
 import { extractKeywords, extractMainKeyword } from "./keywords";
+import { fetchGNews } from "./gnews";
 
 const EXA_API_KEY = process.env.EXA_API_KEY || "";
 const NEWS_API_KEY = process.env.NEWS_API_KEY || "";
@@ -88,7 +89,7 @@ async function searchExa(query: string, daysBack: number): Promise<{ title: stri
   }
 }
 
-async function fetchNews(keyword: string): Promise<{ title: string; publishedAt: string }[]> {
+async function fetchNewsApi(keyword: string): Promise<{ title: string; publishedAt: string; source?: string }[]> {
   try {
     const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keyword)}&pageSize=5&sortBy=publishedAt&apiKey=${NEWS_API_KEY}`;
     const res = await fetch(url);
@@ -101,6 +102,20 @@ async function fetchNews(keyword: string): Promise<{ title: string; publishedAt:
   } catch {
     return [];
   }
+}
+
+async function fetchAllNews(query: string): Promise<{ title: string; publishedAt: string; source?: string }[]> {
+  // Primary: Google News (no API key, no rate limit, real-time)
+  const gnewsArticles = await fetchGNews(query, { maxResults: 15, periodDays: 7 });
+
+  if (gnewsArticles.length > 0) {
+    console.log(`[Aura] GNews returned ${gnewsArticles.length} articles for: ${query}`);
+    return gnewsArticles.map(a => ({ title: a.title, publishedAt: a.publishedAt, source: a.source }));
+  }
+
+  // Fallback: NewsAPI
+  console.log(`[Aura] GNews returned 0 — falling back to NewsAPI`);
+  return await fetchNewsApi(query);
 }
 
 async function getMarketData(slug: string): Promise<{ yesProbability: number; volume24h: number }> {
@@ -126,7 +141,7 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
 }
 
 async function computeSocialSentimentFromNews(query: string): Promise<{ score: number; volumeDelta: number; resultCount: number }> {
-  const articles = await fetchNews(query);
+  const articles = await fetchAllNews(query);
   if (articles.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
 
   const POSITIVE = ["likely","will","yes","bullish","confirmed","happening","surge","rally","up","win","passes","approved","elected","won","milestone","record"];
@@ -186,34 +201,18 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
-  // News via NewsAPI (with fallback for overly specific keywords)
-  const fetchNewsWithFallback = async (question: string): Promise<{ title: string; publishedAt: string }[]> => {
-    let articles = await fetchNews(mainKeyword);
-
-    // Fallback: try first 4 words of the question if no results
-    if (articles.length === 0) {
-      const words = question.split(" ").slice(0, 4).join(" ");
-      articles = await fetchNews(words);
-    }
-
-    // Second fallback: try keyword split
-    if (articles.length === 0) {
-      const keywords = extractKeywords(question);
-      const shortQuery = keywords.slice(0, 2).join(" ");
-      if (shortQuery && shortQuery !== mainKeyword) {
-        articles = await fetchNews(shortQuery);
-      }
-    }
-
-    return articles;
-  };
-
+  // News via GNews (primary) + NewsAPI (fallback)
   const fetchNewsData = async () => {
     try {
-      const articles = await fetchNewsWithFallback(market.question);
+      let articles = await fetchAllNews(market.question);
+      if (articles.length === 0) {
+        // Try shorter query — first 3 meaningful words
+        const shortQuery = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
+        if (shortQuery) articles = await fetchAllNews(shortQuery);
+      }
       if (articles.length > 0) {
         sourceStatus["news"] = "ok";
-        sourcesUsed.push("news");
+        if (!sourcesUsed.includes("news")) sourcesUsed.push("news");
       } else {
         sourceStatus["news"] = "unavailable";
       }
@@ -224,30 +223,40 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
-  // Trends via Gamma volume (replaces broken Exa ratio — numResults cap made ratio always 1.0)
+  // Trends via GNews 7d vs 30d ratio (replaces broken Exa ratio)
   const fetchTrends = async () => {
     try {
-      // Use volume24hr from Gamma as trend proxy — already fetched in getMarketData
-      // Re-fetch or use from marketRes — normalize volume24hr to 0-100
-      const res = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&limit=1`);
-      if (!res.ok) {
+      const keywords = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
+
+      const [recent, older] = await Promise.all([
+        fetchGNews(keywords, { maxResults: 20, periodDays: 7 }),
+        fetchGNews(keywords, { maxResults: 20, periodDays: 30 }),
+      ]);
+
+      if (older.length === 0) {
+        // Fall back to Gamma volume
+        const gammaRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&limit=1`);
+        if (gammaRes.ok) {
+          const data = await gammaRes.json() as any[];
+          const m = Array.isArray(data) && data.length > 0 ? data[0] : null;
+          const vol24h = Number(m?.volume24hr ?? 0);
+          const value = Math.min(100, Math.round(vol24h / 1000));
+          sourceStatus["trends"] = vol24h > 0 ? "ok" : "unavailable";
+          if (vol24h > 0 && !sourcesUsed.includes("trends")) sourcesUsed.push("trends");
+          return { spike: vol24h > 50000, value };
+        }
         sourceStatus["trends"] = "unavailable";
-        return { spike: false, value: 50 };
+        return { spike: false, value: 0 };
       }
-      const data = await res.json() as any[];
-      const m = Array.isArray(data) && data.length > 0 ? data[0] : null;
-      const vol24h = Number(m?.volume24hr ?? m?.volume ?? 0);
-      // Normalize: $0 = 0, $100k = 100 (log scale feels better but linear is simpler)
-      const value = Math.min(100, Math.round(vol24h / 1000)); // $1k volume = 1 point
-      const spike = vol24h > 50000; // >$50k/day = trend spike
-      if (vol24h > 0) {
-        sourceStatus["trends"] = "ok";
-        sourcesUsed.push("trends");
-      } else {
-        sourceStatus["trends"] = "unavailable";
-      }
+
+      // GNews 7d vs 30d ratio gives real trend signal
+      const ratio = older.length > 0 ? recent.length / older.length : 1;
+      const value = Math.min(100, Math.round(ratio * 50));
+      const spike = ratio > 1.5; // recent activity > 50% above baseline
+      sourceStatus["trends"] = "ok";
+      if (!sourcesUsed.includes("trends")) sourcesUsed.push("trends");
       return { spike, value };
-    } catch (err: any) {
+    } catch {
       sourceStatus["trends"] = "unavailable";
       return { spike: false, value: 0 };
     }
