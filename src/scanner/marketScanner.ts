@@ -17,6 +17,7 @@ export interface Market {
 
 export interface ScanResult {
   slug: string;
+  tokenId?: string;
   scannedAt: number;
   sigmaConfidence: number;
   kellyFraction: number;
@@ -303,7 +304,7 @@ export class MarketScanner {
         await Promise.all(
           batch.map(async (m) => {
             try {
-              const result = await this.runPipelineForMarket(m.slug, m.yesPrice);
+              const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId);
               await this.storeScanResult(result, m.question);
               scannedToday++;
 
@@ -433,7 +434,7 @@ export class MarketScanner {
     return !!row;
   }
 
-  async runPipelineForMarket(slug: string, yesPrice: number = 0.5): Promise<ScanResult> {
+  async runPipelineForMarket(slug: string, yesPrice: number = 0.5, tokenId: string = ''): Promise<ScanResult> {
     let sigma: { confidence: number; decision: string; thesis?: string };
     let edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount?: number };
     let pipelineResult: object;
@@ -473,6 +474,7 @@ export class MarketScanner {
       kellyFraction: edge.kelly_fraction,
       recommendation: recommendation as ScanResult["recommendation"],
       probability: edge.estimated_true_prob,
+      tokenId,
       alertSent: false,
       shouldAlert,
       pipelineResult,
@@ -603,15 +605,20 @@ export class MarketScanner {
       return;
     }
 
-    const side = result.recommendation === "BET_YES" ? "YES" : "NO";
-    const amount = Math.min(result.kellyFraction * 100, maxBet);
+    const clobSide = result.recommendation === "BET_YES" ? "buy" : "sell";
+    // Kelly amount: use kelly*portfolio, floor at $5 if signal fires but kelly is tiny
+    const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
+    const kellyAmount = result.kellyFraction > 0
+      ? result.kellyFraction * portfolioUsdc
+      : 5; // minimum floor when sigma fires but kelly underflows
+    const amount = Math.min(kellyAmount, maxBet);
 
     if (paperMode) {
       // Paper mode — log only
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'paper')").run(
-        result.slug, side, amount, Date.now()
+        result.slug, clobSide, amount, Date.now()
       );
-      console.log(`[autoExecute] PAPER trade: ${result.slug} ${side} $${amount.toFixed(2)}`);
+      console.log(`[autoExecute] PAPER trade: ${result.slug} ${clobSide} $${amount.toFixed(2)}`);
       const pnlRowP = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
       const tradeRowP = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
@@ -621,21 +628,24 @@ export class MarketScanner {
 
     // Live execution via polymarket CLI
     const { runCli } = await import("../cli");
+    const clobTokenId = result.tokenId || result.slug; // tokenId from clobTokenIds[0]
+    const price = Math.max(0.01, Math.min(0.99, result.probability));
+    const shares = (amount / price).toFixed(2); // shares = USDC / price
     try {
-      const cliArgs = ["clob", "create-order",
-        "--token-id", result.slug,
-        "--side", side,
-        "--price", result.probability.toFixed(4),
-        "--size", amount.toFixed(2),
+      const cliArgs = ["-o", "json", "clob", "create-order",
+        "--token", clobTokenId,
+        "--side", clobSide,
+        "--price", price.toFixed(4),
+        "--size", shares,
         "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
       ];
       const output = await runCli(cliArgs) as Record<string, unknown>;
       const orderId = String((output as any)?.id ?? (output as any)?.order_id ?? "unknown");
 
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id) VALUES (?, ?, ?, ?, 'placed', ?)").run(
-        result.slug, side, amount, Date.now(), orderId
+        result.slug, clobSide, amount, Date.now(), orderId
       );
-      console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${side} $${amount.toFixed(2)} orderId=${orderId}`);
+      console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${clobSide} $${amount.toFixed(2)} orderId=${orderId}`);
 
       const pnlRow2 = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
       const tradeRow2 = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
@@ -644,9 +654,14 @@ export class MarketScanner {
       await sendSignalAlert({ ...result, question, orderId, executionStatus: "placed", pnlToday: pnlRow2.total, tradesToday: tradeRow2.cnt } as any);
     } catch (err) {
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'failed')").run(
-        result.slug, side, amount, Date.now()
+        result.slug, clobSide, amount, Date.now()
       );
       console.error(`[autoExecute] LIVE trade FAILED for ${result.slug}:`, err);
+      // Still send FYI alert so Carlos knows a signal fired (even though execution failed)
+      try {
+        const { sendSignalAlert } = await import("../alerts/telegramAlert");
+        await sendSignalAlert({ ...result, question, orderId: "FAILED", executionStatus: "failed", pnlToday: pnlRow.total, tradesToday: tradesRow.cnt } as any);
+      } catch {}
     }
   }
 }
