@@ -338,27 +338,35 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:slug", async (req: Request, res: Response) => {
   const slug = String(req.params["slug"] ?? "");
   try {
-    const data = await runCli(["markets", "get", slug]);
-    res.json(data);
-  } catch (err) {
-    try {
-      const url = `https://gamma-api.polymarket.com/markets?slug=${slug}`;
-      const fallbackRes = await fetch(url, {
+    // Gamma bulk endpoint with slug filter is unreliable — search in active markets list
+    const urls = [
+      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}&limit=1`,
+      `https://gamma-api.polymarket.com/markets?active=true&limit=100&order=volume24hr&ascending=false`,
+    ];
+    let raw: Record<string, unknown> | null = null;
+
+    for (const url of urls) {
+      const r = await fetch(url, {
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(8000),
       });
-      if (!fallbackRes.ok) {
-        throw new Error(`Gamma API fallback failed with status ${fallbackRes.status}`);
+      if (!r.ok) continue;
+      const arr: unknown = await r.json();
+      if (Array.isArray(arr)) {
+        const match = arr.find((m: unknown) => (m as Record<string, unknown>)["slug"] === slug) as Record<string, unknown> | undefined;
+        if (match) { raw = match; break; }
       }
-      const data: unknown = await fallbackRes.json();
-      if (Array.isArray(data) && data.length > 0) {
-        res.json(data[0]);
-      } else {
-        res.json(data);
-      }
-    } catch (fallbackErr) {
-      handleCliError(res, err);
     }
+
+    if (!raw) {
+      res.status(404).json({ error: "Market not found" });
+      return;
+    }
+
+    // Normalize to frontend-expected shape (includes tokenId from clobTokenIds)
+    res.json(transformTrendingMarket(raw as GammaMarketRaw));
+  } catch (err) {
+    handleCliError(res, err);
   }
 });
 
