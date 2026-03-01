@@ -108,6 +108,18 @@ app.use("/api/alerts", alertsRouter);
 app.use("/api/scanner", scannerRouter);
 app.use("/api/performance", performanceRouter);
 
+// CLOB balance health endpoint — verify allowances without SSHing in
+app.get("/api/clob/balance", async (_req, res) => {
+  try {
+    const { runCli } = await import("./cli");
+    const result = await runCli(["clob", "balance", "--asset-type", "collateral"]);
+    res.json({ ok: true, data: result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // Sentry error handler (must be before generic error handler)
 app.use(Sentry.expressErrorHandler());
 
@@ -160,3 +172,16 @@ app.listen(PORT, () => {
     resolutionMonitor.checkResolutions().catch(console.error);
   }, 15 * 60 * 1000);
 });
+
+// Set CLOB allowances at startup (EOA mode — approve CLOB contracts to spend USDC)
+async function ensureClobAllowances(): Promise<void> {
+  if (process.env.PAPER_TRADING === "true") return;
+  try {
+    const { runCli } = await import("./cli");
+    const result = await runCli(["clob", "update-balance", "--asset-type", "collateral", "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"]);
+    console.log("[startup] CLOB allowances set:", JSON.stringify(result).slice(0, 200));
+  } catch (err) {
+    console.error("[startup] CLOB allowance setup failed:", err);
+  }
+}
+ensureClobAllowances().catch(() => {});

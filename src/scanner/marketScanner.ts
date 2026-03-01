@@ -65,7 +65,7 @@ async function fetchWithTimeout(url: string, ms = 8000): Promise<any> {
   finally { clearTimeout(timer); }
 }
 
-async function runRealPipeline(slug: string, yesPrice: number): Promise<{
+async function runRealPipeline(slug: string, yesPrice: number, question: string = slug): Promise<{
   sigma: { confidence: number; decision: string; thesis: string };
   edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount: number };
   clause: { veto: boolean; risk_level: string; summary: string };
@@ -86,7 +86,7 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
 
   // Run Oracle + Clause + Aura in parallel (Oracle writes to DB, Edge reads it)
   const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
-    runOracle({ slug, question: slug, yesPrice, tokenId: '' }),
+    runOracle({ slug, question, yesPrice, tokenId: '' }),
     fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`, 35000),
     fetchWithTimeout(`${BACKEND_URL}/api/aura/${slug}`, 30000),
   ]);
@@ -131,16 +131,19 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
   const kellyFrac = edgeData.fractional_kelly;
   const sentimentAmplifier = Math.abs(sentimentDelta) * 0.15; // Aura adds up to 15% confidence
   const priceOffCenter = Math.abs(yesPrice - 0.5) > 0.05;
-  // hasEdge: Kelly > 1% OR strong Aura signal (>0.1) OR reasonable Oracle confidence (>0.3)
-  const hasEdge = priceOffCenter && (kellyFrac >= 0.01 || Math.abs(sentimentDelta) >= 0.10 || oracleConf > 0.3);
+  // Task 3: Oracle divergence drives signal even when Kelly=0
+  const oracleDivergence = Math.abs(trueProbEstimate - yesPrice);
+  const derivedKelly = kellyFrac > 0 ? kellyFrac : Math.min(oracleDivergence / 2, 0.10);
+  // hasEdge: Kelly > 2% OR oracle divergence > 8% OR strong Aura signal OR reasonable Oracle conf
+  const hasEdge = kellyFrac >= 0.02 || oracleDivergence > 0.08 || (priceOffCenter && (Math.abs(sentimentDelta) >= 0.10 || oracleConf > 0.3));
   // Sentiment-aligned direction: if Aura is bullish and Oracle > yesPrice → YES; else follow Kelly
   let direction = edgeData.direction;
   if (Math.abs(sentimentDelta) >= 0.10) {
     direction = sentimentDelta > 0 ? "YES" : "NO";
   }
   const sigmaDecision = clauseData.veto ? "VETO" : hasEdge ? `BET_${direction}` : "SKIP";
-  const baseConf = hasEdge ? 0.45 + kellyFrac * 1.5 + sentimentAmplifier + oracleConf * 0.10 : 0;
-  const sigmaConfidence = clauseData.veto ? 0 : Math.min(baseConf, 0.85);
+  const baseConf = hasEdge ? 0.50 + derivedKelly * 3 + sentimentAmplifier + oracleConf * 0.10 : 0;
+  const sigmaConfidence = clauseData.veto ? 0 : Math.min(baseConf, 0.80);
   const sigmaData = {
     confidence: sigmaConfidence,
     decision: sigmaDecision,
@@ -462,8 +465,18 @@ export class MarketScanner {
           ? "BET_NO"
           : "SKIP";
 
+    const trueProbForAlert = (edge as any).estimated_true_prob ?? edge.estimated_true_prob;
+    const oracleDivergenceAlert = Math.abs(trueProbForAlert - (edge as any).market_price ?? trueProbForAlert) > 0.10 ||
+      Math.abs(trueProbForAlert - (sigma as any)._yesPrice ?? trueProbForAlert) > 0.10;
+    // Task 2: fire when sigma confident OR oracle diverges meaningfully from market
+    const pipelineOracle = (pipelineResult as any)?.oracle;
+    const marketYesPrice = pipelineOracle?.yes_price ?? pipelineOracle?.yesPrice ?? 0;
+    const estimatedProb = pipelineOracle?.estimated_true_prob ?? edge.estimated_true_prob;
+    const oracleDivergenceFromMarket = Math.abs(estimatedProb - marketYesPrice) > 0.10;
     const shouldAlert =
-      sigma.confidence >= 0.40 &&
+      (!clause?.veto) &&
+      (sigma.confidence >= 0.45 || oracleDivergenceFromMarket) &&
+      (sigma.confidence > 0 || oracleDivergenceFromMarket) &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
 
