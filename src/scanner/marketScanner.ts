@@ -18,6 +18,7 @@ export interface Market {
 export interface ScanResult {
   slug: string;
   tokenId?: string;
+  yesPrice?: number;
   scannedAt: number;
   sigmaConfidence: number;
   kellyFraction: number;
@@ -307,7 +308,7 @@ export class MarketScanner {
         await Promise.all(
           batch.map(async (m) => {
             try {
-              const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId);
+              const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId, m.question);
               await this.storeScanResult(result, m.question);
               scannedToday++;
 
@@ -437,14 +438,14 @@ export class MarketScanner {
     return !!row;
   }
 
-  async runPipelineForMarket(slug: string, yesPrice: number = 0.5, tokenId: string = ''): Promise<ScanResult> {
+  async runPipelineForMarket(slug: string, yesPrice: number = 0.5, tokenId: string = '', question: string = slug): Promise<ScanResult> {
     let sigma: { confidence: number; decision: string; thesis?: string };
     let edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount?: number };
     let pipelineResult: object;
     let clause: { veto?: boolean; risk_level?: string; summary?: string } | undefined;
 
     try {
-      const real = await runRealPipeline(slug, yesPrice);
+      const real = await runRealPipeline(slug, yesPrice, question);
       sigma = real.sigma;
       edge = real.edge;
       pipelineResult = real.pipelineResult;
@@ -465,14 +466,11 @@ export class MarketScanner {
           ? "BET_NO"
           : "SKIP";
 
-    const trueProbForAlert = (edge as any).estimated_true_prob ?? edge.estimated_true_prob;
-    const oracleDivergenceAlert = Math.abs(trueProbForAlert - (edge as any).market_price ?? trueProbForAlert) > 0.10 ||
-      Math.abs(trueProbForAlert - (sigma as any)._yesPrice ?? trueProbForAlert) > 0.10;
     // Task 2: fire when sigma confident OR oracle diverges meaningfully from market
     const pipelineOracle = (pipelineResult as any)?.oracle;
-    const marketYesPrice = pipelineOracle?.yes_price ?? pipelineOracle?.yesPrice ?? 0;
-    const estimatedProb = pipelineOracle?.estimated_true_prob ?? edge.estimated_true_prob;
-    const oracleDivergenceFromMarket = Math.abs(estimatedProb - marketYesPrice) > 0.10;
+    const marketYesPrice: number = pipelineOracle?.yes_price ?? pipelineOracle?.yesPrice ?? 0;
+    const estimatedProb: number = pipelineOracle?.estimated_true_prob ?? edge.estimated_true_prob;
+    const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.10;
     const shouldAlert =
       (!clause?.veto) &&
       (sigma.confidence >= 0.45 || oracleDivergenceFromMarket) &&
@@ -487,6 +485,7 @@ export class MarketScanner {
       kellyFraction: edge.kelly_fraction,
       recommendation: recommendation as ScanResult["recommendation"],
       probability: edge.estimated_true_prob,
+      yesPrice: marketYesPrice,
       tokenId,
       alertSent: false,
       shouldAlert,
@@ -644,7 +643,7 @@ export class MarketScanner {
         kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
         kelly_amount: amount,
         oracle_prob: isNaN(result.probability) ? 0 : result.probability,
-        market_price: isNaN(result.probability) ? 0 : result.probability,
+        market_price: isNaN(result.yesPrice ?? NaN) ? (isNaN(result.probability) ? 0 : result.probability) : result.yesPrice!,
         edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
         sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
         clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
@@ -691,7 +690,7 @@ export class MarketScanner {
         kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
         kelly_amount: amount,
         oracle_prob: isNaN(result.probability) ? 0 : result.probability,
-        market_price: isNaN(result.probability) ? 0 : result.probability,
+        market_price: isNaN(result.yesPrice ?? NaN) ? (isNaN(result.probability) ? 0 : result.probability) : result.yesPrice!,
         edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
         sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
         clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",

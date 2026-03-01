@@ -58,7 +58,7 @@ function formatSignalAlert(r: ScanResult): string {
   const edgePct   = Math.round((r.edge ?? 0) * 100);
   const betAmt    = (r.kelly_amount ?? 0).toFixed(2);
   const side      = r.recommendation.replace("BET_", "");
-  const status    = r.executionStatus === "paper" ? "PAPER" : r.executionStatus === "placed" ? "LIVE" : "?";
+  const status    = r.executionStatus === "paper" ? "PAPER" : r.executionStatus === "placed" ? "LIVE ✅" : "FAILED ❌";
   const orderId   = r.orderId ?? "unknown";
   const pnlSign   = (r.pnlToday ?? 0) >= 0 ? "+" : "";
   const polyUrl   = `https://polymarket.com/event/${r.slug}`;
