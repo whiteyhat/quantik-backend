@@ -390,22 +390,41 @@ function generateSyntheticPriceHistory(basePrice = 0.5, points = 30): { t: numbe
 // ── GET /api/markets/:tokenId/price-history ────────────────────
 router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
   const tokenId = String(req.params["tokenId"] ?? "");
+  const interval =
+    typeof req.query.interval === "string" ? req.query.interval : undefined;
+  const fidelity =
+    typeof req.query.fidelity === "string" ? req.query.fidelity : undefined;
+
+  // 1) Try CLI first
   try {
     const args = ["clob", "price-history", tokenId];
-    const interval =
-      typeof req.query.interval === "string" ? req.query.interval : undefined;
-    const fidelity =
-      typeof req.query.fidelity === "string" ? req.query.fidelity : undefined;
     if (interval) args.push("--interval", interval);
     if (fidelity) args.push("--fidelity", fidelity);
     const data = await runCli(args);
-    res.json(data);
-  } catch {
-    // CLI failed — return synthetic candlestick data as fallback
-    // synthetic: true flags this as generated data, not real market history
-    const synthetic = generateSyntheticPriceHistory(0.5, 30);
-    res.json({ data: synthetic, synthetic: true });
-  }
+    return res.json(data);
+  } catch {}
+
+  // 2) Try Gamma API for price history (tokenId is the condition ID or token ID)
+  try {
+    const gammaRes = await fetch(
+      `https://clob.polymarket.com/prices-history?market=${encodeURIComponent(tokenId)}&interval=${interval || "1d"}&fidelity=10`,
+      {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (gammaRes.ok) {
+      const data = (await gammaRes.json()) as any;
+      // CLOB returns { history: [{t: number, p: number}] }
+      if (data?.history && Array.isArray(data.history)) {
+        return res.json(data.history);
+      }
+    }
+  } catch {}
+
+  // 3) Final fallback: synthetic data as FLAT ARRAY (not wrapped object)
+  const synthetic = generateSyntheticPriceHistory(0.5, 30);
+  res.json(synthetic);
 });
 
 // ── GET /api/markets/:tokenId/spread ──────────────────────────
