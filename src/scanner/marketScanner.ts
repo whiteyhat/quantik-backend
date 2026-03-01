@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { runOracle } from "../oracle/index";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 
@@ -84,7 +85,7 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
 
   // Run Oracle + Clause + Aura in parallel (Oracle writes to DB, Edge reads it)
   const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
-    fetchWithTimeout(`${BACKEND_URL}/api/oracle/${slug}`, 50000),
+    runOracle({ slug, question: slug, yesPrice, tokenId: '' }),
     fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`, 35000),
     fetchWithTimeout(`${BACKEND_URL}/api/aura/${slug}`, 30000),
   ]);
@@ -337,7 +338,8 @@ export class MarketScanner {
 
     // Always use Gamma API (polymarket-cli returns oldest markets by ID, not active ones)
     console.log("[Scanner] Fetching from Gamma API...");
-    const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=200&order=volume24hr&ascending=false`);
+    // Sort by liquidity to favour political/geopolitical markets over daily sports
+    const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=200&order=liquidity&ascending=false`);
     if (!res.ok) throw new Error(`Gamma API error: ${res.status}`);
     const data = await res.json() as unknown[];
     rawMarkets = Array.isArray(data) ? data : [];
@@ -354,6 +356,10 @@ export class MarketScanner {
 
       const slug = (m["slug"] as string) || "";
       if (!slug) continue;
+
+      // Exclude daily sports, esports, and low-alpha markets
+      const sportsPattern = /^(nba-|nhl-|nfl-|mlb-|nba|lol-|cs2-|valorant-|dota-|cfb-|ncaa-|ufc-|boxing-|tennis-|soccer-|epl-|laliga-|serieA-|bundesliga-|champions-league-|nba-player-|mlb-player-)/i;
+      if (sportsPattern.test(slug)) continue;
 
       const endDate = (m["endDate"] as string) || (m["end_date_iso"] as string) || "";
       const volume = Number(m["volume24hr"] ?? m["volume"] ?? 0);
