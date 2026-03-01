@@ -2,6 +2,12 @@ import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
 import { insertPipelineRun, updatePipelineRun, getPipelineHistory, PipelineRun } from "../db/queries";
 import { v4 as uuid } from "uuid";
+import { runAura } from "../aura/index";
+import { runOracle } from "../oracle/index";
+import { runEdge } from "../edge/index";
+import { runFlux } from "../flux/index";
+import { runClause } from "../clause/index";
+import { runLucifer } from "../lucifer/index";
 
 const router = Router();
 
@@ -18,6 +24,7 @@ interface EdgeAgentData {
   market_price?: number;
   edge?: number;
   kelly_fraction?: number;
+  fractional_kelly?: number;
   ev_grade?: string;
   net_ev?: number;
 }
@@ -30,6 +37,7 @@ interface LuciferAgentData {
 
 interface AuraAgentData {
   sentiment_score?: number;
+  sentimentDelta?: number;
   narrative?: string;
 }
 
@@ -52,209 +60,36 @@ const OUTPUT_KEY_MAP: Record<string, AgentOutputKey> = {
   sigma: "sigma_output",
 };
 
-// ── Agent definitions ──────────────────────────────────────────
+// ── Timeout helper ─────────────────────────────────────────────
 
-async function runAura(_slug: string): Promise<AgentResult> {
-  return {
-    agent: "aura",
-    status: "complete",
-    data: {
-      sentiment_score: 0.72,
-      narrative: "Bullish momentum detected. Social volume rising 34% over 7d.",
-      sources: ["twitter", "polymarket-comments", "reddit"],
-      confidence: 0.68,
-    },
-  };
+async function withAgentTimeout<T>(name: string, promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`Agent ${name} timed out after ${ms}ms`)), ms);
+    promise.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
 }
 
-async function runFlux(slug: string): Promise<AgentResult> {
-  try {
-    const market = await runCli(["markets", "get", slug]) as Record<string, unknown>;
-    const liq = Number(market?.["liquidity"] ?? market?.["liquidityNum"] ?? 0);
-    const grade = liq > 10000 ? "A" : liq > 1000 ? "B" : liq > 100 ? "C" : "D";
-    const outcomePrices = market?.["outcomePrices"];
-    const prices = typeof outcomePrices === "string" ? JSON.parse(outcomePrices) : (Array.isArray(outcomePrices) ? outcomePrices : ["0.5","0.5"]);
-    const spread = Math.abs(Number(prices[0]) - Number(prices[1]));
-    return {
-      agent: "flux",
-      status: "complete",
-      data: {
-        liquidity_grade: grade,
-        spread: parseFloat(spread.toFixed(3)),
-        whale_signals: Math.floor(liq / 5000),
-        depth_score: Math.min(1, liq / 50000),
-        volume_24h: Number(market?.["volume24hr"] ?? 0),
-      },
-    };
-  } catch {
-    return {
-      agent: "flux",
-      status: "complete",
-      data: {
-        liquidity_grade: "C",
-        spread: 0.04,
-        whale_signals: 2,
-        depth_score: 0.42,
-        volume_24h: 1240,
-        note: "Estimated — market data unavailable",
-      },
-    };
-  }
-}
-
-async function runOracle(slug: string): Promise<AgentResult> {
-  try {
-    const market = await runCli(["markets", "get", slug]) as Record<string, unknown>;
-    const outcomePrices = market?.["outcomePrices"];
-    const prices = typeof outcomePrices === "string" ? JSON.parse(outcomePrices) : (Array.isArray(outcomePrices) ? outcomePrices : ["0.5","0.5"]);
-    const yesPrice = Number(prices[0]);
-    const noPrice = Number(prices[1]);
-    // Bayesian-adjusted estimate (slight market skepticism)
-    const marketImplied = yesPrice;
-    const probEstimate = Math.min(0.97, Math.max(0.03, marketImplied * 1.05));
-    return {
-      agent: "oracle",
-      status: "complete",
-      data: {
-        prob_estimate: parseFloat(probEstimate.toFixed(3)),
-        market_implied: parseFloat(marketImplied.toFixed(3)),
-        confidence: 0.74,
-        yes_price: yesPrice,
-        no_price: noPrice,
-        methodology: "Bayesian market-adjusted estimate",
-      },
-    };
-  } catch {
-    return {
-      agent: "oracle",
-      status: "complete",
-      data: {
-        prob_estimate: 0.58,
-        market_implied: 0.55,
-        confidence: 0.61,
-        yes_price: 0.55,
-        no_price: 0.45,
-        note: "Estimated — market data unavailable",
-      },
-    };
-  }
-}
-
-async function runEdge(_slug: string): Promise<AgentResult> {
-  return {
-    agent: "edge",
-    status: "complete",
-    data: {
-      estimated_true_prob: 0.71,
-      market_price: 0.63,
-      edge: 0.08,
-      kelly_fraction: 0.22,
-      ev_grade: "A-",
-      net_ev: 12.7,
-    },
-  };
-}
-
-async function runClause(_slug: string): Promise<AgentResult> {
-  return {
-    agent: "clause",
-    status: "complete",
-    data: {
-      resolution_risk: "LOW" as const,
-      technicality_risks: [
-        "Early resolution if event is cancelled",
-        "Governing body statistics may be delayed >24h",
-      ],
-      resolution_source: "UMA Oracle",
-      ambiguity_risk: "low",
-      recommendation: "Rules are clear. Proceed with standard position.",
-      confidence: 0.88,
-    },
-  };
-}
-
-async function runLucifer(slug: string, agentResults?: Record<string, unknown>): Promise<AgentResult> {
-  try {
-    // Pull live data from other agents already computed
-    const clause = agentResults?.clause as any;
-    const edge = agentResults?.edge as any;
-    const aura = agentResults?.aura as any;
-    const oracle = agentResults?.oracle as any;
-
-    // Dynamic risk factors based on real agent data
-    const ambiguityScore: number = clause?.ambiguityScore ?? 0.4;
-    const kellyFrac: number = edge?.kelly_fraction ?? edge?.kelly_recommended ?? 0;
-    const veto: boolean = clause?.veto ?? false;
-    const shiftDetected: boolean = aura?.shiftDetected ?? false;
-    const riskLevel: string = clause?.riskLevel ?? "UNKNOWN";
-
-    // Build dynamic bias flags
-    const biasFlags: string[] = [];
-
-    if (ambiguityScore > 0.5) biasFlags.push(`High resolution ambiguity (score=${ambiguityScore.toFixed(2)}) — resolution criteria may be disputed`);
-    if (kellyFrac > 0.3) biasFlags.push("Overconfidence risk — Kelly fraction is unusually high, check if model is overfitting recent data");
-    if (shiftDetected) biasFlags.push("Sentiment shift detected — crowd may be chasing momentum, not fundamentals");
-    if (riskLevel === "HIGH") biasFlags.push("Clause flagged HIGH resolution risk — historical analogues show dispute probability > 20%");
-    if (!biasFlags.length) biasFlags.push("Recency bias — check if recent news is driving edge or just noise");
-    biasFlags.push("Liquidity illusion — thin orderbook may not absorb position without slippage");
-
-    // Dynamic devil's advocate score
-    const baseAdversarialScore = Math.min(0.9, 0.25 + ambiguityScore * 0.4 + (veto ? 0.3 : 0));
-    const adjustedConf = veto ? -0.20 : ambiguityScore > 0.6 ? -0.10 : -0.03;
-
-    // Dynamic counter-thesis
-    const counterThesis = veto
-      ? `Clause vetoed this trade — resolution criteria are ambiguous enough that a dispute is likely. Market may resolve differently than expected.`
-      : ambiguityScore > 0.5
-      ? `Resolution ambiguity score ${ambiguityScore.toFixed(2)} suggests the criteria could be interpreted multiple ways. Consider the downside scenario carefully.`
-      : `Edge looks clean but base rates for similar markets often disappoint. Verify the Kelly estimate is not overfit to recent data.`;
-
-    const worstCase = veto
-      ? "Full loss with dispute risk — Clause recommends no position"
-      : `Partial loss if resolution is disputed or event timing slips`;
-
-    return {
-      agent: "lucifer",
-      status: "complete",
-      data: {
-        devils_advocate_score: parseFloat(baseAdversarialScore.toFixed(2)),
-        bias_flags: biasFlags,
-        counter_thesis: counterThesis,
-        worst_case: worstCase,
-        adjusted_confidence: parseFloat(adjustedConf.toFixed(3)),
-        pass: !veto && ambiguityScore < 0.7,
-        slug,
-        riskLevel,
-        ambiguityScore,
-      },
-    };
-  } catch {
-    return {
-      agent: "lucifer",
-      status: "complete",
-      data: {
-        devils_advocate_score: 0.35,
-        bias_flags: ["Data unavailable — applying conservative adversarial penalty"],
-        counter_thesis: "Unable to run full devil's advocate analysis. Treat signal with additional caution.",
-        worst_case: "Full loss if underlying assumptions are wrong",
-        adjusted_confidence: -0.08,
-        pass: true,
-      },
-    };
-  }
-}
+// ── Helpers ────────────────────────────────────────────────────
 
 function toAgentData<T>(raw: unknown): T | undefined {
   if (raw !== null && typeof raw === "object") return raw as T;
   return undefined;
 }
 
+interface OracleAgentData {
+  calibrated_prob?: number;
+  raw_prob?: number;
+}
+
 function runSigma(results: Record<string, unknown>): AgentResult {
   const edge = toAgentData<EdgeAgentData>(results["edge"]);
   const lucifer = toAgentData<LuciferAgentData>(results["lucifer"]);
   const aura = toAgentData<AuraAgentData>(results["aura"]);
+  const oracle = toAgentData<OracleAgentData>(results["oracle"]);
 
-  const baseConf = edge?.estimated_true_prob ?? 0.65;
+  const baseConf = oracle?.calibrated_prob ?? oracle?.raw_prob ?? edge?.estimated_true_prob ?? 0.65;
+  const sentimentBoost = aura?.sentimentDelta ?? aura?.sentiment_score ?? 0;
+  const kellyPct = edge?.fractional_kelly ?? edge?.kelly_fraction ?? 0;
   const adjustment = lucifer?.adjusted_confidence ?? 0;
   const finalConf = Math.max(0, Math.min(1, baseConf + adjustment));
 
@@ -267,9 +102,9 @@ function runSigma(results: Record<string, unknown>): AgentResult {
     data: {
       decision,
       confidence: parseFloat((finalConf * 100).toFixed(1)),
-      thesis: `Edge=${edge?.edge ?? "?"}, Sentiment=${aura?.sentiment_score ?? "?"}. Lucifer adjusted ${((adjustment ?? 0) * 100).toFixed(0)}pp. Final: ${decision} @ ${(finalConf * 100).toFixed(1)}%`,
-      size_pct: edge?.kelly_fraction ? parseFloat((edge.kelly_fraction * 100).toFixed(1)) : 2,
-      size_usd: edge?.kelly_fraction ? parseFloat((edge.kelly_fraction * 100 * 10).toFixed(0)) : 20,
+      thesis: `Edge=${edge?.edge ?? "?"}, Sentiment=${sentimentBoost ?? "?"}. Lucifer adjusted ${((adjustment ?? 0) * 100).toFixed(0)}pp. Final: ${decision} @ ${(finalConf * 100).toFixed(1)}%`,
+      size_pct: kellyPct ? parseFloat((kellyPct * 100).toFixed(1)) : 2,
+      size_usd: kellyPct ? parseFloat((kellyPct * 100 * 10).toFixed(0)) : 20,
       entry_price: edge?.market_price ?? 0.5,
       net_ev: edge?.net_ev ?? 0,
       ev_grade: edge?.ev_grade ?? "B",
@@ -280,7 +115,6 @@ function runSigma(results: Record<string, unknown>): AgentResult {
 // ── Input resolution ───────────────────────────────────────────
 
 function resolveSlug(body: Record<string, unknown>): string | null {
-  // Prefer slug > marketSlug (compat) > marketId
   if (typeof body["slug"] === "string" && body["slug"]) return body["slug"];
   if (typeof body["marketSlug"] === "string" && body["marketSlug"])
     return body["marketSlug"];
@@ -310,10 +144,8 @@ router.post("/run", async (req: Request, res: Response) => {
     return;
   }
 
-  // Resolve the identifier to use for pipeline (prefer slug over tokenId)
   const resolvedSlug = slug ?? tokenId ?? "";
 
-  // If only tokenId was given, try to fetch market slug from CLOB
   let effectiveSlug = resolvedSlug;
   if (!slug && tokenId) {
     try {
@@ -364,64 +196,126 @@ router.post("/run", async (req: Request, res: Response) => {
 
   sendEvent("pipeline:start", { runId, slug: effectiveSlug, timestamp: now });
 
-  const agents: Array<{
-    name: string;
-    fn: (s: string) => Promise<AgentResult>;
-  }> = [
-    { name: "aura", fn: runAura },
-    { name: "flux", fn: runFlux },
-    { name: "oracle", fn: runOracle },
-    { name: "edge", fn: runEdge },
-    { name: "clause", fn: runClause },
-    { name: "lucifer", fn: (slug) => runLucifer(slug, results) },
-  ];
+  // ── Pre-fetch full market data once — shared across all agents ──
+  const marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
+  const rawPrices = typeof marketRaw.outcomePrices === "string"
+    ? JSON.parse(marketRaw.outcomePrices as string)
+    : (marketRaw.outcomePrices ?? ["0.5","0.5"]);
+  const yes_price = parseFloat(String(rawPrices[0] ?? "0.5")) || 0.5;
+  const resolution_date = String(marketRaw.endDateIso ?? marketRaw.endDate ?? new Date(Date.now() + 30*86400000).toISOString());
+  const days_to_resolution = Math.max(1, Math.round((new Date(resolution_date).getTime() - Date.now()) / 86400000));
 
-  const results: Record<string, unknown> = {};
-
-  for (const agent of agents) {
-    try {
-      sendEvent("agent:start", { agent: agent.name });
-      const result = await agent.fn(effectiveSlug);
-      // Add realistic delay for mocked/fallback results
-      const isMocked = typeof (result.data as Record<string,unknown>)?.note === 'string' &&
-        ((result.data as Record<string,unknown>).note as string).includes('unavailable');
-      if (isMocked || process.env.APIFY_MOCK === 'true') {
-        await new Promise(r => setTimeout(r, 900 + Math.floor(Math.random() * 1100)));
-      }
-      results[agent.name] = result.data;
-      sendEvent("agent:complete", result);
-
-      const outputKey = OUTPUT_KEY_MAP[agent.name];
-      if (outputKey) {
-        const partial: Partial<PipelineRun> = {
-          [outputKey]: JSON.stringify(result.data),
-        };
-        updatePipelineRun(runId, partial);
-      }
-    } catch (err) {
-      const errorResult = {
-        agent: agent.name,
-        status: "error",
-        data: err instanceof Error ? err.message : String(err),
-      };
-      results[agent.name] = errorResult;
-      sendEvent("agent:error", errorResult);
-    }
+  // clobTokenIds[0] for Flux
+  let token_id: string | undefined;
+  const rawTokenIds = marketRaw.clobTokenIds ?? marketRaw.tokenIds;
+  if (typeof rawTokenIds === "string") {
+    try { const p = JSON.parse(rawTokenIds); token_id = Array.isArray(p) ? String(p[0]) : undefined; } catch { /* ignore */ }
+  } else if (Array.isArray(rawTokenIds)) {
+    token_id = String(rawTokenIds[0]);
   }
 
-  // Sigma aggregation
+  const marketInput = {
+    slug: effectiveSlug,
+    question: String(marketRaw.question ?? effectiveSlug),
+    description: String(marketRaw.description ?? ""),
+    yes_price,
+    resolution_date,
+    days_to_resolution,
+    category: String(marketRaw.category ?? "default"),
+    token_id,
+  };
+
+  const storeAgentResult = (name: string, data: unknown) => {
+    const outputKey = OUTPUT_KEY_MAP[name];
+    if (outputKey) {
+      updatePipelineRun(runId, { [outputKey]: JSON.stringify(data) } as Partial<PipelineRun>);
+    }
+  };
+
+  // ── Phase 1: Aura, Flux, Clause in parallel ──
+  sendEvent("agent:start", { agent: "aura" });
+  sendEvent("agent:start", { agent: "flux" });
+  sendEvent("agent:start", { agent: "clause" });
+
+  const [auraRes, fluxRes, clauseRes] = await Promise.allSettled([
+    withAgentTimeout("aura", runAura({ slug: marketInput.slug, question: marketInput.question, category: marketInput.category }), 30000),
+    withAgentTimeout("flux", runFlux({ slug: marketInput.slug, token_id: marketInput.token_id }), 10000),
+    withAgentTimeout("clause", runClause({ slug: marketInput.slug, question: marketInput.question, description: marketInput.description, days_to_resolution: marketInput.days_to_resolution }), 15000),
+  ]);
+  const auraResult = auraRes.status === "fulfilled" ? auraRes.value : null;
+  const fluxResult = fluxRes.status === "fulfilled" ? fluxRes.value : null;
+  const clauseResult = clauseRes.status === "fulfilled" ? clauseRes.value : null;
+
+  if (auraResult) {
+    sendEvent("agent:complete", { agent: "aura", status: "complete", data: auraResult });
+    storeAgentResult("aura", auraResult);
+  } else {
+    sendEvent("agent:error", { agent: "aura", status: "error", data: auraRes.status === "rejected" ? String((auraRes as PromiseRejectedResult).reason) : "unknown" });
+  }
+  if (fluxResult) {
+    sendEvent("agent:complete", { agent: "flux", status: "complete", data: fluxResult });
+    storeAgentResult("flux", fluxResult);
+  } else {
+    sendEvent("agent:error", { agent: "flux", status: "error", data: fluxRes.status === "rejected" ? String((fluxRes as PromiseRejectedResult).reason) : "unknown" });
+  }
+  if (clauseResult) {
+    sendEvent("agent:complete", { agent: "clause", status: "complete", data: clauseResult });
+    storeAgentResult("clause", clauseResult);
+  } else {
+    sendEvent("agent:error", { agent: "clause", status: "error", data: clauseRes.status === "rejected" ? String((clauseRes as PromiseRejectedResult).reason) : "unknown" });
+  }
+
+  // ── Phase 2: Oracle (after Aura so it can read aura_results from DB) ──
+  sendEvent("agent:start", { agent: "oracle" });
+  let oracleResult: any = null;
+  try {
+    oracleResult = await withAgentTimeout("oracle", runOracle(marketInput), 30000);
+  } catch { /* Oracle failed */ }
+  if (!oracleResult) {
+    sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "oracle_failed", runId });
+    sendEvent("agent:error", { agent: "oracle", status: "error", data: "Oracle failed or timed out" });
+    res.end();
+    return;
+  }
+  sendEvent("agent:complete", { agent: "oracle", status: "complete", data: oracleResult });
+  storeAgentResult("oracle", oracleResult);
+
+  // ── Phase 3: Edge (needs oracle result) ──
+  sendEvent("agent:start", { agent: "edge" });
+  let edgeResult: any = null;
+  try {
+    edgeResult = await withAgentTimeout("edge", runEdge(marketInput, oracleResult), 10000);
+  } catch { /* Edge failed */ }
+  if (!edgeResult) {
+    sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "edge_failed", runId });
+    sendEvent("agent:error", { agent: "edge", status: "error", data: "Edge failed or timed out" });
+    res.end();
+    return;
+  }
+  sendEvent("agent:complete", { agent: "edge", status: "complete", data: edgeResult });
+  storeAgentResult("edge", edgeResult);
+
+  // ── Phase 4: Lucifer (reads from collected results) ──
+  sendEvent("agent:start", { agent: "lucifer" });
+  const combinedResults: Record<string, unknown> = {
+    aura: auraResult,
+    flux: fluxResult,
+    clause: clauseResult,
+    oracle: oracleResult,
+    edge: edgeResult,
+  };
+  const luciferResult = await runLucifer(effectiveSlug, combinedResults);
+  combinedResults.lucifer = luciferResult?.data;
+  sendEvent("agent:complete", { agent: "lucifer", status: "complete", data: luciferResult?.data });
+  storeAgentResult("lucifer", luciferResult?.data);
+
+  // ── Phase 5: Sigma (reads combinedResults) ──
   sendEvent("agent:start", { agent: "sigma" });
-  const sigma = runSigma(results);
-  results["sigma"] = sigma.data;
+  const sigma = runSigma(combinedResults);
+  combinedResults["sigma"] = sigma.data;
   sendEvent("agent:complete", sigma);
 
   const sigmaData = sigma.data as Record<string, unknown>;
-
-  const fluxData = toAgentData<Record<string, unknown>>(results["flux"]);
-  const marketQuestion =
-    typeof fluxData?.["question"] === "string"
-      ? fluxData["question"]
-      : effectiveSlug;
 
   updatePipelineRun(runId, {
     sigma_output: JSON.stringify(sigma.data),
@@ -429,7 +323,7 @@ router.post("/run", async (req: Request, res: Response) => {
     decision: typeof sigmaData["decision"] === "string" ? sigmaData["decision"] : null,
     confidence:
       typeof sigmaData["confidence"] === "number" ? sigmaData["confidence"] : null,
-    market_question: marketQuestion,
+    market_question: marketInput.question,
   });
 
   sendEvent("pipeline:complete", {
@@ -457,7 +351,6 @@ router.get("/results", (_req: Request, res: Response) => {
         } catch { /* ignore parse error */ }
       }
 
-      // Derive signal status from sigma output
       let status: "TRADE" | "WATCH" | "SKIP" = "WATCH";
       if (r.sigma_output) {
         try {

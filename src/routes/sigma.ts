@@ -14,7 +14,7 @@ router.get("/status", (req: Request, res: Response) => {
 });
 
 // GET /api/sigma/:slug — returns last Sigma result from research_notes or pipeline history
-router.get("/:slug", (req: Request, res: Response) => {
+router.get("/:slug", async (req: Request, res: Response) => {
   const { slug } = req.params;
   const db = getDb();
 
@@ -39,7 +39,36 @@ router.get("/:slug", (req: Request, res: Response) => {
     } catch { /* ignore parse error */ }
   }
 
-  res.status(404).json({ error: "No sigma result found for this market" });
+  // If no cached result: gather agent results from DB and compute on-demand
+  const oracleRow = db.prepare("SELECT * FROM oracle_results WHERE market_slug = ? ORDER BY scored_at DESC LIMIT 1").get(slug) as any;
+  const edgeRow = db.prepare("SELECT * FROM edge_results WHERE marketSlug = ? ORDER BY scoredAt DESC LIMIT 1").get(slug) as any;
+  const clauseRow = db.prepare("SELECT * FROM clause_results WHERE marketSlug = ? ORDER BY scoredAt DESC LIMIT 1").get(slug) as any;
+  const fluxRow = db.prepare("SELECT * FROM flux_results WHERE marketSlug = ? ORDER BY scoredAt DESC LIMIT 1").get(slug) as any;
+  const auraRow = db.prepare("SELECT * FROM aura_results WHERE slug = ? ORDER BY scored_at DESC LIMIT 1").get(slug) as any;
+
+  // Market data
+  let marketData: any = null;
+  try {
+    const mktRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${slug}`);
+    const arr = await mktRes.json() as any[];
+    marketData = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
+  } catch { /* ignore */ }
+
+  if (!oracleRow || !edgeRow || !marketData) {
+    return res.status(404).json({ error: "Insufficient data to compute Sigma — run the pipeline first for this market" });
+  }
+
+  const sigmaInputs: SigmaInputs = {
+    oracle: oracleRow,
+    edge: edgeRow,
+    clause: clauseRow ?? null,
+    flux: fluxRow ?? null,
+    aura: auraRow ?? null,
+    market: { slug, question: marketData.question, yes_price: 0.5 },
+  };
+
+  const result = await runSigma(sigmaInputs);
+  return res.json({ ...result, source: "on_demand" });
 });
 
 // POST /api/sigma/run
