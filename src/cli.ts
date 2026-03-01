@@ -29,9 +29,9 @@ export async function runCli(args: string[]): Promise<unknown> {
               : 1;
           reject(
             new CliError(
-              `polymarket ${args.join(" ")} failed: ${stderr || error.message}`,
+              `polymarket ${args.join(" ")} failed: ${stderr || stdout?.trim() || error.message}`,
               code,
-              stderr
+              stderr || stdout?.trim() || ""
             )
           );
           return;
