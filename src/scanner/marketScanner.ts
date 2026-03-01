@@ -82,11 +82,11 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
     };
   }
 
-  // Run Oracle first (Gemini-powered, writes to DB), then Edge reads it via DB
-  // Run Clause in parallel with Oracle to save time
-  const [oracleRes, clauseRes] = await Promise.allSettled([
+  // Run Oracle + Clause + Aura in parallel (Oracle writes to DB, Edge reads it)
+  const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
     fetchWithTimeout(`${BACKEND_URL}/api/oracle/${slug}`, 50000),
     fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`, 35000),
+    fetchWithTimeout(`${BACKEND_URL}/api/aura/${slug}`, 30000),
   ]);
 
   // Extract Oracle result
@@ -94,7 +94,11 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
   const trueProbEstimate = rawOracle?.calibrated_prob ?? rawOracle?.p_yes ?? yesPrice;
   const oracleConf = rawOracle?.confidence ?? (Math.abs(yesPrice - 0.5) > 0.05 ? 0.55 : 0.40);
   const oracle = { confidence: oracleConf, estimated_true_prob: trueProbEstimate };
-  console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} source=${rawOracle ? "live" : "fallback"}`);
+  // Extract Aura sentiment delta (positive = bullish, negative = bearish)
+  const rawAura = (auraRes.status === "fulfilled" && auraRes.value) ? auraRes.value as any : null;
+  const sentimentDelta = rawAura?.sentimentDelta ?? rawAura?.sentiment_score ?? 0;
+
+  console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} aura_sentiment=${sentimentDelta.toFixed(3)} source=${rawOracle ? "live" : "fallback"}`);
 
   // Now run Edge (Oracle just wrote to DB, so Edge will pick it up)
   const edgeRes = await Promise.allSettled([
@@ -121,16 +125,24 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
     ambiguityScore: rawClause?.ambiguityScore ?? 0,
   };
 
-  // Synthesize Sigma from market price + Edge Kelly + Clause veto
-  // Signal fires when: Edge Kelly ≥ 5%, price is off-centre (edge exists), Clause not vetoed
+  // Synthesize Sigma: Kelly edge + Aura sentiment amplifier + Clause veto
   const kellyFrac = edgeData.fractional_kelly;
-  const hasEdge = kellyFrac >= 0.05 && Math.abs(yesPrice - 0.5) > 0.05;
-  const sigmaDecision = clauseData.veto ? "VETO" : hasEdge ? `BET_${edgeData.direction}` : "SKIP";
-  const sigmaConfidence = clauseData.veto ? 0 : hasEdge ? Math.min(0.65 + kellyFrac * 2, 0.90) : 0;
+  const sentimentAmplifier = Math.abs(sentimentDelta) * 0.15; // Aura adds up to 15% confidence
+  const priceOffCenter = Math.abs(yesPrice - 0.5) > 0.05;
+  // hasEdge: either Kelly > 1% OR strong Aura signal (>0.1) with price off-center
+  const hasEdge = priceOffCenter && (kellyFrac >= 0.01 || Math.abs(sentimentDelta) >= 0.10);
+  // Sentiment-aligned direction: if Aura is bullish and Oracle > yesPrice → YES; else follow Kelly
+  let direction = edgeData.direction;
+  if (Math.abs(sentimentDelta) >= 0.10) {
+    direction = sentimentDelta > 0 ? "YES" : "NO";
+  }
+  const sigmaDecision = clauseData.veto ? "VETO" : hasEdge ? `BET_${direction}` : "SKIP";
+  const baseConf = hasEdge ? 0.45 + kellyFrac * 1.5 + sentimentAmplifier : 0;
+  const sigmaConfidence = clauseData.veto ? 0 : Math.min(baseConf, 0.85);
   const sigmaData = {
     confidence: sigmaConfidence,
     decision: sigmaDecision,
-    thesis: `Market price ${Math.round(yesPrice * 100)}%. Edge=${edgeData.direction} Kelly=${(kellyFrac * 100).toFixed(1)}%. ${clauseData.veto ? "VETOED by Clause." : ""}`,
+    thesis: `Oracle=${trueProbEstimate.toFixed(2)} market=${yesPrice.toFixed(2)} kelly=${(kellyFrac*100).toFixed(1)}% aura_sentiment=${sentimentDelta.toFixed(2)}. ${clauseData.veto ? "VETOED." : sigmaDecision}`,
   };
 
   const bundle: AgentBundle = { oracle, edge_agent: edgeData, sigma: sigmaData, clause: clauseData };
@@ -444,8 +456,8 @@ export class MarketScanner {
           : "SKIP";
 
     const shouldAlert =
-      sigma.confidence >= 0.50 &&
-      edge.kelly_fraction >= 0.05 &&
+      sigma.confidence >= 0.40 &&
+      edge.kelly_fraction >= 0.01 &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
 
