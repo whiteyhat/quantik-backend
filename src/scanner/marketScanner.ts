@@ -82,21 +82,28 @@ async function runRealPipeline(slug: string, yesPrice: number): Promise<{
     };
   }
 
-  // Oracle and Sigma agents need prior pipeline runs — they read from DB, not compute on-demand.
-  // We use the Gamma market price (yesPrice) as our oracle estimate directly.
-  // Edge and Clause DO compute on-demand and are called here.
-  const [edgeRes, clauseRes] = await Promise.allSettled([
-    fetchWithTimeout(`${BACKEND_URL}/api/edge/${slug}`),
-    fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`),
+  // Run Oracle first (Gemini-powered, writes to DB), then Edge reads it via DB
+  // Run Clause in parallel with Oracle to save time
+  const [oracleRes, clauseRes] = await Promise.allSettled([
+    fetchWithTimeout(`${BACKEND_URL}/api/oracle/${slug}`, 50000),
+    fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`, 35000),
   ]);
 
-  // Oracle: use Gamma yesPrice + a slight Bayesian adjustment as true prob estimate
-  // Conservative: treat market price as unbiased until we have agent data
-  const trueProbEstimate = yesPrice;
-  const oracle = { confidence: Math.abs(yesPrice - 0.5) > 0.05 ? 0.60 : 0.45, estimated_true_prob: trueProbEstimate };
+  // Extract Oracle result
+  const rawOracle = (oracleRes.status === "fulfilled" && oracleRes.value) ? oracleRes.value as any : null;
+  const trueProbEstimate = rawOracle?.calibrated_prob ?? rawOracle?.p_yes ?? yesPrice;
+  const oracleConf = rawOracle?.confidence ?? (Math.abs(yesPrice - 0.5) > 0.05 ? 0.55 : 0.40);
+  const oracle = { confidence: oracleConf, estimated_true_prob: trueProbEstimate };
+  console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} source=${rawOracle ? "live" : "fallback"}`);
+
+  // Now run Edge (Oracle just wrote to DB, so Edge will pick it up)
+  const edgeRes = await Promise.allSettled([
+    fetchWithTimeout(`${BACKEND_URL}/api/edge/${slug}`, 20000),
+  ]);
+  const [edgeSettled] = edgeRes;
 
   // Normalize Edge — returns fractional_kelly, position_size, direction
-  const rawEdge = (edgeRes.status === "fulfilled" && edgeRes.value) ? edgeRes.value as any : null;
+  const rawEdge = (edgeSettled.status === "fulfilled" && edgeSettled.value) ? edgeSettled.value as any : null;
   const edgeData = {
     fractional_kelly: rawEdge?.fractional_kelly ?? 0,
     position_size: rawEdge?.position_size ?? 0,
@@ -287,6 +294,7 @@ export class MarketScanner {
               await this.storeScanResult(result, m.question);
               scannedToday++;
 
+              console.log(`[Scanner] ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)} rec=${result.recommendation} shouldAlert=${result.shouldAlert}`);
               if (result.shouldAlert) {
                 alertsTriggered++;
                 console.log(`[Scanner] ALERT triggered for ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)}`);
@@ -355,14 +363,14 @@ export class MarketScanner {
       if (endDate) {
         const closeTime = new Date(endDate).getTime();
         if (closeTime < now) continue; // already closed
-        if (closeTime - now > 96 * 60 * 60 * 1000) continue; // too far out
+        if (closeTime - now > 30 * 24 * 60 * 60 * 1000) continue; // too far out (30 days)
       }
 
       // 2. Volume > $30k
       if (volume < 30000) continue;
 
-      // 3. Price between 0.18 and 0.82
-      if (yesPrice < 0.18 || yesPrice > 0.82) continue;
+      // 3. Price between 0.05 and 0.95 (exclude near-certain resolved markets)
+      if (yesPrice < 0.05 || yesPrice > 0.95) continue;
 
       let tokenId = "";
       const clobTokenIds = m["clobTokenIds"];
