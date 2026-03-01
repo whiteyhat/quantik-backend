@@ -468,8 +468,8 @@ export class MarketScanner {
 
     // Task 2: fire when sigma confident OR oracle diverges meaningfully from market
     const pipelineOracle = (pipelineResult as any)?.oracle;
-    const marketYesPrice: number = pipelineOracle?.yes_price ?? pipelineOracle?.yesPrice ?? 0;
-    const estimatedProb: number = pipelineOracle?.estimated_true_prob ?? edge.estimated_true_prob;
+    const marketYesPrice: number = (pipelineOracle?.yes_price as number | undefined) ?? (pipelineOracle?.yesPrice as number | undefined) ?? 0;
+    const estimatedProb: number = (pipelineOracle?.estimated_true_prob as number | undefined) ?? edge.estimated_true_prob;
     const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.10;
     const shouldAlert =
       (!clause?.veto) &&
