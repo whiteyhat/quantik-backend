@@ -635,7 +635,7 @@ export class MarketScanner {
       const cliArgs = ["clob", "create-order",
         "--token", clobTokenId,
         "--side", clobSide,
-        "--price", price.toFixed(4),
+        "--price", price.toFixed(2),
         "--size", shares,
         "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
       ];
