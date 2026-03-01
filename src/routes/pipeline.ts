@@ -284,7 +284,7 @@ router.post("/run", async (req: Request, res: Response) => {
   sendEvent("agent:start", { agent: "edge" });
   let edgeResult: any = null;
   try {
-    edgeResult = await withAgentTimeout("edge", runEdge(marketInput, oracleResult), 10000);
+    edgeResult = await withAgentTimeout("edge", runEdge(marketInput, oracleResult), 15000);
   } catch { /* Edge failed */ }
   if (!edgeResult) {
     sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "edge_failed", runId });

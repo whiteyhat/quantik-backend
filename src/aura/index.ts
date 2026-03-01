@@ -186,10 +186,31 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
-  // News via NewsAPI
+  // News via NewsAPI (with fallback for overly specific keywords)
+  const fetchNewsWithFallback = async (question: string): Promise<{ title: string; publishedAt: string }[]> => {
+    let articles = await fetchNews(mainKeyword);
+
+    // Fallback: try first 4 words of the question if no results
+    if (articles.length === 0) {
+      const words = question.split(" ").slice(0, 4).join(" ");
+      articles = await fetchNews(words);
+    }
+
+    // Second fallback: try keyword split
+    if (articles.length === 0) {
+      const keywords = extractKeywords(question);
+      const shortQuery = keywords.slice(0, 2).join(" ");
+      if (shortQuery && shortQuery !== mainKeyword) {
+        articles = await fetchNews(shortQuery);
+      }
+    }
+
+    return articles;
+  };
+
   const fetchNewsData = async () => {
     try {
-      const articles = await fetchNews(mainKeyword);
+      const articles = await fetchNewsWithFallback(market.question);
       if (articles.length > 0) {
         sourceStatus["news"] = "ok";
         sourcesUsed.push("news");

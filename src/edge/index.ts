@@ -214,7 +214,7 @@ export async function runEdge(market: any, oracleResult: any): Promise<EdgeResul
   
   // Save to DB
   db.prepare(`
-    INSERT INTO edge_results (
+    INSERT OR REPLACE INTO edge_results (
       marketSlug, scoredAt, gross_edge, net_edge, ev_grade, net_ev,
       kelly_recommended, fractional_kelly, position_size, kelly_multiplier,
       time_decay_watch, arb_opportunities, correlation_penalty, corr_blocked, direction, confidence

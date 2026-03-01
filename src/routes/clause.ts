@@ -35,7 +35,7 @@ router.get("/:slug", async (req, res) => {
       description: market.description,
       days_to_resolution: market.days_to_resolution,
     };
-    const result = await withTimeout(runClause(input), 10_000);
+    const result = await withTimeout(runClause(input), 30_000);
     return res.json(result);
   } catch {
     // Fallback to latest DB result

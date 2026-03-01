@@ -144,14 +144,19 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
     w_clause * p_clause + 
     w_flux * p_flux;
 
-  // Confidence
-  let confidence = Math.min(
-    oracle?.confidence ?? 1.0,
-    edge?.confidence ?? 1.0,
-    aura?.confidence ?? 1.0,
-    clause?.confidence ?? 1.0,
-    flux?.confidence ?? 1.0
-  );
+  // Weighted average confidence — not Math.min (which collapses to weakest signal)
+  const confidenceInputs = [
+    { val: oracle?.confidence, weight: 3 },    // Oracle is most reliable (Gemini)
+    { val: clause?.confidence, weight: 2 },    // Clause is critical for veto
+    { val: edge?.confidence, weight: 2 },      // Edge is blocking
+    { val: flux?.confidence, weight: 1 },      // Flux is helpful
+    { val: aura?.confidence, weight: 1 },      // Aura is weakest signal
+  ].filter(c => c.val != null && c.val !== undefined);
+
+  const totalWeight = confidenceInputs.reduce((s, c) => s + c.weight, 0);
+  let confidence = totalWeight > 0
+    ? confidenceInputs.reduce((s, c) => s + (c.val! * c.weight), 0) / totalWeight
+    : 0.4;
 
   if (disagreeCount >= 3) {
     confidence -= 0.15;

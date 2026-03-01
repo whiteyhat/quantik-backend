@@ -15,7 +15,7 @@ export async function computeCorrelationPenalty(
   try {
     const port = process.env.PORT || 3001;
     const url = `http://localhost:${port}/api/portfolio/positions`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
     if (res.ok) {
       const data = await res.json() as any;
       const positions = data.positions || [];
