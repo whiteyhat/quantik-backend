@@ -632,7 +632,7 @@ export class MarketScanner {
     const price = Math.max(0.01, Math.min(0.99, result.probability));
     const shares = (amount / price).toFixed(2); // shares = USDC / price
     try {
-      const cliArgs = ["-o", "json", "clob", "create-order",
+      const cliArgs = ["clob", "create-order",
         "--token", clobTokenId,
         "--side", clobSide,
         "--price", price.toFixed(4),
