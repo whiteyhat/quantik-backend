@@ -463,7 +463,6 @@ export class MarketScanner {
 
     const shouldAlert =
       sigma.confidence >= 0.40 &&
-      edge.kelly_fraction >= 0.01 &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
 
