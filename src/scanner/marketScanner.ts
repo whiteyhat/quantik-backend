@@ -622,7 +622,25 @@ export class MarketScanner {
       const pnlRowP = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
       const tradeRowP = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({ ...result, question, orderId: "PAPER-MODE", executionStatus: "paper", pnlToday: pnlRowP.total, tradesToday: tradeRowP.cnt } as any);
+      await sendSignalAlert({
+        id: result.slug,
+        slug: result.slug,
+        question,
+        recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
+        sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
+        kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+        kelly_amount: amount,
+        oracle_prob: isNaN(result.probability) ? 0 : result.probability,
+        market_price: isNaN(result.probability) ? 0 : result.probability,
+        edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+        sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
+        clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
+        clause_summary: "",
+        orderId: "PAPER-MODE",
+        executionStatus: "paper",
+        pnlToday: pnlRowP.total,
+        tradesToday: tradeRowP.cnt,
+      } as any);
       return;
     }
 
@@ -651,7 +669,25 @@ export class MarketScanner {
       const tradeRow2 = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
 
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({ ...result, question, orderId, executionStatus: "placed", pnlToday: pnlRow2.total, tradesToday: tradeRow2.cnt } as any);
+      await sendSignalAlert({
+        id: result.slug,
+        slug: result.slug,
+        question,
+        recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
+        sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
+        kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+        kelly_amount: amount,
+        oracle_prob: isNaN(result.probability) ? 0 : result.probability,
+        market_price: isNaN(result.probability) ? 0 : result.probability,
+        edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+        sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
+        clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
+        clause_summary: "",
+        orderId,
+        executionStatus: "placed",
+        pnlToday: pnlRow2.total,
+        tradesToday: tradeRow2.cnt,
+      } as any);
     } catch (err) {
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'failed')").run(
         result.slug, clobSide, amount, Date.now()
@@ -660,7 +696,25 @@ export class MarketScanner {
       // Still send FYI alert so Carlos knows a signal fired (even though execution failed)
       try {
         const { sendSignalAlert } = await import("../alerts/telegramAlert");
-        await sendSignalAlert({ ...result, question, orderId: "FAILED", executionStatus: "failed", pnlToday: pnlRow.total, tradesToday: tradesRow.cnt } as any);
+        await sendSignalAlert({
+          id: result.slug,
+          slug: result.slug,
+          question,
+          recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
+          sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
+          kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+          kelly_amount: amount,
+          oracle_prob: isNaN(result.probability) ? 0 : result.probability,
+          market_price: isNaN(result.probability) ? 0 : result.probability,
+          edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+          sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
+          clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
+          clause_summary: "",
+          orderId: "FAILED",
+          executionStatus: "failed",
+          pnlToday: pnlRow.total,
+          tradesToday: tradesRow.cnt,
+        } as any);
       } catch {}
     }
   }
