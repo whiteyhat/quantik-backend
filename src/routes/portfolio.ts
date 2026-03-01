@@ -587,10 +587,45 @@ router.get("/attribution", (_req: Request, res: Response) => {
     console.warn("[portfolio:attribution] No real pipeline/trade data — returning empty attribution (data_source: no_data)");
   }
 
+  // ── Fetch executions from the executions table (these are real/paper trades) ──
+  interface ExecRow {
+    id: number;
+    slug: string;
+    side: string;
+    amount: number;
+    executed_at: number;
+    status: string;
+    order_id: string | null;
+    fill_price: number | null;
+    pnl: number | null;
+  }
+  const executions = db.prepare<[], ExecRow>(
+    "SELECT id, slug, side, amount, executed_at, status, order_id, fill_price, pnl FROM executions ORDER BY executed_at DESC LIMIT 500"
+  ).all();
+
+  // Map executions to the Trade shape the frontend expects
+  const tradeList = executions.map((e: ExecRow) => ({
+    id: e.id,
+    slug: e.slug,
+    market: e.slug.replace(/-/g, " ").replace(/\w/g, (c: string) => c.toUpperCase()),
+    direction: e.side === "buy" ? "YES" : "NO",
+    size: e.amount,
+    price: e.fill_price ?? 0,
+    outcome: e.status === "paper" || e.status === "placed"
+      ? (e.pnl === null ? "OPEN" : e.pnl > 0 ? "WIN" : "LOSS")
+      : "PENDING",
+    timestamp: e.executed_at,
+    pnl: e.pnl ?? undefined,
+    orderId: e.order_id ?? undefined,
+    mode: e.status,
+  }));
+
   const attribution = {
     bySignal,
     alphaCurve,
     byCategory,
+    trades: tradeList,
+    count: tradeList.length,
     synthetic: !isRealAttribution,
     data_source: isRealAttribution ? "db" : "no_data",
   };
