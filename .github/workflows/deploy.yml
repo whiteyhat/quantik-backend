@@ -24,7 +24,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Run API contract tests
-        run: npx jest --passWithNoTests
+        run: npm test
         env:
           NODE_ENV: test
           API_URL: https://quantik-backend-production.up.railway.app
