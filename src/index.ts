@@ -38,6 +38,7 @@ import monitoringRouter from "./routes/monitoring";
 import relayRouter, { warmGemini } from "./routes/relay";
 import performanceRouter from "./routes/performance";
 import scannerRouter from "./routes/scanner";
+import versionsRouter from "./routes/versions";
 import { MarketScanner } from "./scanner/marketScanner";
 import { ensureCircuitBreakerTable } from "./risk";
 import { startFillMonitor } from "./execution";
@@ -107,6 +108,7 @@ app.use("/api/relay", relayRouter);
 app.use("/api/alerts", alertsRouter);
 app.use("/api/scanner", scannerRouter);
 app.use("/api/performance", performanceRouter);
+app.use("/api/versions", versionsRouter);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {
