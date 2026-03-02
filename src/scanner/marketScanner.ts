@@ -13,11 +13,13 @@ export interface Market {
   endDate: string;
   yesPrice: number;
   tokenId: string;
+  noTokenId?: string;
 }
 
 export interface ScanResult {
   slug: string;
   tokenId?: string;
+  noTokenId?: string;
   yesPrice?: number;
   scannedAt: number;
   sigmaConfidence: number;
@@ -308,7 +310,7 @@ export class MarketScanner {
         await Promise.all(
           batch.map(async (m) => {
             try {
-              const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId, m.question);
+              const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId, m.question, m.noTokenId ?? "");
               await this.storeScanResult(result, m.question);
               scannedToday++;
 
@@ -397,10 +399,12 @@ export class MarketScanner {
 
       let tokenId = "";
       const clobTokenIds = m["clobTokenIds"];
+      let noTokenId = "";
       if (Array.isArray(clobTokenIds) && clobTokenIds.length > 0) {
         tokenId = String(clobTokenIds[0]);
+        noTokenId = clobTokenIds.length > 1 ? String(clobTokenIds[1]) : "";
       } else if (typeof clobTokenIds === "string") {
-        try { const p = JSON.parse(clobTokenIds); tokenId = Array.isArray(p) ? String(p[0]) : ""; } catch { tokenId = ""; }
+        try { const p = JSON.parse(clobTokenIds); tokenId = Array.isArray(p) ? String(p[0]) : ""; noTokenId = Array.isArray(p) && p.length > 1 ? String(p[1]) : ""; } catch { tokenId = ""; }
       }
 
       markets.push({
@@ -411,6 +415,7 @@ export class MarketScanner {
         endDate,
         yesPrice,
         tokenId,
+        noTokenId,
       });
     }
 
@@ -438,7 +443,7 @@ export class MarketScanner {
     return !!row;
   }
 
-  async runPipelineForMarket(slug: string, yesPrice: number = 0.5, tokenId: string = '', question: string = slug): Promise<ScanResult> {
+  async runPipelineForMarket(slug: string, yesPrice: number = 0.5, tokenId: string = '', question: string = slug, noTokenId: string = ''): Promise<ScanResult> {
     let sigma: { confidence: number; decision: string; thesis?: string };
     let edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount?: number };
     let pipelineResult: object;
@@ -487,6 +492,7 @@ export class MarketScanner {
       probability: edge.estimated_true_prob,
       yesPrice: marketYesPrice,
       tokenId,
+      noTokenId,
       alertSent: false,
       shouldAlert,
       pipelineResult,
@@ -617,7 +623,9 @@ export class MarketScanner {
       return;
     }
 
-    const clobSide = result.recommendation === "BET_YES" ? "buy" : "sell";
+    // BET_YES: buy YES token (clobTokenIds[0]); BET_NO: buy NO token (clobTokenIds[1])
+    // Never sell tokens we don't own — always BUY with USDC.e collateral
+    const clobSide = "buy";
     // Kelly amount: use kelly*portfolio, floor at $5 if signal fires but kelly is tiny
     const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
     const kellyAmount = result.kellyFraction > 0
@@ -659,8 +667,14 @@ export class MarketScanner {
 
     // Live execution via polymarket CLI
     const { runCli } = await import("../cli");
-    const clobTokenId = result.tokenId || result.slug; // tokenId from clobTokenIds[0]
-    const price = Math.max(0.01, Math.min(0.99, result.probability));
+    // For BET_YES: buy YES token at yesPrice; for BET_NO: buy NO token at (1 - yesPrice)
+    const isBetYes = result.recommendation === "BET_YES";
+    const yesTokenId = result.tokenId || result.slug;
+    const noTokenId = result.noTokenId || "";
+    const clobTokenId = isBetYes ? yesTokenId : (noTokenId || yesTokenId);
+    const yesMarketPrice = result.yesPrice ?? result.probability;
+    const rawPrice = isBetYes ? yesMarketPrice : (1 - yesMarketPrice);
+    const price = Math.max(0.01, Math.min(0.99, rawPrice));
     const shares = (amount / price).toFixed(2); // shares = USDC / price
     try {
       const cliArgs = ["clob", "create-order",
