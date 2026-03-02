@@ -684,13 +684,31 @@ export class MarketScanner {
     }
 
     // Pre-execution dedup: reject if this slug was already successfully traded today
-    // This prevents the UNIQUE constraint from failing AFTER money is spent on CLOB
     const alreadyTraded = db.prepare(
       "SELECT id FROM executions WHERE slug = ? AND executed_at >= ? AND status IN ('placed','paper')"
     ).get(result.slug, todayTs);
     if (alreadyTraded) {
       console.log(`[autoExecute] Slug ${result.slug} already traded today — skipping (dedup)`);
       return;
+    }
+
+    // Live balance guard: check on-chain USDC.e before every order
+    // Prevents spending non-existent balance and burning gas on doomed orders
+    if (!paperMode) {
+      try {
+        const balRes = await fetch("https://quantik-backend-production.up.railway.app/api/clob/balance", { signal: AbortSignal.timeout(5000) });
+        if (balRes.ok) {
+          const balData = await balRes.json() as any;
+          const onChainBalance = parseFloat(balData?.data?.balance ?? "0");
+          if (onChainBalance < amount + 2) { // require balance > bet + $2 buffer
+            console.log(`[autoExecute] Insufficient on-chain balance $${onChainBalance.toFixed(2)} for $${amount.toFixed(2)} bet on ${result.slug} — pausing trading`);
+            return;
+          }
+          console.log(`[autoExecute] Balance check: $${onChainBalance.toFixed(2)} on-chain — OK for $${amount.toFixed(2)} bet`);
+        }
+      } catch (e) {
+        console.warn(`[autoExecute] Balance check failed — proceeding with caution:`, (e as Error).message);
+      }
     }
 
     // Live execution via polymarket CLI — market orders (FOK, fills immediately at best ask)
