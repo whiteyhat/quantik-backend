@@ -29,7 +29,7 @@ export interface OrchestratorState {
 
 // ── Constants ──────────────────────────────────────────────────
 
-const SCAN_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (aggressive mode)
 const TOP_N = 20;
 const MIN_SCORE = 15;
 const GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets";

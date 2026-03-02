@@ -158,7 +158,7 @@ app.listen(PORT, () => {
   autoScanner.scan().catch(console.error); // initial scan on startup
   setInterval(() => {
     autoScanner.scan().catch(console.error);
-  }, 15 * 60 * 1000);
+  }, 5 * 60 * 1000); // 5min aggressive scan
 
   // Ensure alert columns exist
   ensureAlertColumns();
@@ -172,7 +172,7 @@ app.listen(PORT, () => {
   resolutionMonitor.checkResolutions().catch(console.error);
   setInterval(() => {
     resolutionMonitor.checkResolutions().catch(console.error);
-  }, 15 * 60 * 1000);
+  }, 5 * 60 * 1000); // 5min aggressive scan
 });
 
 // Set CLOB allowances at startup (EOA mode — approve CLOB contracts to spend USDC)

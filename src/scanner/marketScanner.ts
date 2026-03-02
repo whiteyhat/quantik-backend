@@ -54,7 +54,7 @@ interface AgentBundle {
   clause: { riskLevel: string; resolutionCriteria: string; veto: boolean; urgent: boolean; ambiguityScore?: number };
 }
 const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
-const AGENT_CACHE_TTL = 15 * 60 * 1000;
+const AGENT_CACHE_TTL = 8 * 60 * 1000;
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:3001";
 
 async function fetchWithTimeout(url: string, ms = 8000): Promise<any> {
@@ -227,7 +227,7 @@ function buildPipelineResult(slug: string, yesPrice: number): {
   const kellyFraction = Math.max(0, edge / (1 - yesPrice));
   const adjustedConf = Math.min(1, Math.max(0, estimatedTrueProb - 0.02));
   const decision =
-    adjustedConf > 0.6 ? "BET_YES" : adjustedConf < 0.4 ? "BET_NO" : "SKIP";
+    adjustedConf > 0.55 ? "BET_YES" : adjustedConf < 0.45 ? "BET_NO" : "SKIP";
 
   const pipelineResult = {
     slug,
@@ -293,10 +293,10 @@ export class MarketScanner {
     console.log("[Scanner] Starting market scan cycle");
 
     try {
-      const markets = await this.fetchTopMarkets(50);
+      const markets = await this.fetchTopMarkets(200);
       console.log(`[Scanner] Fetched ${markets.length} candidate markets`);
 
-      // Process in batches of 3 to avoid memory spikes
+      // Process in batches of 8 (aggressive mode)
       const filtered: Market[] = [];
       for (const m of markets) {
         if (await this.shouldSkip(m.slug)) continue;
@@ -305,8 +305,8 @@ export class MarketScanner {
 
       console.log(`[Scanner] ${filtered.length} markets to scan after dedup`);
 
-      for (let i = 0; i < filtered.length; i += 3) {
-        const batch = filtered.slice(i, i + 3);
+      for (let i = 0; i < filtered.length; i += 8) {
+        const batch = filtered.slice(i, i + 8);
         await Promise.all(
           batch.map(async (m) => {
             try {
@@ -434,7 +434,7 @@ export class MarketScanner {
 
   async shouldSkip(slug: string): Promise<boolean> {
     const db = getDb();
-    const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
+    const fifteenMinAgo = Date.now() - 8 * 60 * 1000;
     const row = db
       .prepare<[string, number], { scanned_at: number }>(
         "SELECT scanned_at FROM scanner_results WHERE slug = ? AND scanned_at >= ? ORDER BY scanned_at DESC LIMIT 1"
@@ -475,10 +475,10 @@ export class MarketScanner {
     const pipelineOracle = (pipelineResult as any)?.oracle;
     const marketYesPrice: number = (pipelineOracle?.yes_price as number | undefined) ?? (pipelineOracle?.yesPrice as number | undefined) ?? 0;
     const estimatedProb: number = (pipelineOracle?.estimated_true_prob as number | undefined) ?? edge.estimated_true_prob;
-    const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.10;
+    const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.08;
     const shouldAlert =
       (!clause?.veto) &&
-      (sigma.confidence >= 0.45 || oracleDivergenceFromMarket) &&
+      (sigma.confidence >= 0.35 || oracleDivergenceFromMarket) &&
       (sigma.confidence > 0 || oracleDivergenceFromMarket) &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
@@ -601,7 +601,7 @@ export class MarketScanner {
     try {
       tradesRow = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
       pnlRow = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
-      const sixHAgo = Date.now() - 6 * 60 * 60 * 1000;
+      const sixHAgo = Date.now() - 2 * 60 * 60 * 1000; // 2hr rate limit (was 6hr)
       recent = db.prepare("SELECT id FROM executions WHERE slug = ? AND executed_at >= ?").get(result.slug, sixHAgo);
     } catch (e) {
       console.error("[autoExecute] Circuit breaker DB read failed — fail closed:", e);
@@ -619,7 +619,7 @@ export class MarketScanner {
     }
 
     if (recent) {
-      console.log(`[autoExecute] Rate limit: already traded ${result.slug} in last 6h`);
+      console.log(`[autoExecute] Rate limit: already traded ${result.slug} in last 2h`);
       return;
     }
 
@@ -630,7 +630,7 @@ export class MarketScanner {
     const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
     const kellyAmount = result.kellyFraction > 0
       ? result.kellyFraction * portfolioUsdc
-      : 5; // minimum floor when sigma fires but kelly underflows
+      : 10; // minimum floor when sigma fires but kelly underflows
     const amount = Math.min(kellyAmount, maxBet);
 
     if (paperMode) {
