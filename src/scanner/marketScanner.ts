@@ -296,8 +296,8 @@ export class MarketScanner {
       const markets = await this.fetchTopMarkets(200);
       console.log(`[Scanner] Fetched ${markets.length} candidate markets`);
 
-      // Process in batches of 8 (aggressive mode)
-      // cycleSet: prevents same slug appearing twice in one cycle (even if shouldSkip misses it)
+      // Serial market processing — CLOB orders are sequential (not parallel) to avoid
+      // concurrent balance reads causing "not enough balance" on simultaneous submissions
       const cycleScanned = new Set<string>();
       const filtered: Market[] = [];
       for (const m of markets) {
@@ -309,31 +309,41 @@ export class MarketScanner {
 
       console.log(`[Scanner] ${filtered.length} markets to scan after dedup`);
 
+      // Pipeline analysis (Oracle/Aura/Edge) runs in parallel batches of 8 for speed.
+      // autoExecute is called serially AFTER each batch to prevent concurrent CLOB balance exhaustion.
       for (let i = 0; i < filtered.length; i += 8) {
         const batch = filtered.slice(i, i + 8);
-        await Promise.all(
+        // Phase 1: run all pipelines in parallel (no CLOB calls here)
+        const batchResults: Array<{ result: any; question: string } | null> = await Promise.all(
           batch.map(async (m) => {
             try {
               const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId, m.question, m.noTokenId ?? "");
               await this.storeScanResult(result, m.question);
               scannedToday++;
-
               console.log(`[Scanner] ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)} rec=${result.recommendation} shouldAlert=${result.shouldAlert}`);
-              if (result.shouldAlert) {
-                alertsTriggered++;
-                console.log(`[Scanner] ALERT triggered for ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)}`);
-                // AUTO-EXECUTE — no human approval needed
-                await this.autoExecute(result, m.question).catch(e =>
-                  console.error(`[Scanner] autoExecute failed for ${m.slug}:`, e)
-                );
-              }
+              return { result, question: m.question };
             } catch (err) {
               console.error(`[Scanner] Pipeline error for ${m.slug}:`, err);
+              return null;
             }
           })
         );
+
+        // Phase 2: execute trades SERIALLY — one CLOB order at a time, no race on balance
+        for (const item of batchResults) {
+          if (!item) continue;
+          const { result, question } = item;
+          if (result.shouldAlert) {
+            alertsTriggered++;
+            console.log(`[Scanner] ALERT triggered for ${result.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)}`);
+            await this.autoExecute(result, question).catch(e =>
+              console.error(`[Scanner] autoExecute failed for ${result.slug}:`, e)
+            );
+          }
+        }
+
         // Small delay between batches
-        if (i + 3 < filtered.length) await sleep(500);
+        if (i + 8 < filtered.length) await sleep(1000);
       }
 
       console.log(`[Scanner] Scan cycle complete. Processed ${filtered.length} markets.`);
@@ -631,12 +641,15 @@ export class MarketScanner {
     // BET_YES: buy YES token (clobTokenIds[0]); BET_NO: buy NO token (clobTokenIds[1])
     // Never sell tokens we don't own — always BUY with USDC.e collateral
     const clobSide = "buy";
-    // Kelly amount: use kelly*portfolio, floor at $5 if signal fires but kelly is tiny
+    // Kelly amount: NO edge = NO trade. Kelly=0 means skip, not default to $10.
+    // A $10 floor on a zero-edge signal is just gambling — remove it.
     const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
-    const kellyAmount = result.kellyFraction > 0
-      ? result.kellyFraction * portfolioUsdc
-      : 10; // minimum floor when sigma fires but kelly underflows
-    const amount = Math.min(kellyAmount, maxBet);
+    if (result.kellyFraction <= 0) {
+      console.log(`[autoExecute] Kelly=0 on ${result.slug} — no edge, skipping (not gambling)`);
+      return;
+    }
+    const kellyAmount = result.kellyFraction * portfolioUsdc;
+    const amount = Math.max(5, Math.min(kellyAmount, maxBet)); // floor $5 only when kelly > 0
 
     if (paperMode) {
       // Paper mode — log only
@@ -667,6 +680,16 @@ export class MarketScanner {
         pnlToday: pnlRowP.total,
         tradesToday: tradeRowP.cnt,
       } as any);
+      return;
+    }
+
+    // Pre-execution dedup: reject if this slug was already successfully traded today
+    // This prevents the UNIQUE constraint from failing AFTER money is spent on CLOB
+    const alreadyTraded = db.prepare(
+      "SELECT id FROM executions WHERE slug = ? AND executed_at >= ? AND status IN ('placed','paper')"
+    ).get(result.slug, todayTs);
+    if (alreadyTraded) {
+      console.log(`[autoExecute] Slug ${result.slug} already traded today — skipping (dedup)`);
       return;
     }
 
