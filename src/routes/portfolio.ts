@@ -156,14 +156,14 @@ const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // U
 // Working public Polygon RPCs (auth-free, confirmed 2026-02-25).
 // polygon-rpc.com, rpc.ankr.com/polygon, polygon.llamarpc.com all require API keys.
 const POLYGON_RPC_URLS = [
-  "https://polygon-rpc.com",                           // Polygon Foundation
-  "https://rpc-mainnet.maticvigil.com",                // MaticVigil
-  "https://polygon.meowrpc.com",                       // MeowRPC
-  "https://polygon.drpc.org",                          // dRPC
-  "https://endpoints.omniatech.io/v1/matic/mainnet/public", // Omnia
-  "https://1rpc.io/matic",                             // 1RPC (rate-limited)
-  "https://polygon-bor-rpc.publicnode.com",            // PublicNode
-  "https://rpc.ankr.com/polygon",                      // Ankr
+  "https://polygon.drpc.org",                          // dRPC — confirmed $247.59 ✓
+  "https://polygon-bor-rpc.publicnode.com",            // PublicNode — confirmed $247.59 ✓
+  "https://rpc.ankr.com/polygon",                      // Ankr — reliable fallback
+  "https://1rpc.io/matic",                             // 1RPC — last resort
+  // REMOVED: polygon-rpc.com (API key disabled 403)
+  // REMOVED: rpc-mainnet.maticvigil.com (deprecated)
+  // REMOVED: polygon.meowrpc.com (Too Many Requests)
+  // REMOVED: omniatech.io (empty response)
 ];
 
 interface RpcResponse {
@@ -486,127 +486,58 @@ router.get("/risk", async (_req: Request, res: Response) => {
 router.get("/attribution", (_req: Request, res: Response) => {
   const db = getDb();
 
-  const trades = db
-    .prepare<[], TradeRow>("SELECT * FROM trades")
+  // Source of truth for trades is the executions table (trades table is legacy/empty)
+  interface ExecAttrRow {
+    id: number; slug: string; side: string; amount: number;
+    executed_at: number; status: string; fill_price: number | null; pnl: number | null;
+  }
+  const executions2 = db
+    .prepare<[], ExecAttrRow>(
+      "SELECT id, slug, side, amount, executed_at, status, fill_price, pnl FROM executions ORDER BY executed_at DESC"
+    )
     .all();
 
-  const runs = db
-    .prepare<[], PipelineRunRow>("SELECT * FROM pipeline_runs")
-    .all();
+  const isRealAttribution = executions2.length > 0;
 
-  // Build a pipeline_run_id → trade map
-  const runTradeMap: Map<string, TradeRow[]> = new Map();
-  for (const t of trades) {
-    if (!t.pipeline_run_id) continue;
-    const bucket = runTradeMap.get(t.pipeline_run_id) ?? [];
-    bucket.push(t);
-    runTradeMap.set(t.pipeline_run_id, bucket);
-  }
-
-  // Agents whose outputs live in pipeline_runs
-  const AGENTS = [
-    "aura",
-    "flux",
-    "oracle",
-    "edge",
-    "sigma",
-    "clause",
-    "lucifer",
-  ] as const;
-  type Agent = (typeof AGENTS)[number];
-
-  // Accumulate per-agent stats via pipeline runs that have associated trades
-  const agentStats: Map<
-    Agent,
-    { pnl: number; trades: number; wins: number }
-  > = new Map(AGENTS.map((a) => [a, { pnl: 0, trades: 0, wins: 0 }]));
-
-  for (const run of runs) {
-    const linked = runTradeMap.get(run.id) ?? [];
-    if (linked.length === 0) continue;
-
-    const runPnl = linked.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
-
-    for (const agent of AGENTS) {
-      const outputKey = `${agent}_output` as keyof PipelineRunRow;
-      if (run[outputKey] !== null) {
-        const stats = agentStats.get(agent)!;
-        stats.pnl += runPnl / AGENTS.filter((a) => run[`${a}_output` as keyof PipelineRunRow] !== null).length;
-        stats.trades += linked.length;
-        if (runPnl > 0) stats.wins += linked.length;
-      }
-    }
-  }
-
-  // Build bySignal — use real data if we have any, otherwise realistic mock
-  const hasRealData = runs.some((r) => runTradeMap.get(r.id)?.length ?? 0 > 0);
-
-  // bySignal: only populated from real pipeline data — never fake numbers
-  const bySignal: SignalAttribution[] = hasRealData
-    ? AGENTS.map((agent) => {
-        const s = agentStats.get(agent)!;
-        return {
-          agent,
-          pnl: s.pnl,
-          trades: s.trades,
-          winRate: s.trades > 0 ? s.wins / s.trades : 0,
-        };
-      }).filter((s) => s.trades > 0)
-    : []; // No real data — return empty
-
-  // Alpha curve — daily cumulative PnL over last 30 days
+  // Alpha curve — daily cumulative PnL from executions
   const alphaCurve: AlphaPoint[] = (() => {
-    if (trades.length > 0) {
-      // Group by day
-      const dayMap: Map<string, number> = new Map();
-      for (const t of trades) {
-        const day = isoDate(t.created_at);
-        dayMap.set(day, (dayMap.get(day) ?? 0) + safeNum(t.net_ev, 0));
-      }
-
-      // Sort and build cumulative
-      let cumulative = 0;
-      return Array.from(dayMap.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([date, pnl]) => {
-          cumulative += pnl;
-          return { date, alpha: cumulative };
-        });
+    if (executions2.length === 0) return [];
+    const dayMap: Map<string, number> = new Map();
+    for (const e of executions2) {
+      const day = isoDate(e.executed_at);
+      const pnl = safeNum(e.pnl, 0);
+      dayMap.set(day, (dayMap.get(day) ?? 0) + pnl);
     }
-
-    // No trade history yet — return empty rather than fake numbers
-    return [];
+    let cumulative = 0;
+    return Array.from(dayMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, pnl]) => {
+        cumulative += pnl;
+        return { date, alpha: cumulative };
+      });
   })();
 
-  // P&L by category — derived from market_slug first word
-  const categoryMap: Map<
-    string,
-    { pnl: number; trades: number; wins: number }
-  > = new Map();
-
-  for (const t of trades) {
-    const category = t.market_slug.split("-")[0] ?? "other";
-    const s = categoryMap.get(category) ?? { pnl: 0, trades: 0, wins: 0 };
-    s.pnl += safeNum(t.net_ev, 0);
+  // byCategory — derived from executions slug prefix
+  const categoryMap2: Map<string, { pnl: number; trades: number; wins: number }> = new Map();
+  for (const e of executions2) {
+    const category = e.slug.split("-")[0] ?? "other";
+    const s = categoryMap2.get(category) ?? { pnl: 0, trades: 0, wins: 0 };
+    const pnl = safeNum(e.pnl, 0);
+    s.pnl += pnl;
     s.trades += 1;
-    if (safeNum(t.net_ev, 0) > 0) s.wins += 1;
-    categoryMap.set(category, s);
+    if (pnl > 0) s.wins += 1;
+    categoryMap2.set(category, s);
   }
+  const byCategory: CategoryAttribution[] = Array.from(categoryMap2.entries()).map(([category, s]) => ({
+    category, pnl: s.pnl, trades: s.trades,
+    winRate: s.trades > 0 ? s.wins / s.trades : 0,
+  }));
 
-  // byCategory: derived from real trade data only — never fake numbers
-  const byCategory: CategoryAttribution[] =
-    categoryMap.size > 0
-      ? Array.from(categoryMap.entries()).map(([category, s]) => ({
-          category,
-          pnl: s.pnl,
-          trades: s.trades,
-          winRate: s.trades > 0 ? s.wins / s.trades : 0,
-        }))
-      : []; // No trade history yet
+  // bySignal — empty until pipeline_runs are linked to executions
+  const bySignal: SignalAttribution[] = [];
 
-  const isRealAttribution = hasRealData && trades.length > 0;
   if (!isRealAttribution) {
-    console.warn("[portfolio:attribution] No real pipeline/trade data — returning empty attribution (data_source: no_data)");
+    console.info("[portfolio:attribution] No executions yet — returning empty attribution");
   }
 
   // ── Fetch executions from the executions table (these are real/paper trades) ──
