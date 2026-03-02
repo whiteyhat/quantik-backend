@@ -442,7 +442,7 @@ export function getCandidates(): {
 export function startScheduler(): void {
   if (scanTimer) return; // already running
 
-  console.log("[orchestrator] Starting scheduler — scan every 10 minutes");
+  console.log(`[orchestrator] Starting scheduler — scan every ${SCAN_INTERVAL_MS/60000} minutes`);
 
   // Run first scan after a short delay (let the server boot)
   setTimeout(() => {

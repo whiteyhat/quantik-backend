@@ -19,6 +19,10 @@ export interface FluxResult {
   total_liquidity: number;
   confidence: number;
   data_source: "cli" | "api" | "mock";
+  // Execution quality: slippage vs fair mid price (oracle prob)
+  slippage_vs_mid_10?: number;
+  slippage_vs_mid_50?: number;
+  execution_quality?: "GOOD" | "FAIR" | "POOR" | "AVOID";
 }
 
 interface OrderbookLevel {
@@ -102,7 +106,30 @@ function computeSlippage(
   const filled = targetUsd - remaining;
   if (filled === 0) return 0;
   const avgPrice = totalCost / filled;
+  // Price impact within the book (how much the price moves due to order size)
   return Math.abs(avgPrice - bestPrice) * 100; // percentage
+}
+
+// Slippage vs fair mid: how far from oracle/fair value is the actual fill?
+// This catches cases where book is deep but best ask is far from fair value.
+function computeSlippageVsMid(
+  levels: { price: number; size: number }[],
+  targetUsd: number,
+  fairMid: number
+): number {
+  if (levels.length === 0 || fairMid <= 0) return 0;
+  let remaining = targetUsd;
+  let totalCost = 0;
+  for (const l of levels) {
+    const fillAmt = Math.min(remaining, l.size);
+    totalCost += fillAmt * l.price;
+    remaining -= fillAmt;
+    if (remaining <= 0) break;
+  }
+  const filled = targetUsd - remaining;
+  if (filled === 0) return 0;
+  const avgPrice = totalCost / filled;
+  return Math.abs(avgPrice - fairMid) * 100; // vs fair value, not vs best ask
 }
 
 function gradeLiquidity(depth: number): "A" | "B" | "C" | "D" {
@@ -218,6 +245,16 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
 
   const slippage_10 = computeSlippage(asks, 10);
   const slippage_50 = computeSlippage(asks, 50);
+  // Fair mid = average of best bid and best ask (or oracle price if available)
+  const fairMid = total > 0 ? (bestBid + bestAsk) / 2 : 0.5;
+  const slippage_vs_mid_10 = computeSlippageVsMid(asks, 10, fairMid);
+  const slippage_vs_mid_50 = computeSlippageVsMid(asks, 50, fairMid);
+  // Execution quality based on spread from fair value
+  const execution_quality: "GOOD" | "FAIR" | "POOR" | "AVOID" =
+    slippage_vs_mid_10 < 2 ? "GOOD"
+    : slippage_vs_mid_10 < 10 ? "FAIR"
+    : slippage_vs_mid_10 < 30 ? "POOR"
+    : "AVOID";
 
   const liquidity_grade = gradeLiquidity(total);
 
@@ -251,6 +288,9 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
     total_liquidity: Math.round(total * 100) / 100,
     confidence: Math.round(confidence * 100) / 100,
     data_source: bookSource,
+    slippage_vs_mid_10: Math.round(slippage_vs_mid_10 * 100) / 100,
+    slippage_vs_mid_50: Math.round(slippage_vs_mid_50 * 100) / 100,
+    execution_quality,
   };
 
   persist(result);

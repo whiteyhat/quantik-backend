@@ -104,14 +104,41 @@ export async function runOracle(market: any): Promise<OracleResult> {
     }
   }
 
-  // Cross-market signals: use Aura sentimentDelta as proxy if available; omit if not
+  // Cross-market signals: Metaculus first (real prediction market), then Aura proxy fallback
   let crossSignals: { source: string; price: number; liquidity: number }[] = [];
-  if (aura && aura.sentiment_delta != null) {
+
+  // Try Metaculus API for real correlated market probabilities
+  try {
+    const metaculusKey = process.env.METACULUS_API_KEY;
+    if (metaculusKey && market.question) {
+      const qEnc = encodeURIComponent(market.question.slice(0, 80));
+      const mRes = await fetch(
+        `https://www.metaculus.com/api2/questions/?search=${qEnc}&status=open&limit=3`,
+        {
+          headers: { Authorization: `Token ${metaculusKey}`, "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(5000),
+        }
+      );
+      if (mRes.ok) {
+        const mData = await mRes.json() as any;
+        const results = mData?.results ?? [];
+        for (const q of results.slice(0, 2)) {
+          const prob = q?.community_prediction?.full?.q2 ?? q?.metaculus_prediction?.full?.q2 ?? null;
+          if (typeof prob === "number" && prob > 0 && prob < 1) {
+            crossSignals.push({ source: `Metaculus:${q.id}`, price: prob, liquidity: q.number_of_predictions ?? 0 });
+            has_real_cross_market = true;
+          }
+        }
+      }
+    }
+  } catch { /* Metaculus unavailable — fallback to proxy */ }
+
+  // Fallback: Aura sentimentDelta as directional proxy (not a real price)
+  if (crossSignals.length === 0 && aura && aura.sentiment_delta != null) {
     const proxy_price = Math.max(0, Math.min(1, market_implied + aura.sentiment_delta));
     crossSignals = [{ source: "Aura SentimentDelta (proxy)", price: proxy_price, liquidity: 0 }];
-    has_real_cross_market = true;
+    // Note: this is directional only — NOT a real correlated market price
   }
-  // No Manifold mock — if no real signal, crossSignals stays empty
 
   const divergence = crossSignals.length > 0 && Math.abs(crossSignals[0].price - market_implied) > 0.15;
 

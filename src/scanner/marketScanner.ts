@@ -297,9 +297,13 @@ export class MarketScanner {
       console.log(`[Scanner] Fetched ${markets.length} candidate markets`);
 
       // Process in batches of 8 (aggressive mode)
+      // cycleSet: prevents same slug appearing twice in one cycle (even if shouldSkip misses it)
+      const cycleScanned = new Set<string>();
       const filtered: Market[] = [];
       for (const m of markets) {
+        if (cycleScanned.has(m.slug)) continue;
         if (await this.shouldSkip(m.slug)) continue;
+        cycleScanned.add(m.slug);
         filtered.push(m);
       }
 
@@ -434,7 +438,8 @@ export class MarketScanner {
 
   async shouldSkip(slug: string): Promise<boolean> {
     const db = getDb();
-    const fifteenMinAgo = Date.now() - 8 * 60 * 1000;
+    // 3-min TTL: prevents double-scan within single cycle, but allows next 5-min cycle to re-scan
+    const fifteenMinAgo = Date.now() - 3 * 60 * 1000;
     const row = db
       .prepare<[string, number], { scanned_at: number }>(
         "SELECT scanned_at FROM scanner_results WHERE slug = ? AND scanned_at >= ? ORDER BY scanned_at DESC LIMIT 1"
