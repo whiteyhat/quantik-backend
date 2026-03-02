@@ -556,13 +556,13 @@ router.get("/attribution", (_req: Request, res: Response) => {
     "SELECT id, slug, side, amount, executed_at, status, order_id, fill_price, pnl FROM executions ORDER BY executed_at DESC LIMIT 500"
   ).all();
 
-  // Fetch latest scanner prices for simulated P&L
-  interface ScanPriceRow { slug: string; yes_price: number; probability: number; }
+  // Fetch latest scanner prices for simulated P&L (scanner_results has no yes_price column)
+  interface ScanPriceRow { slug: string; probability: number; }
   const scanRows = db.prepare<[], ScanPriceRow>(
-    "SELECT slug, yes_price, probability FROM scanner_results GROUP BY slug ORDER BY created_at DESC"
+    "SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC"
   ).all();
   const livePrice = new Map<string, number>(
-    scanRows.map((s: ScanPriceRow) => [s.slug, s.yes_price ?? s.probability ?? 0.5])
+    scanRows.map((s: ScanPriceRow) => [s.slug, s.probability ?? 0.5])
   );
 
   // Map executions to the Trade shape the frontend expects
