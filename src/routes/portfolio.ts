@@ -159,7 +159,7 @@ const POLYGON_RPC_URLS = [
   "https://polygon.drpc.org",                          // dRPC — confirmed $247.59 ✓
   "https://polygon-bor-rpc.publicnode.com",            // PublicNode — confirmed $247.59 ✓
   "https://rpc.ankr.com/polygon",                      // Ankr — reliable fallback
-  "https://1rpc.io/matic",                             // 1RPC — last resort
+  "https://polygon-rpc.com",                           // Polygon official RPC — last resort
   // REMOVED: polygon-rpc.com (API key disabled 403)
   // REMOVED: rpc-mainnet.maticvigil.com (deprecated)
   // REMOVED: polygon.meowrpc.com (Too Many Requests)
