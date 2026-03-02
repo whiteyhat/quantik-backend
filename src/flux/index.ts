@@ -61,7 +61,7 @@ async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | 
 
   // Fallback: try CLI
   try {
-    const raw = await runCli(["clob", "orderbook", tokenId]);
+    const raw = await runCli(["clob", "book", tokenId]);
     return { book: raw as OrderbookData, source: "cli" };
   } catch (err) {
     console.warn(`[Flux] CLI orderbook also failed for ${tokenId}: ${(err as Error).message}`);

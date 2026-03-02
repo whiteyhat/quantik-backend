@@ -156,11 +156,14 @@ const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // U
 // Working public Polygon RPCs (auth-free, confirmed 2026-02-25).
 // polygon-rpc.com, rpc.ankr.com/polygon, polygon.llamarpc.com all require API keys.
 const POLYGON_RPC_URLS = [
-  "https://1rpc.io/matic",
-  "https://polygon-bor-rpc.publicnode.com",
-  "https://polygon-rpc.com",
-  "https://rpc.ankr.com/polygon",
-  "https://polygon.llamarpc.com",
+  "https://polygon-rpc.com",                           // Polygon Foundation
+  "https://rpc-mainnet.maticvigil.com",                // MaticVigil
+  "https://polygon.meowrpc.com",                       // MeowRPC
+  "https://polygon.drpc.org",                          // dRPC
+  "https://endpoints.omniatech.io/v1/matic/mainnet/public", // Omnia
+  "https://1rpc.io/matic",                             // 1RPC (rate-limited)
+  "https://polygon-bor-rpc.publicnode.com",            // PublicNode
+  "https://rpc.ankr.com/polygon",                      // Ankr
 ];
 
 interface RpcResponse {
@@ -240,10 +243,16 @@ async function getPolygonBalances(
     console.log(`[wallet:rpc] POL              raw hex=${polHex}`);
 
     // USDC: 6 decimals; POL: 18 decimals
-    const usdcBridged = Number(BigInt(usdcBridgedHex)) / 1e6;
-    const usdcNative  = Number(BigInt(usdcNativeHex))  / 1e6;
+    // Guard: RPC may return "0x" (empty/no data) — treat as 0 to avoid BigInt crash
+    const safeBigInt = (hex: string): bigint => {
+      const h = hex?.trim();
+      if (!h || h === "0x" || h === "0X") return 0n;
+      try { return BigInt(h); } catch { return 0n; }
+    };
+    const usdcBridged = Number(safeBigInt(usdcBridgedHex)) / 1e6;
+    const usdcNative  = Number(safeBigInt(usdcNativeHex))  / 1e6;
     const usdc        = usdcBridged + usdcNative;
-    const pol         = Number(BigInt(polHex)) / 1e18;
+    const pol         = Number(safeBigInt(polHex)) / 1e18;
 
     console.log(`[wallet:rpc] parsed USDC.e=${usdcBridged}`);
     console.log(`[wallet:rpc] parsed USDC native=${usdcNative}`);
