@@ -627,8 +627,9 @@ export class MarketScanner {
 
     if (paperMode) {
       // Paper mode — log only
-      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'paper')").run(
-        result.slug, clobSide, amount, Date.now()
+      const entryPrice = Math.max(0.01, Math.min(0.99, result.probability || 0.5));
+      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, fill_price) VALUES (?, ?, ?, ?, 'paper', ?)").run(
+        result.slug, clobSide, amount, Date.now(), entryPrice
       );
       console.log(`[autoExecute] PAPER trade: ${result.slug} ${clobSide} $${amount.toFixed(2)}`);
       const pnlRowP = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
@@ -672,8 +673,9 @@ export class MarketScanner {
       const output = await runCli(cliArgs) as Record<string, unknown>;
       const orderId = String((output as any)?.id ?? (output as any)?.order_id ?? "unknown");
 
-      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id) VALUES (?, ?, ?, ?, 'placed', ?)").run(
-        result.slug, clobSide, amount, Date.now(), orderId
+      const liveFillPrice = Math.max(0.01, Math.min(0.99, result.probability || 0.5));
+      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'placed', ?, ?)").run(
+        result.slug, clobSide, amount, Date.now(), orderId, liveFillPrice
       );
       console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${clobSide} $${amount.toFixed(2)} orderId=${orderId}`);
 

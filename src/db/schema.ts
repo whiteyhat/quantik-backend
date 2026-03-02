@@ -1,7 +1,10 @@
 import Database from "better-sqlite3";
 import path from "path";
 
-const DB_PATH = path.join(__dirname, "..", "..", "quantik.db");
+// Use persistent volume on Railway (/data) — falls back to project root locally
+const DB_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, "quantik.db")
+  : path.join(__dirname, "..", "..", "quantik.db");
 
 let db: Database.Database;
 

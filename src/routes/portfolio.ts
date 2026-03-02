@@ -616,22 +616,41 @@ router.get("/attribution", (_req: Request, res: Response) => {
     "SELECT id, slug, side, amount, executed_at, status, order_id, fill_price, pnl FROM executions ORDER BY executed_at DESC LIMIT 500"
   ).all();
 
+  // Fetch latest scanner prices for simulated P&L
+  interface ScanPriceRow { slug: string; yes_price: number; probability: number; }
+  const scanRows = db.prepare<[], ScanPriceRow>(
+    "SELECT slug, yes_price, probability FROM scanner_results GROUP BY slug ORDER BY created_at DESC"
+  ).all();
+  const livePrice = new Map<string, number>(
+    scanRows.map((s: ScanPriceRow) => [s.slug, s.yes_price ?? s.probability ?? 0.5])
+  );
+
   // Map executions to the Trade shape the frontend expects
-  const tradeList = executions.map((e: ExecRow) => ({
-    id: e.id,
-    slug: e.slug,
-    market: e.slug.replace(/-/g, " ").replace(/\w/g, (c: string) => c.toUpperCase()),
-    direction: e.side === "buy" ? "YES" : "NO",
-    size: e.amount,
-    price: e.fill_price ?? 0,
-    outcome: e.status === "paper" || e.status === "placed"
-      ? (e.pnl === null ? "OPEN" : e.pnl > 0 ? "WIN" : "LOSS")
-      : "PENDING",
-    timestamp: e.executed_at,
-    pnl: e.pnl ?? undefined,
-    orderId: e.order_id ?? undefined,
-    mode: e.status,
-  }));
+  const tradeList = executions.map((e: ExecRow) => {
+    const entry = e.fill_price ?? 0.5;
+    const current = livePrice.get(e.slug) ?? entry;
+    const shares = entry > 0 ? e.amount / entry : 0;
+    const priceMove = e.side === "buy" ? current - entry : entry - current;
+    const simPnl = e.pnl !== null ? e.pnl
+      : (e.status === "paper" || e.status === "placed") ? parseFloat((priceMove * shares).toFixed(4))
+      : null;
+    const outcome = simPnl !== null
+      ? (Math.abs(simPnl) < 0.005 ? "OPEN" : simPnl > 0 ? "WIN" : "LOSS")
+      : "PENDING";
+    return {
+      id: e.id,
+      slug: e.slug,
+      market: e.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+      direction: e.side === "buy" ? "YES" : "NO",
+      size: e.amount,
+      price: entry,
+      outcome,
+      timestamp: e.executed_at,
+      pnl: simPnl ?? undefined,
+      orderId: e.order_id ?? undefined,
+      mode: e.status,
+    };
+  });
 
   const attribution = {
     bySignal,
