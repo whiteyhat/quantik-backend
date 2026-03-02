@@ -70,6 +70,7 @@ interface PortfolioSummary {
   openPnl: number;
   winRate: number;
   totalTrades: number;
+  tradesExecutedToday?: number;
 }
 
 interface PositionEntry {
@@ -296,47 +297,58 @@ router.get("/summary", async (_req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const trades = db.prepare<[], TradeRow>("SELECT * FROM trades").all();
 
-  const totalTrades = trades.length;
-  const wins = trades.filter((t) => safeNum(t.net_ev, 0) > 0).length;
-  const winRate = totalTrades > 0 ? wins / totalTrades : 0;
+  // Read from executions table (the actual trade log — paper + live)
+  interface ExecSummaryRow {
+    id: number;
+    slug: string;
+    side: string;
+    amount: number;
+    executed_at: number;
+    status: string;
+    pnl: number | null;
+  }
+  const executions = db.prepare<[], ExecSummaryRow>(
+    "SELECT id, slug, side, amount, executed_at, status, pnl FROM executions ORDER BY executed_at DESC"
+  ).all();
 
-  const openTradeRows = trades.filter(
-    (t) => t.status === "submitted" || t.status === "open"
+  const totalTrades = executions.length;
+  const settledExecs = executions.filter((e: ExecSummaryRow) => e.pnl !== null);
+  const wins = settledExecs.filter((e: ExecSummaryRow) => (e.pnl ?? 0) > 0).length;
+  const winRate = settledExecs.length > 0 ? wins / settledExecs.length : 0;
+
+  // Open positions = placed/paper trades with no fill_price yet
+  const openExecs = executions.filter((e: ExecSummaryRow) =>
+    (e.status === "placed" || e.status === "paper") && e.pnl === null
   );
-
-  const positions: PositionEntry[] = openTradeRows.map((t) => ({
-    marketSlug: t.market_slug,
-    direction: t.direction,
-    size: safeNum(t.size, 0),
-    price: safeNum(t.price, 0),
-    openPnl: safeNum(t.net_ev, 0),
+  const positions: PositionEntry[] = openExecs.map((e: ExecSummaryRow) => ({
+    marketSlug: e.slug,
+    direction: e.side === "buy" ? "YES" : "NO",
+    size: e.amount,
+    price: 0,
+    openPnl: 0,
   }));
-
-  const openPnl = positions.reduce((acc, p) => acc + p.openPnl, 0);
+  const openPnl = 0;
 
   // Total portfolio value: on-chain USDC + CLOB USDC + POL * ~$0.40 spot
   const totalValue = onChainUsdc + clobUsdc + pol * 0.4;
 
-  // Realised P&L: sum net_ev from all settled trades
-  const pnl = trades.reduce((acc, t) => acc + safeNum(t.net_ev, 0), 0);
+  // Realised P&L: sum settled pnl
+  const pnl = settledExecs.reduce((acc: number, e: ExecSummaryRow) => acc + (e.pnl ?? 0), 0);
   const pnlPct = totalValue > 0 ? pnl / Math.max(totalValue - pnl, 1) : 0;
 
   // "Today" trades — last 24 h
   const dayAgo = Date.now() - 86_400_000;
-  const todayTrades = trades.filter((t) => t.created_at > dayAgo);
-  const pnlToday = todayTrades.reduce(
-    (acc, t) => acc + safeNum(t.net_ev, 0),
-    0
-  );
+  const todayExecs = executions.filter((e: ExecSummaryRow) => e.executed_at > dayAgo);
+  const pnlToday = todayExecs.reduce((acc: number, e: ExecSummaryRow) => acc + (e.pnl ?? 0), 0);
   const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0;
+  const tradesExecutedToday = todayExecs.length;
 
   const kellyMax = 1.0;
   const kellyUtilization =
-    openTradeRows.length > 0
+    openExecs.length > 0
       ? Math.min(
-          (openTradeRows.length * DEFAULTS.maxPositionSizePct) / 100,
+          (openExecs.length * DEFAULTS.maxPositionSizePct) / 100,
           1
         )
       : 0;
@@ -381,6 +393,7 @@ router.get("/summary", async (_req: Request, res: Response) => {
     openPnl,
     winRate,
     totalTrades,
+    tradesExecutedToday,
     synthetic: false,
     data_source: "on_chain_and_db",
   };
