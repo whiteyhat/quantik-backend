@@ -296,7 +296,7 @@ export class MarketScanner {
 
     try {
       const markets = await this.fetchTopMarkets(200);
-      console.log(`[Scanner] Fetched ${markets.length} candidate markets`);
+      console.log(`[Scanner] Fetched ${markets.length} candidate markets (from ${rawMarkets.length} raw, filtered by vol/price/date)`);
 
       // Serial market processing — CLOB orders are sequential (not parallel) to avoid
       // concurrent balance reads causing "not enough balance" on simultaneous submissions
@@ -411,11 +411,12 @@ export class MarketScanner {
         if (closeTime - now > 30 * 24 * 60 * 60 * 1000) continue; // too far out (30 days)
       }
 
-      // 2. Volume > $5k
-      if (volume < 5000) continue;
+      // 2. Volume > $1k (liquid enough to trade; $5k was too restrictive)
+      if (volume < 1000) continue;
 
-      // 3. Price between 0.05 and 0.95 (exclude near-certain resolved markets)
-      if (yesPrice < 0.05 || yesPrice > 0.95) continue;
+      // 3. Price 0.03–0.97: exclude near-certain but keep low-prob YES (our BET_NO targets)
+      // Previous 0.05 floor was cutting all Iran/geo markets at 3-4% YES price
+      if (yesPrice < 0.03 || yesPrice > 0.97) continue;
 
       let tokenId = "";
       const clobTokenIds = m["clobTokenIds"];
