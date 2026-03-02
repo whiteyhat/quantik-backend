@@ -138,7 +138,9 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   const oracleDivergence = Math.abs(trueProbEstimate - yesPrice);
   const derivedKelly = kellyFrac > 0 ? kellyFrac : Math.min(oracleDivergence / 2, 0.10);
   // hasEdge: Kelly > 2% OR oracle divergence > 8% OR strong Aura signal OR reasonable Oracle conf
-  const hasEdge = kellyFrac >= 0.02 || oracleDivergence > 0.08 || (priceOffCenter && (Math.abs(sentimentDelta) >= 0.10 || oracleConf > 0.3));
+  // Require REAL edge: oracle divergence > 12% (meaningful mispricing) or Kelly > 3%
+  // Removed weak fallback conditions — priceOffCenter alone is not edge
+  const hasEdge = kellyFrac >= 0.03 || oracleDivergence > 0.12;
   // Sentiment-aligned direction: if Aura is bullish and Oracle > yesPrice → YES; else follow Kelly
   let direction = edgeData.direction;
   if (Math.abs(sentimentDelta) >= 0.10) {
@@ -299,10 +301,14 @@ export class MarketScanner {
       // Serial market processing — CLOB orders are sequential (not parallel) to avoid
       // concurrent balance reads causing "not enough balance" on simultaneous submissions
       const cycleScanned = new Set<string>();
+      const themeCap: Record<string, number> = {}; // max 2 per correlated theme cluster
       const filtered: Market[] = [];
       for (const m of markets) {
         if (cycleScanned.has(m.slug)) continue;
         if (await this.shouldSkip(m.slug)) continue;
+        const theme = m.slug.split("-").slice(0, 3).join("-").substring(0, 18);
+        if ((themeCap[theme] ?? 0) >= 2) continue; // cap Iran/similar clusters at 2
+        themeCap[theme] = (themeCap[theme] ?? 0) + 1;
         cycleScanned.add(m.slug);
         filtered.push(m);
       }
@@ -490,11 +496,12 @@ export class MarketScanner {
     const pipelineOracle = (pipelineResult as any)?.oracle;
     const marketYesPrice: number = (pipelineOracle?.yes_price as number | undefined) ?? (pipelineOracle?.yesPrice as number | undefined) ?? 0;
     const estimatedProb: number = (pipelineOracle?.estimated_true_prob as number | undefined) ?? edge.estimated_true_prob;
-    const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.08;
+    // Real edge threshold: oracle must diverge >12% from market, AND sigma ≥0.55
+    // This prevents low-confidence spray trades that drain capital with no edge
+    const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.12;
     const shouldAlert =
       (!clause?.veto) &&
-      (sigma.confidence >= 0.35 || oracleDivergenceFromMarket) &&
-      (sigma.confidence > 0 || oracleDivergenceFromMarket) &&
+      (sigma.confidence >= 0.55 || oracleDivergenceFromMarket) &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
 
