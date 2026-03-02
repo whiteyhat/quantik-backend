@@ -665,23 +665,19 @@ export class MarketScanner {
       return;
     }
 
-    // Live execution via polymarket CLI
+    // Live execution via polymarket CLI — market orders (FOK, fills immediately at best ask)
     const { runCli } = await import("../cli");
-    // For BET_YES: buy YES token at yesPrice; for BET_NO: buy NO token at (1 - yesPrice)
+    // For BET_YES: buy YES token; for BET_NO: buy NO token (clobTokenIds[1])
     const isBetYes = result.recommendation === "BET_YES";
     const yesTokenId = result.tokenId || result.slug;
     const noTokenId = result.noTokenId || "";
     const clobTokenId = isBetYes ? yesTokenId : (noTokenId || yesTokenId);
-    const yesMarketPrice = result.yesPrice ?? result.probability;
-    const rawPrice = isBetYes ? yesMarketPrice : (1 - yesMarketPrice);
-    const price = Math.max(0.01, Math.min(0.99, rawPrice));
-    const shares = (amount / price).toFixed(2); // shares = USDC / price
+    // market-order: --amount is USDC for buys (no --price or --size needed)
     try {
-      const cliArgs = ["clob", "create-order",
+      const cliArgs = ["clob", "market-order",
         "--token", clobTokenId,
         "--side", clobSide,
-        "--price", price.toFixed(2),
-        "--size", shares,
+        "--amount", amount.toFixed(2),
         "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
       ];
       const output = await runCli(cliArgs) as Record<string, unknown>;
