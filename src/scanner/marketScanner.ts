@@ -150,7 +150,7 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   const sigmaData = {
     confidence: sigmaConfidence,
     decision: sigmaDecision,
-    thesis: `Oracle=${trueProbEstimate.toFixed(2)} market=${yesPrice.toFixed(2)} kelly=${(kellyFrac*100).toFixed(1)}% aura_sentiment=${sentimentDelta.toFixed(2)}. ${clauseData.veto ? "VETOED." : sigmaDecision}`,
+    thesis: `Oracle(pipeline)=${trueProbEstimate.toFixed(2)} market=${yesPrice.toFixed(2)} kelly=${(kellyFrac*100).toFixed(1)}% aura_sentiment=${sentimentDelta.toFixed(2)}. ${clauseData.veto ? "VETOED." : sigmaDecision}`,
   };
 
   const bundle: AgentBundle = { oracle, edge_agent: edgeData, sigma: sigmaData, clause: clauseData };
@@ -220,14 +220,14 @@ function buildPipelineResult(slug: string, yesPrice: number): {
   edge: { kelly_fraction: number; estimated_true_prob: number };
   pipelineResult: object;
 } {
-  // Simulated pipeline (mirrors runSigma / runEdge in pipeline.ts)
-  // In production this would call full agent pipeline
-  const estimatedTrueProb = Math.min(0.95, Math.max(0.05, yesPrice + (Math.random() * 0.1 - 0.05)));
-  const edge = estimatedTrueProb - yesPrice;
-  const kellyFraction = Math.max(0, edge / (1 - yesPrice));
-  const adjustedConf = Math.min(1, Math.max(0, estimatedTrueProb - 0.02));
-  const decision =
-    adjustedConf > 0.55 ? "BET_YES" : adjustedConf < 0.45 ? "BET_NO" : "SKIP";
+  // FALLBACK pipeline — used only when real agent pipeline throws
+  // DO NOT use Math.random(). If we have no signal, we have no edge. Return SKIP with 0 confidence.
+  // This prevents random-noise trades from firing via the fallback path.
+  const estimatedTrueProb = yesPrice; // no fake oracle — market price is our null hypothesis
+  const edge = 0; // no computed edge without real agents
+  const kellyFraction = 0;
+  const adjustedConf = 0; // zero confidence → should not fire shouldAlert
+  const decision = "SKIP"; // always SKIP in fallback — never trade on noise
 
   const pipelineResult = {
     slug,

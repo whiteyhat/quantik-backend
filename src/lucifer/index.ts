@@ -1,4 +1,22 @@
 import { getDb } from "../db/schema";
+async function callGemini(prompt: string): Promise<string | null> {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json() as any;
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
+  } catch { return null; }
+}
 
 export interface LuciferAgentResult {
   agent: string;
@@ -40,15 +58,36 @@ export async function runLucifer(slug: string, agentResults?: Record<string, unk
     const baseAdversarialScore = Math.min(0.9, 0.25 + ambiguityScore * 0.4 + (veto ? 0.3 : 0));
     const adjustedConf = veto ? -0.20 : ambiguityScore > 0.6 ? -0.10 : -0.03;
 
-    const counterThesis = veto
-      ? `Clause vetoed this trade — resolution criteria are ambiguous enough that a dispute is likely. Market may resolve differently than expected.`
+    // Build real Gemini counter-thesis — market-specific devil's advocate
+    let counterThesis = veto
+      ? `Clause vetoed — resolution criteria are ambiguous. Market may resolve differently than expected.`
       : ambiguityScore > 0.5
-      ? `Resolution ambiguity score ${ambiguityScore.toFixed(2)} suggests the criteria could be interpreted multiple ways. Consider the downside scenario carefully.`
-      : `Edge looks clean but base rates for similar markets often disappoint. Verify the Kelly estimate is not overfit to recent data.`;
+      ? `Resolution ambiguity ${ambiguityScore.toFixed(2)} — criteria could be disputed.`
+      : `Edge requires validation — confirm Kelly is not overfit.`;
 
-    const worstCase = veto
+    let worstCase = veto
       ? "Full loss with dispute risk — Clause recommends no position"
       : `Partial loss if resolution is disputed or event timing slips`;
+
+    // Try Gemini for real per-market counter-thesis (devil's advocate)
+    if (!veto) {
+      try {
+        const auraHeadlines = (aura as any)?.newsHeadlines?.slice(0, 2).join("; ") ?? "";
+        const prompt = `You are a devil's advocate for prediction market trading. Be specific and skeptical.
+Market: ${slug}
+Kelly fraction: ${kellyFrac.toFixed(3)} | Ambiguity score: ${ambiguityScore.toFixed(2)} | Risk: ${riskLevel}
+Recent news context: ${auraHeadlines}
+Task: In 1-2 sentences, give the strongest argument AGAINST this trade. Be specific to this market, not generic.
+Format: Just the argument, no preamble.`;
+        const geminiText = await Promise.race([
+          callGemini(prompt),
+          new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000))
+        ]) as string | null;
+        if (geminiText && geminiText.length > 20) {
+          counterThesis = geminiText.slice(0, 300); // cap at 300 chars
+        }
+      } catch { /* fallback to template thesis above */ }
+    }
 
     return {
       agent: "lucifer",

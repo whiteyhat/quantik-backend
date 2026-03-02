@@ -154,7 +154,7 @@ async function computeSocialSentimentFromNews(query: string): Promise<{ score: n
     if (NEGATIVE.some(k => text.includes(k))) neg++;
   }
   const score = (pos - neg) / Math.max(articles.length, 1);
-  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length };
+  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length }; // volumeDelta: real Twitter API not connected — using news proxy
 }
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
@@ -308,9 +308,10 @@ export async function runAura(market: { slug: string; question: string; category
   const dataSufficiency = computeDataSufficiency(social.resultCount, 0, newsArticles.length);
 
   // Confidence
-  let confidence = Math.min(1.0, dataSufficiency + 0.2);
-  if (social.resultCount < 3) confidence = Math.min(confidence, 0.4);
-  if (newsArticles.length === 0) confidence -= 0.1;
+  // Confidence cap: 0.40 + dataSufficiency*0.45 prevents overconfidence when data is thin
+  let confidence = Math.min(0.40 + dataSufficiency * 0.45, dataSufficiency + 0.15);
+  if (social.resultCount < 3) confidence = Math.min(confidence, 0.35);
+  if (newsArticles.length === 0) confidence = Math.min(confidence - 0.1, 0.30);
 
   // Weight computation based on category
   const cat = market.category?.toLowerCase() || "default";
