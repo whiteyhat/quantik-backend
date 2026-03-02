@@ -403,13 +403,14 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
   const fidelity =
     typeof req.query.fidelity === "string" ? req.query.fidelity : undefined;
 
-  // 1) Try CLI first
+  // 1) Try CLI first — only use if it returns non-empty data
   try {
     const args = ["clob", "price-history", tokenId];
     if (interval) args.push("--interval", interval);
     if (fidelity) args.push("--fidelity", fidelity);
     const data = await runCli(args);
-    return res.json(data);
+    if (Array.isArray(data) && data.length > 0) return res.json(data);
+    // CLI returned [] — fall through to CLOB REST API
   } catch {}
 
   // 2) Try Gamma API for price history (tokenId is the condition ID or token ID)
@@ -430,9 +431,19 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
     }
   } catch {}
 
-  // 3) Final fallback: synthetic data as FLAT ARRAY (not wrapped object)
-  const synthetic = generateSyntheticPriceHistory(0.5, 30);
-  res.json(synthetic);
+  // 3) Final fallback: synthetic data anchored to actual market price from Gamma
+  try {
+    const gammaSlugRes = await fetch(
+      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(tokenId)}&active=true&limit=1`,
+      { signal: AbortSignal.timeout(4000) }
+    );
+    if (gammaSlugRes.ok) {
+      const gms = await gammaSlugRes.json() as any[];
+      const ltp = parseFloat(gms?.[0]?.lastTradePrice ?? "0.5");
+      if (ltp > 0) return res.json(generateSyntheticPriceHistory(ltp, 30));
+    }
+  } catch {}
+  res.json(generateSyntheticPriceHistory(0.5, 30));
 });
 
 // ── GET /api/markets/:tokenId/spread ──────────────────────────
