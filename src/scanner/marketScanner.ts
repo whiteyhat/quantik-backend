@@ -296,7 +296,7 @@ export class MarketScanner {
 
     try {
       const markets = await this.fetchTopMarkets(200);
-      console.log(`[Scanner] Fetched ${markets.length} candidate markets (from ${rawMarkets.length} raw, filtered by vol/price/date)`);
+      console.log(`[Scanner] Fetched ${markets.length} candidate markets`);
 
       // Serial market processing — CLOB orders are sequential (not parallel) to avoid
       // concurrent balance reads causing "not enough balance" on simultaneous submissions
