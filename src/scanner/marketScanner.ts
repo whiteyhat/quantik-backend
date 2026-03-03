@@ -385,7 +385,9 @@ export class MarketScanner {
       if (!slug) continue;
 
       // Exclude daily sports, esports, and low-alpha markets
-      const sportsPattern = /^(nba-|nhl-|nfl-|mlb-|nba|lol-|cs2-|valorant-|dota-|cfb-|ncaa-|ufc-|boxing-|tennis-|soccer-|epl-|laliga-|serieA-|bundesliga-|champions-league-|nba-player-|mlb-player-)/i;
+      // Expanded sports exclusion — includes Copa del Rey (cdr-), basketball leagues (bl1/2/3),
+      // Russian Premier League (rusrp-), Japanese leagues (j1/j2/j3), individual team slugs, etc.
+      const sportsPattern = /^(nba-|nhl-|nfl-|mlb-|nba|lol-|cs2-|valorant-|dota-|cfb-|ncaa-|ufc-|boxing-|tennis-|soccer-|epl-|laliga-|serieA-|bundesliga-|champions-league-|nba-player-|mlb-player-|cdr-|bl1-|bl2-|bl3-|bl4-|rusrp-|j1-|j2-|j3-|mls-|liga-mx-|afl-|nrl-|rugby-|cricket-|formula1-|f1-|golf-|pga-|wta-|atp-|nba2k-|fifa-|pes-|overwatch-|esport|spread-|handicap-|map-handicap-|point-spread-|moneyline-|over-under-|ats-)/i;
       if (sportsPattern.test(slug)) continue;
 
       const endDate = (m["endDate"] as string) || (m["end_date_iso"] as string) || "";
@@ -495,8 +497,9 @@ export class MarketScanner {
 
     // Task 2: fire when sigma confident OR oracle diverges meaningfully from market
     const pipelineOracle = (pipelineResult as any)?.oracle;
-    const marketYesPrice: number = (pipelineOracle?.yes_price as number | undefined) ?? (pipelineOracle?.yesPrice as number | undefined) ?? 0;
-    const estimatedProb: number = (pipelineOracle?.estimated_true_prob as number | undefined) ?? edge.estimated_true_prob;
+    // Oracle returns `market_implied`, not `yes_price` — fix field name for divergence check
+    const marketYesPrice: number = (pipelineOracle?.market_implied as number | undefined) ?? (pipelineOracle?.yes_price as number | undefined) ?? (pipelineOracle?.yesPrice as number | undefined) ?? 0;
+    const estimatedProb: number = (pipelineOracle?.calibrated_prob as number | undefined) ?? (pipelineOracle?.estimated_true_prob as number | undefined) ?? edge.estimated_true_prob;
     // Real edge threshold: oracle must diverge >12% from market, AND sigma ≥0.55
     // This prevents low-confidence spray trades that drain capital with no edge
     const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.12;
@@ -716,6 +719,26 @@ export class MarketScanner {
         }
       } catch (e) {
         console.warn(`[autoExecute] Balance check failed — proceeding with caution:`, (e as Error).message);
+      }
+    }
+
+    // Flux liquidity gate: check orderbook depth before CLOB — prevents FOK failures on illiquid markets
+    if (!paperMode) {
+      try {
+        const fluxCheck = await fetch(`${BACKEND_URL}/api/flux/${result.slug}`, { signal: AbortSignal.timeout(8000) });
+        if (fluxCheck.ok) {
+          const fluxData = await fluxCheck.json() as Record<string, unknown>;
+          if (fluxData?.soft_veto === true) {
+            console.log(`[autoExecute] FLUX soft_veto triggered for ${result.slug} — insufficient liquidity, skipping CLOB`);
+            db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'skipped_flux', NULL, NULL)").run(
+              result.slug, clobSide, amount, Date.now()
+            );
+            return;
+          }
+          console.log(`[autoExecute] Flux OK for ${result.slug} — liquidity sufficient`);
+        }
+      } catch (e) {
+        console.warn(`[autoExecute] Flux check failed — proceeding with caution:`, (e as Error).message);
       }
     }
 
