@@ -299,7 +299,8 @@ export async function runAura(market: { slug: string; question: string; category
   const searchTrendSpike = trends.spike;
   const searchTrendValue = trends.value;
 
-  // Whale positioning from Gamma API
+  // NOTE A1: whalePosYesPct is derived from market price (Gamma yesProbability) — NOT actual whale order data.
+  // True whale tracking requires on-chain wallet analysis (future enhancement).
   const whalePosYesPct = Math.round(marketData.yesProbability * 100);
   const whalePositioning: "LONG" | "SHORT" | "NEUTRAL" | "MIXED" =
     whalePosYesPct > 60 ? "LONG" : whalePosYesPct < 40 ? "SHORT" : "NEUTRAL";

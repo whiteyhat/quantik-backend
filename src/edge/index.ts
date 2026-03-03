@@ -40,7 +40,7 @@ function fetchPortfolioUsdc(slug: string): { value: number; source: string } {
 
   // Try polymarket-cli with 3s timeout
   try {
-    const output = execSync("polymarket-cli wallet balance", { timeout: 3000, encoding: "utf8" });
+    const output = execSync("polymarket wallet balance", { timeout: 3000, encoding: "utf8" });
     // Parse lines like "USDC: 1234.56" or "Balance: 1234.56 USDC"
     const match = output.match(/(?:USDC|Balance)[:\s]+([\d.]+)/i);
     if (match) {

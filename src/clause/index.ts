@@ -97,7 +97,8 @@ Respond ONLY with a valid JSON object matching this schema:
           temperature: 0.1,
           response_mime_type: "application/json"
         }
-      })
+      }),
+      signal: AbortSignal.timeout(30000), // 30s max — never hang pipeline
     });
 
     if (!response.ok) {

@@ -4,7 +4,7 @@ async function callGemini(prompt: string): Promise<string | null> {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -53,7 +53,11 @@ export async function runLucifer(slug: string, agentResults?: Record<string, unk
     if (shiftDetected) biasFlags.push("Sentiment shift detected — crowd may be chasing momentum, not fundamentals");
     if (riskLevel === "HIGH") biasFlags.push("Clause flagged HIGH resolution risk — historical analogues show dispute probability > 20%");
     if (!biasFlags.length) biasFlags.push("Recency bias — check if recent news is driving edge or just noise");
-    biasFlags.push("Liquidity illusion — thin orderbook may not absorb position without slippage");
+    // FIXED L1: Only flag liquidity illusion when Flux indicates thin orderbook, not always
+    const fluxData = agentResults?.flux as any;
+    if (fluxData?.liquidity_grade === "D" || fluxData?.soft_veto === true) {
+      biasFlags.push(`Liquidity risk — Flux grade=${fluxData?.liquidity_grade ?? "?"}, depth=${fluxData?.total_liquidity ?? "?"} — thin orderbook may not absorb position`);
+    }
 
     const baseAdversarialScore = Math.min(0.9, 0.25 + ambiguityScore * 0.4 + (veto ? 0.3 : 0));
     const adjustedConf = veto ? -0.20 : ambiguityScore > 0.6 ? -0.10 : -0.03;

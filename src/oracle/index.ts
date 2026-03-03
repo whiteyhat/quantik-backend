@@ -49,7 +49,8 @@ export async function runOracle(market: any): Promise<OracleResult> {
   const mockMode = process.env.ORACLE_MOCK === "true";
   const slug = market.slug || "unknown-market";
   const question = market.question || "Unknown question?";
-  const market_implied = market.yes_price || 0.5;
+  // FIXED: scanner passes yesPrice (camelCase), not yes_price — was always 0.5
+  const market_implied = market.yesPrice ?? market.yes_price ?? market.market_implied ?? 0.5;
   const resolutionDate = market.resolution_date || new Date(Date.now() + 30 * 86400000).toISOString();
   
   const days_to_resolution = Math.max(1, Math.round((new Date(resolutionDate).getTime() - Date.now()) / 86400000));
@@ -166,7 +167,7 @@ export async function runOracle(market: any): Promise<OracleResult> {
   const data_sources: Record<string, string> = {
     news: has_news ? "aura_db" : "none",
     whale: has_whale_data ? "aura_db" : "none",
-    cross_market: has_real_cross_market ? "aura_sentiment_proxy" : "none",
+    cross_market: has_real_cross_market ? "metaculus_live" : crossSignals.length > 0 ? "aura_sentiment_proxy" : "none",
     backtester: backtesterData.is_live ? "live" : "stub"
   };
 
@@ -179,7 +180,7 @@ export async function runOracle(market: any): Promise<OracleResult> {
     divergence_warning: divergence ? "WARNING: High divergence across markets." : undefined,
     whale_signal: whale_signal_p_yes != null ? `Whale yes %: ${whale_signal_p_yes.toFixed(1)}%` : undefined,
     news_headlines,
-    backtester_hit_rate: backtesterData.hit_rate ?? 68,
+    backtester_hit_rate: backtesterData.hit_rate ?? 50, // 50 = neutral when no real data (was 68 which over-inflated confidence)
     sample_size: backtesterData.sample_size,
     backtester_is_live: backtesterData.is_live
   };

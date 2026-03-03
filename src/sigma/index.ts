@@ -90,7 +90,10 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
   const edge_dir_mult = edge?.direction === "YES" ? 1 : -1;
   const p_edge = edge?.net_edge ? Math.max(0, Math.min(1, p_market + edge_dir_mult * edge.net_edge)) : p_oracle;
   const p_aura = aura?.sentimentDelta ? Math.max(0, Math.min(1, p_market + aura.sentimentDelta)) : p_market;
-  const p_clause = clause?.veto === true ? 0.2 : (clause?.adjusted_probability ?? p_market);
+  // FIXED S1: ClauseResult has no adjusted_probability field — use ambiguityScore as adjustment
+  // When veto: collapse to 0.2 (strong negative signal). When high ambiguity: discount toward market.
+  const clauseAmbiguity = clause?.ambiguityScore ?? 0;
+  const p_clause = clause?.veto === true ? 0.2 : p_market * (1 - clauseAmbiguity * 0.3);
   const p_flux = (flux && flux.depth_yes_pct != null) ? flux.depth_yes_pct : p_market;
 
   const agent_probs = [p_oracle, p_edge, p_aura, p_clause, p_flux];

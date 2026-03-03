@@ -652,6 +652,7 @@ export class MarketScanner {
     // BET_YES: buy YES token (clobTokenIds[0]); BET_NO: buy NO token (clobTokenIds[1])
     // Never sell tokens we don't own — always BUY with USDC.e collateral
     const clobSide = "buy";
+
     // Kelly amount: NO edge = NO trade. Kelly=0 means skip, not default to $10.
     // A $10 floor on a zero-edge signal is just gambling — remove it.
     const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
@@ -661,6 +662,34 @@ export class MarketScanner {
     }
     const kellyAmount = result.kellyFraction * portfolioUsdc;
     const amount = Math.max(5, Math.min(kellyAmount, maxBet)); // floor $5 only when kelly > 0
+
+    // Flux liquidity gate: check orderbook depth before CLOB — prevents FOK failures on illiquid markets
+    // FIXED F1: pass the correct tokenId for direction (NO token for BET_NO, YES token for BET_YES)
+    if (!paperMode) {
+      try {
+        const fluxIsBetNo = result.recommendation === "BET_NO";
+        const fluxTokenId = fluxIsBetNo ? (result.noTokenId || result.tokenId || "") : (result.tokenId || "");
+        const fluxUrl = fluxTokenId
+          ? `${BACKEND_URL}/api/flux/${result.slug}?tokenId=${encodeURIComponent(fluxTokenId)}`
+          : `${BACKEND_URL}/api/flux/${result.slug}`;
+        const fluxCheck = await fetch(fluxUrl, { signal: AbortSignal.timeout(8000) });
+        if (fluxCheck.ok) {
+          const fluxData = await fluxCheck.json() as Record<string, unknown>;
+          if (fluxData?.soft_veto === true) {
+            console.log(`[autoExecute] FLUX soft_veto triggered for ${result.slug} — insufficient liquidity, skipping CLOB`);
+            db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'skipped_flux', NULL, NULL)").run(
+              result.slug, clobSide, amount, Date.now()
+            );
+            return;
+          }
+          console.log(`[autoExecute] Flux OK for ${result.slug} — liquidity sufficient`);
+        }
+      } catch (e) {
+        console.warn(`[autoExecute] Flux check failed — proceeding with caution:`, (e as Error).message);
+      }
+    }
+
+
 
     if (paperMode) {
       // Paper mode — log only
@@ -719,26 +748,6 @@ export class MarketScanner {
         }
       } catch (e) {
         console.warn(`[autoExecute] Balance check failed — proceeding with caution:`, (e as Error).message);
-      }
-    }
-
-    // Flux liquidity gate: check orderbook depth before CLOB — prevents FOK failures on illiquid markets
-    if (!paperMode) {
-      try {
-        const fluxCheck = await fetch(`${BACKEND_URL}/api/flux/${result.slug}`, { signal: AbortSignal.timeout(8000) });
-        if (fluxCheck.ok) {
-          const fluxData = await fluxCheck.json() as Record<string, unknown>;
-          if (fluxData?.soft_veto === true) {
-            console.log(`[autoExecute] FLUX soft_veto triggered for ${result.slug} — insufficient liquidity, skipping CLOB`);
-            db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'skipped_flux', NULL, NULL)").run(
-              result.slug, clobSide, amount, Date.now()
-            );
-            return;
-          }
-          console.log(`[autoExecute] Flux OK for ${result.slug} — liquidity sufficient`);
-        }
-      } catch (e) {
-        console.warn(`[autoExecute] Flux check failed — proceeding with caution:`, (e as Error).message);
       }
     }
 

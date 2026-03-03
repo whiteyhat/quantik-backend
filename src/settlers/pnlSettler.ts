@@ -45,11 +45,22 @@ async function settle(): Promise<void> {
           continue;
         }
 
-        // Get fill price — from execution row or fall back to scanner_results
+        // Get fill price — from execution row or compute from market implied price
         let fillPrice = row.fill_price;
-        if (fillPrice == null) {
-          const scanRow = db.prepare(`SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`).get(row.slug) as { probability: number } | undefined;
-          if (scanRow) fillPrice = scanRow.probability;
+        if (fillPrice == null || fillPrice === 0) {
+          // FIXED PS2: don't use oracle probability as fill_price — use latest market price as estimate
+          const priceRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${row.slug}`).catch(() => null);
+          if (priceRes?.ok) {
+            const mkt = await priceRes.json().catch(() => []) as any[];
+            if (Array.isArray(mkt) && mkt[0]) {
+              try {
+                const prices = JSON.parse(mkt[0].outcomePrices || "[]");
+                const yesPrice = Number(prices[0] ?? 0.5);
+                // Approximate fill price: if it was a NO bet, fillPrice ≈ 1 - yesPrice at resolution
+                fillPrice = yesPrice < 0.5 ? (1 - yesPrice) : yesPrice;
+              } catch { fillPrice = 0.5; }
+            }
+          }
         }
 
         if (fillPrice == null || fillPrice === 0) {
@@ -57,7 +68,14 @@ async function settle(): Promise<void> {
           continue;
         }
 
-        const pnl = (resolutionPrice - fillPrice) * row.amount / fillPrice;
+        // FIXED PS1: Correct PnL for both BET_YES and BET_NO positions
+        // For both: shares = amount / fillPrice. If our bet wins, payout = shares * 1.0.
+        // Win condition: BET_YES wins when resolutionPrice=1; BET_NO wins when resolutionPrice=0
+        // Direction: if fillPrice < 0.5 → likely YES token (BET_YES); if fillPrice > 0.5 → likely NO token (BET_NO)
+        const isBetNo = fillPrice > 0.5; // NO tokens trade > 0.5 when YES is unlikely
+        const weWon = isBetNo ? resolutionPrice === 0 : resolutionPrice === 1;
+        const shares = row.amount / fillPrice;
+        const pnl = weWon ? shares * (1 - fillPrice) : -row.amount;
 
         db.prepare(`UPDATE executions SET pnl = ?, status = 'settled' WHERE id = ?`).run(pnl, row.id);
         db.prepare(`UPDATE oracle_results SET resolved_correctly = ? WHERE market_slug = ?`).run(pnl > 0 ? 1 : 0, row.slug);

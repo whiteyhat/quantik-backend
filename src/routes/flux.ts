@@ -15,12 +15,15 @@ router.get("/status", (_req: Request, res: Response) => {
 });
 
 // GET /api/flux/:slug — re-runs Flux for a market
+// Accepts optional ?tokenId= query param to override default YES tokenId (use NO tokenId for BET_NO checks)
 router.get("/:slug", async (req: Request, res: Response) => {
   const slug = req.params.slug as string;
+  const overrideTokenId = typeof req.query.tokenId === "string" ? req.query.tokenId : null;
   try {
     const market = await fetchMarketBySlug(slug);
+    const tokenId = overrideTokenId ?? market.token_id ?? "";
     const result = await withTimeout(
-      runFlux({ slug, token_id: market.token_id as string }),
+      runFlux({ slug, token_id: tokenId }),
       10_000
     );
     return res.json(result);
