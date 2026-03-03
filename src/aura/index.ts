@@ -62,8 +62,8 @@ const MARKET_CACHE_TTL = 10 * 60 * 1000;
 
 // --- Free data source functions ---
 
-const POSITIVE_KEYWORDS = ["likely", "will", "yes", "bullish", "confirmed", "happening", "surge", "rally", "up", "win"];
-const NEGATIVE_KEYWORDS = ["unlikely", "no", "bearish", "cancelled", "delayed", "doubt", "crash", "down", "lose", "fail"];
+const POSITIVE_KEYWORDS = ["win","wins","won","leads","ahead","victory","confirmed","passes","approved","elected","surges","rises","gains","advances","succeeds","closes","reaches","hits","achieves","launches","signs","agrees"];
+const NEGATIVE_KEYWORDS = ["loses","lost","defeated","drops","falls","fails","rejected","vetoed","cancelled","delayed","withdrew","reversed","denied","blocked","suspended","crashed","collapse","retreat","ceasefire","truce","peace","backs down"];
 
 async function searchExa(query: string, daysBack: number): Promise<{ title: string; snippet: string; url: string }[]> {
   try {
@@ -104,13 +104,13 @@ async function fetchNewsApi(keyword: string): Promise<{ title: string; published
   }
 }
 
-async function fetchAllNews(query: string): Promise<{ title: string; publishedAt: string; source?: string }[]> {
+async function fetchAllNews(query: string): Promise<{ title: string; publishedAt: string; source?: string; description?: string }[]> {
   // Primary: Google News (no API key, no rate limit, real-time)
   const gnewsArticles = await fetchGNews(query, { maxResults: 15, periodDays: 7 });
 
   if (gnewsArticles.length > 0) {
     console.log(`[Aura] GNews returned ${gnewsArticles.length} articles for: ${query}`);
-    return gnewsArticles.map(a => ({ title: a.title, publishedAt: a.publishedAt, source: a.source }));
+    return gnewsArticles.map(a => ({ title: a.title, publishedAt: a.publishedAt, source: a.source, description: a.description }));
   }
 
   // Fallback: NewsAPI
@@ -140,21 +140,18 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
   }
 }
 
-async function computeSocialSentimentFromNews(query: string): Promise<{ score: number; volumeDelta: number; resultCount: number }> {
-  const articles = await fetchAllNews(query);
+// BUG 2+3: Accept pre-fetched articles to avoid double GNews calls; score title+description
+function computeSentimentFromArticles(articles: { title: string; description?: string }[]): { score: number; volumeDelta: number; resultCount: number } {
   if (articles.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
-
-  const POSITIVE = ["likely","will","yes","bullish","confirmed","happening","surge","rally","up","win","passes","approved","elected","won","milestone","record"];
-  const NEGATIVE = ["unlikely","no","bearish","cancelled","delayed","doubt","crash","down","lose","fail","vetoed","rejected","lost","withdrawn","suspended","dropped"];
 
   let pos = 0, neg = 0;
   for (const a of articles) {
-    const text = a.title.toLowerCase();
-    if (POSITIVE.some(k => text.includes(k))) pos++;
-    if (NEGATIVE.some(k => text.includes(k))) neg++;
+    const text = (a.title + " " + (a.description || "")).toLowerCase();
+    if (POSITIVE_KEYWORDS.some(k => text.includes(k))) pos++;
+    if (NEGATIVE_KEYWORDS.some(k => text.includes(k))) neg++;
   }
   const score = (pos - neg) / Math.max(articles.length, 1);
-  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length }; // volumeDelta: real Twitter API not connected — using news proxy
+  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length };
 }
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
@@ -184,43 +181,39 @@ export async function runAura(market: { slug: string; question: string; category
     return data;
   };
 
-  // Social sentiment via Exa
-  const fetchSocial = async () => {
-    try {
-      const result = await computeSocialSentimentFromNews(market.question.slice(0, 100));
-      if (result.resultCount > 0) {
-        sourceStatus["twitter"] = "ok";
-        sourcesUsed.push("twitter");
-      } else {
-        sourceStatus["twitter"] = "unavailable";
-      }
-      return result;
-    } catch (err: any) {
-      sourceStatus["twitter"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
-      return { score: 0, volumeDelta: 0, resultCount: 0 };
+  // BUG 3 fix: Fetch news articles ONCE, share between sentiment + headlines
+  let sharedArticles: { title: string; publishedAt: string; source?: string; description?: string }[] = [];
+  try {
+    sharedArticles = await runWithTimeout(fetchAllNews(market.question));
+    if (sharedArticles.length === 0) {
+      const shortQuery = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
+      if (shortQuery) sharedArticles = await runWithTimeout(fetchAllNews(shortQuery));
     }
+  } catch {
+    // timeout — sharedArticles stays empty
+  }
+
+  // Social sentiment from shared articles (no extra GNews call)
+  const fetchSocial = async () => {
+    const result = computeSentimentFromArticles(sharedArticles);
+    if (result.resultCount > 0) {
+      sourceStatus["twitter"] = "ok";
+      sourcesUsed.push("twitter");
+    } else {
+      sourceStatus["twitter"] = "unavailable";
+    }
+    return result;
   };
 
-  // News via GNews (primary) + NewsAPI (fallback)
+  // News headlines from shared articles (no extra GNews call)
   const fetchNewsData = async () => {
-    try {
-      let articles = await fetchAllNews(market.question);
-      if (articles.length === 0) {
-        // Try shorter query — first 3 meaningful words
-        const shortQuery = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
-        if (shortQuery) articles = await fetchAllNews(shortQuery);
-      }
-      if (articles.length > 0) {
-        sourceStatus["news"] = "ok";
-        if (!sourcesUsed.includes("news")) sourcesUsed.push("news");
-      } else {
-        sourceStatus["news"] = "unavailable";
-      }
-      return articles;
-    } catch (err: any) {
-      sourceStatus["news"] = err.message === "TIMEOUT" ? "timeout" : "unavailable";
-      return [];
+    if (sharedArticles.length > 0) {
+      sourceStatus["news"] = "ok";
+      if (!sourcesUsed.includes("news")) sourcesUsed.push("news");
+    } else {
+      sourceStatus["news"] = "unavailable";
     }
+    return sharedArticles;
   };
 
   // Trends via GNews 7d vs 30d ratio (replaces broken Exa ratio)

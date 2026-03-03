@@ -1,5 +1,7 @@
 import { execFile } from "child_process";
 import { runOracle } from "../oracle/index";
+import { runEdge } from "../edge/index";
+import { runClause } from "../clause/index";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 
@@ -90,7 +92,7 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   // Run Oracle + Clause + Aura in parallel (Oracle writes to DB, Edge reads it)
   const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
     runOracle({ slug, question, yesPrice, tokenId: '' }),
-    fetchWithTimeout(`${BACKEND_URL}/api/clause/${slug}`, 35000),
+    runClause({ slug, question, description: question, days_to_resolution: 7 }),
     fetchWithTimeout(`${BACKEND_URL}/api/aura/${slug}`, 30000),
   ]);
 
@@ -105,9 +107,9 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
 
   console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} aura_sentiment=${sentimentDelta.toFixed(3)} source=${rawOracle ? "live" : "fallback"}`);
 
-  // Now run Edge (Oracle just wrote to DB, so Edge will pick it up)
+  // Now run Edge inline — pass oracleResult directly (no HTTP)
   const edgeRes = await Promise.allSettled([
-    fetchWithTimeout(`${BACKEND_URL}/api/edge/${slug}`, 20000),
+    runEdge({ slug, question, yesPrice }, rawOracle),
   ]);
   const [edgeSettled] = edgeRes;
 
@@ -387,7 +389,7 @@ export class MarketScanner {
       // Exclude daily sports, esports, and low-alpha markets
       // Expanded sports exclusion — includes Copa del Rey (cdr-), basketball leagues (bl1/2/3),
       // Russian Premier League (rusrp-), Japanese leagues (j1/j2/j3), individual team slugs, etc.
-      const sportsPattern = /^(nba-|nhl-|nfl-|mlb-|nba|lol-|cs2-|valorant-|dota-|cfb-|ncaa-|ufc-|boxing-|tennis-|soccer-|epl-|laliga-|serieA-|bundesliga-|champions-league-|nba-player-|mlb-player-|cdr-|bl1-|bl2-|bl3-|bl4-|rusrp-|j1-|j2-|j3-|mls-|liga-mx-|afl-|nrl-|rugby-|cricket-|formula1-|f1-|golf-|pga-|wta-|atp-|nba2k-|fifa-|pes-|overwatch-|esport|spread-|handicap-|map-handicap-|point-spread-|moneyline-|over-under-|ats-)/i;
+      const sportsPattern = /^(nba-|nhl-|nfl-|mlb-|nba|lol-|cs2-|valorant-|dota-|cfb-|cbb-|ncaa-|ufc-|boxing-|tennis-|soccer-|epl-|laliga-|serieA-|bundesliga-|champions-league-|nba-player-|mlb-player-|cdr-|bl1-|bl2-|bl3-|bl4-|rusrp-|j1-|j2-|j3-|mls-|liga-mx-|afl-|nrl-|rugby-|cricket-|formula1-|f1-|golf-|pga-|wta-|atp-|nba2k-|fifa-|pes-|overwatch-|esport|spread-|handicap-|map-handicap-|point-spread-|moneyline-|over-under-|ats-|val-|lal-|atm-|bar-|mad-|sev-|bet-|vil-|cel-|osa-|ray-|get-|ala-)|highest-temperature-|lowest-temperature-|-up-or-down-on-/i;
       if (sportsPattern.test(slug)) continue;
 
       const endDate = (m["endDate"] as string) || (m["end_date_iso"] as string) || "";
@@ -505,7 +507,8 @@ export class MarketScanner {
     const oracleDivergenceFromMarket = marketYesPrice > 0 && Math.abs(estimatedProb - marketYesPrice) > 0.12;
     const shouldAlert =
       (!clause?.veto) &&
-      (sigma.confidence >= 0.55 || oracleDivergenceFromMarket) &&
+      edge.kelly_fraction > 0 &&
+      sigma.confidence >= 0.55 &&
       recommendation !== "SKIP" &&
       recommendation !== "VETO";
 
@@ -769,9 +772,15 @@ export class MarketScanner {
       const output = await runCli(cliArgs) as Record<string, unknown>;
       const orderId = String((output as any)?.id ?? (output as any)?.order_id ?? "unknown");
 
-      const liveFillPrice = Math.max(0.01, Math.min(0.99, result.probability || 0.5));
+      // Store the ACTUAL token price as fill_price (not oracle prob)
+      // For BET_NO: fill_price = NO token price = 1 - yesPrice
+      // For BET_YES: fill_price = YES token price = yesPrice
+      const yesMarketPrice = result.yesPrice ?? result.probability ?? 0.5;
+      const actualFillPrice = isBetYes
+        ? Math.max(0.01, Math.min(0.99, yesMarketPrice))       // YES token price
+        : Math.max(0.01, Math.min(0.99, 1 - yesMarketPrice));  // NO token price
       db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'placed', ?, ?)").run(
-        result.slug, clobSide, amount, Date.now(), orderId, liveFillPrice
+        result.slug, clobSide, amount, Date.now(), orderId, actualFillPrice
       );
       console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${clobSide} $${amount.toFixed(2)} orderId=${orderId}`);
 
