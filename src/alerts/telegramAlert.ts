@@ -126,7 +126,6 @@ function esc(text: string): string {
 export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
   try {
     await tgPost("sendMessage", {
-      chat_id: CHAT_ID,
       text: formatSignalAlert(result),
       parse_mode: "HTML",
     });
@@ -140,7 +139,6 @@ export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
 export async function sendStatusUpdate(message: string): Promise<boolean> {
   try {
     await tgPost("sendMessage", {
-      chat_id: CHAT_ID,
       text: message,
       parse_mode: "HTML",
     });
