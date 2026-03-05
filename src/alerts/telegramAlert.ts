@@ -283,7 +283,7 @@ export class AlertPoller {
         sigma_confidence: (row.sigma_confidence as number) ?? 0,
         kelly_fraction:   (row.kelly_fraction as number) ?? 0,
         kelly_amount:     (row.kelly_amount as number) ?? 0,
-        oracle_prob:      (oracleData?.["calibrated_prob"] as number) ?? (row.sigma_confidence as number) ?? 0,
+        oracle_prob:      (oracleData?.calibrated_prob as number) ?? (oracleData?.p_yes as number) ?? (row.oracle_prob as number) ?? 0,
         market_price:     (oracleData?.["market_implied"] as number) ?? 0.5,
         edge:             (row.edge as number) ?? 0,
         sigma_thesis:     (sigmaData?.["thesis"] as string) ?? (sigmaData?.["reasoning"] as string) ?? "No thesis available",
