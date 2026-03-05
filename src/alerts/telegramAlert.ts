@@ -4,6 +4,7 @@
  */
 
 import { getDb } from "../db/schema";
+import { v4 as uuid } from "uuid";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,6 @@ async function getTelegramConfig() {
 async function tgPost(method: string, body: Record<string, unknown>): Promise<unknown> {
   const config = await getTelegramConfig();
   if (!config.botToken) throw new Error("Telegram bot token missing");
-  
   const url = `https://api.telegram.org/bot${config.botToken}/${method}`;
   const res = await fetch(url, {
     method: "POST",
@@ -91,25 +91,12 @@ function formatSignalAlert(r: ScanResult): string {
     `💡 ${esc(r.sigma_thesis ?? "")}`,
     `⚠️ Risk: ${esc(r.clause_risk_level ?? "UNKNOWN")}`,
     ``,
-    `📈 <b>Today P&amp;L:</b> ${pnlSign}$${(r.pnlToday ?? 0).toFixed(2)} · Trades: ${r.tradesToday ?? 0}`,
+    `📈 <b>Today P&L:</b> ${pnlSign}$${(r.pnlToday ?? 0).toFixed(2)} · Trades: ${r.tradesToday ?? 0}`,
     `🔗 <b>Order ID:</b> <code>${esc(orderId)}</code>`,
     `🌐 <a href="${polyUrl}">Verify on Polymarket</a>`,
   ];
 
   return lines.join("\n");
-}
-
-function formatTradeExecuted(slug: string, side: string, amount: string, pnlToday: number, tradesToday: number): string {
-  const pnlSign = pnlToday >= 0 ? "+" : "";
-  return [
-    `✅ <b>TRADE PLACED</b>`,
-    ``,
-    `📍 <code>${esc(slug)}</code>`,
-    `🎯 <b>${side}</b> $${amount} USDC`,
-    ``,
-    `📈 <b>Today P&L:</b> ${pnlSign}$${pnlToday.toFixed(2)} USDC`,
-    `🔢 <b>Trades today:</b> ${tradesToday}`,
-  ].join("\n");
 }
 
 function esc(text: string): string {
@@ -118,8 +105,6 @@ function esc(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
-
-// No inline keyboard — FYI only alerts, zero human approval required
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -155,60 +140,12 @@ export async function handleCallback(callbackData: string): Promise<void> {
 
   if (action === "exec") {
     const [slug, side, amount] = parts;
-    console.log(`[telegramAlert] EXECUTE signal: ${slug} ${side} $${amount}`);
-    // Mark as executed in pipeline_runs
-    db.prepare(
-      `UPDATE pipeline_runs SET signal_state = 'TRADE', alert_sent = 2 WHERE market_slug = ? AND alert_sent = 1 ORDER BY created_at DESC LIMIT 1`
-    ).run(slug);
-    // Trigger paper execution if available
-    try {
-      const executionResp = await fetch(`http://localhost:${process.env.PORT ?? 3001}/api/execution/paper`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug, direction: side, size: parseFloat(amount) }),
-      });
-      if (!executionResp.ok) {
-        console.warn(`[telegramAlert] paper execution returned ${executionResp.status}`);
-      }
-    } catch (e) {
-      console.warn("[telegramAlert] paper execution call failed:", e);
-    }
+    db.prepare(`UPDATE pipeline_runs SET signal_state = 'TRADE', alert_sent = 2 WHERE market_slug = ? AND alert_sent = 1 ORDER BY created_at DESC LIMIT 1`).run(slug);
     await sendStatusUpdate(`⚡ Executing trade: <b>${slug}</b> → ${side} @ $${amount}`);
-
   } else if (action === "skip") {
     const [slug] = parts;
-    console.log(`[telegramAlert] SKIP signal: ${slug}`);
-    db.prepare(
-      `UPDATE pipeline_runs SET signal_state = 'SKIP' WHERE market_slug = ? AND alert_sent = 1 ORDER BY created_at DESC LIMIT 1`
-    ).run(slug);
+    db.prepare(`UPDATE pipeline_runs SET signal_state = 'SKIP' WHERE market_slug = ? AND alert_sent = 1 ORDER BY created_at DESC LIMIT 1`).run(slug);
     await sendStatusUpdate(`⏭ Skipped: <b>${slug}</b>`);
-
-  } else if (action === "details") {
-    const [slug] = parts;
-    // Fetch latest pipeline run for this slug
-    const run = db.prepare(
-      `SELECT * FROM pipeline_runs WHERE market_slug = ? ORDER BY created_at DESC LIMIT 1`
-    ).get(slug) as Record<string, unknown> | undefined;
-
-    if (!run) {
-      await sendStatusUpdate(`❓ No pipeline data found for <b>${slug}</b>`);
-      return;
-    }
-
-    const snippet = JSON.stringify({
-      oracle: safeJson(run.oracle_output as string),
-      edge:   safeJson(run.edge_output as string),
-      sigma:  safeJson(run.sigma_output as string),
-      clause: safeJson(run.clause_output as string),
-    }, null, 2).slice(0, 3800);
-
-    await sendStatusUpdate(`<b>📊 Details: ${slug}</b>\n\n<pre>${snippet}</pre>`);
-
-  } else if (action === "mute") {
-    const [secs] = parts;
-    const muteUntil = Date.now() + (parseInt(secs, 10) * 1000);
-    db.prepare(`INSERT OR REPLACE INTO settings_kv (key, value) VALUES ('mute_until', ?)`).run(String(muteUntil));
-    await sendStatusUpdate(`🔕 Alerts muted for ${Math.round(parseInt(secs) / 60)} minutes`);
   }
 }
 
@@ -220,14 +157,10 @@ function safeJson(raw: string): unknown {
 
 export function ensureAlertColumns(): void {
   const db = getDb();
-
-  // Add alert_sent to pipeline_runs if missing
   const prCols = db.prepare("PRAGMA table_info(pipeline_runs)").all() as Array<{ name: string }>;
   if (!prCols.some((c) => c.name === "alert_sent")) {
     db.exec("ALTER TABLE pipeline_runs ADD COLUMN alert_sent INTEGER DEFAULT 0");
   }
-
-  // settings_kv for mute state
   db.exec(`CREATE TABLE IF NOT EXISTS settings_kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -242,49 +175,28 @@ export class AlertPoller {
 
     // Check mute
     const muteRow = db.prepare(`SELECT value FROM settings_kv WHERE key = 'mute_until'`).get() as { value: string } | undefined;
-    if (muteRow && parseInt(muteRow.value, 10) > Date.now()) {
-      return; // Muted
-    }
+    if (muteRow && parseInt(muteRow.value, 10) > Date.now()) return;
 
-    // Query pipeline_runs joined with edge_results for high-confidence signals
-    // Derive signal state from decision/sigma_output (orchestrator doesn't set signal_state directly)
     const rows = db.prepare(`
       SELECT
-        pr.id,
-        pr.market_slug       AS slug,
-        pr.market_question   AS question,
-        pr.confidence        AS sigma_confidence,
-        pr.decision,
-        pr.signal_state,
-        pr.sigma_output,
-        pr.clause_output,
-        pr.oracle_output,
-        pr.edge_output,
-        er.net_edge          AS edge,
-        er.fractional_kelly  AS kelly_fraction,
-        er.position_size     AS kelly_amount,
-        er.direction
+        pr.id, pr.market_slug AS slug, pr.market_question AS question, pr.confidence AS sigma_confidence,
+        pr.decision, pr.signal_state, pr.sigma_output, pr.clause_output, pr.oracle_output, pr.edge_output,
+        er.net_edge AS edge, er.fractional_kelly AS kelly_fraction, er.position_size AS kelly_amount, er.direction
       FROM pipeline_runs pr
       LEFT JOIN edge_results er ON er.marketSlug = pr.market_slug
       WHERE pr.alert_sent = 0
         AND pr.confidence >= 0.55
         AND COALESCE(er.fractional_kelly, 0) >= 0.05
-        AND (
-          pr.signal_state = 'TRADE'
-          OR pr.decision IN ('BUY_YES','BUY_NO','TRADE','BET_YES','BET_NO')
-        )
-      ORDER BY pr.created_at DESC
-      LIMIT 10
+        AND (pr.signal_state = 'TRADE' OR pr.decision IN ('BUY_YES','BUY_NO','TRADE','BET_YES','BET_NO'))
+      ORDER BY pr.created_at DESC LIMIT 10
     `).all() as Array<Record<string, unknown>>;
 
     for (const row of rows) {
       const sigmaData = safeJson(row.sigma_output as string) as Record<string, unknown> | null;
       const clauseData = safeJson(row.clause_output as string) as Record<string, unknown> | null;
       const oracleData = safeJson(row.oracle_output as string) as Record<string, unknown> | null;
-
       const recommendation = (row.direction as string) === "YES" ? "BET YES" : "BET NO";
 
-      // Skip vetoed signals
       if (clauseData?.["veto"] === 1 || clauseData?.["veto"] === true) {
         db.prepare("UPDATE pipeline_runs SET alert_sent = -1 WHERE id = ?").run(row.id as string);
         continue;
