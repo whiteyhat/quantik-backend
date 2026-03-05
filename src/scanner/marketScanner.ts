@@ -623,7 +623,7 @@ export class MarketScanner {
     const db = getDb();
     const paperMode = process.env.PAPER_TRADING === "true";
     const maxBet = parseFloat(process.env.MAX_BET_USDC ?? "10");
-    const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "5", 10);
+    const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "50", 10);
     const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");
 
     // Circuit breaker reads — fail closed on DB errors
