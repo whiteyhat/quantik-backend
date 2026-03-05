@@ -2,6 +2,7 @@ import { execFile } from "child_process";
 import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runClause } from "../clause/index";
+import { runAura } from "../aura/index";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 
@@ -90,10 +91,13 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   }
 
   // Run Oracle + Clause + Aura in parallel (Oracle writes to DB, Edge reads it)
+  // BUG FIX: call runAura() directly instead of HTTP self-request.
+  // The HTTP path went through /api/aura/:slug which re-fetched from Gamma (redundant + fragile),
+  // and on any failure returned sentimentDelta=0, silently killing the Aura signal.
   const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
     runOracle({ slug, question, yesPrice, tokenId: '' }),
     runClause({ slug, question, description: question, days_to_resolution: 7 }),
-    fetchWithTimeout(`${BACKEND_URL}/api/aura/${slug}`, 30000),
+    runAura({ slug, question }),
   ]);
 
   // Extract Oracle result
@@ -104,8 +108,10 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   // Extract Aura sentiment delta (positive = bullish, negative = bearish)
   const rawAura = (auraRes.status === "fulfilled" && auraRes.value) ? auraRes.value as any : null;
   const sentimentDelta = rawAura?.sentimentDelta ?? rawAura?.sentiment_score ?? 0;
+  const auraConfidence = rawAura?.confidence ?? 0;
+  const auraDataSufficiency = rawAura?.dataSufficiency ?? 0;
 
-  console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} aura_sentiment=${sentimentDelta.toFixed(3)} source=${rawOracle ? "live" : "fallback"}`);
+  console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} aura_sentiment=${sentimentDelta.toFixed(3)} aura_conf=${auraConfidence.toFixed(2)} aura_data=${auraDataSufficiency.toFixed(2)} source=${rawOracle ? "live" : "fallback"}`);
 
   // Now run Edge inline — pass oracleResult directly (no HTTP)
   const edgeRes = await Promise.allSettled([
