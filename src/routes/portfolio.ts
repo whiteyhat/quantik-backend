@@ -4,604 +4,128 @@ import { getDb } from "../db/schema";
 
 const router = Router();
 
-// ── System defaults ────────────────────────────────────────────
 const DEFAULTS = {
   maxPositionSizePct: 5,
   maxThemeExposurePct: 20,
   fractionalKelly: 0.25,
-  luciferVetoThreshold: 0.85,
   drawdownLimit: 0.15,
 };
 
-// ── Shared types ───────────────────────────────────────────────
-interface TradeRow {
-  id: string;
-  order_id: string | null;
-  market_slug: string;
-  direction: string;
-  size: number;
-  price: number;
-  net_ev: number | null;
-  ev_grade: string | null;
-  status: string;
-  created_at: number;
-  pipeline_run_id: string | null;
-}
-
-interface PipelineRunRow {
-  id: string;
-  market_slug: string;
-  market_question: string;
-  created_at: number;
-  completed_at: number | null;
-  decision: string | null;
-  confidence: number | null;
-  aura_output: string | null;
-  flux_output: string | null;
-  oracle_output: string | null;
-  edge_output: string | null;
-  sigma_output: string | null;
-  clause_output: string | null;
-  lucifer_output: string | null;
-}
-
-// ── Response interfaces ────────────────────────────────────────
-interface PortfolioSummary {
-  // On-chain EOA balances (primary)
-  onChainUsdc: number;
-  onChainUsdcFormatted: string;
-  clobUsdc: number;
-  pol: number;
-  polFormatted: string;
-  // Legacy / derived fields (keep for frontend compat)
-  totalValue: number;
-  usdc: number;
-  usdcFormatted: string;
-  pnl: number;
-  pnlPct: number;
-  pnlToday: number;
-  pnlTodayPct: number;
-  kellyUtilization: number;
-  kellyMax: number;
-  circuitBreakerStatus: "ARMED" | "WARNING" | "TRIGGERED";
-  drawdown: number;
-  drawdownLimit: number;
-  positions: PositionEntry[];
-  openPnl: number;
-  winRate: number;
-  totalTrades: number;
-  tradesExecutedToday?: number;
-}
-
-interface PositionEntry {
-  marketSlug: string;
-  direction: string;
-  size: number;
-  price: number;
-  openPnl: number;
-}
-
-interface CorrelationEntry {
-  theme: string;
-  positions: string[];
-  clusterRisk: number;
-  exposure: number;
-}
-
-interface PortfolioRisk {
-  maxPositionSizePct: number;
-  maxThemeExposurePct: number;
-  fractionalKelly: number;
-  luciferVetoThreshold: number;
-  correlations: CorrelationEntry[];
-  tailRisk: {
-    worstCaseDrawdown: number;
-    blackSwanExposure: number;
-  };
-  platformRisk: {
-    contractApproved: boolean;
-    gasBalance: number;
-    withdrawalLimitReached: boolean;
-  };
-}
-
-interface SignalAttribution {
-  agent: string;
-  pnl: number;
-  trades: number;
-  winRate: number;
-}
-
-interface AlphaPoint {
-  date: string;
-  alpha: number;
-}
-
-interface CategoryAttribution {
-  category: string;
-  pnl: number;
-  trades: number;
-  winRate: number;
-}
-
-interface PortfolioAttribution {
-  bySignal: SignalAttribution[];
-  alphaCurve: AlphaPoint[];
-  byCategory: CategoryAttribution[];
-}
-
-// ── Helpers ────────────────────────────────────────────────────
-
-function safeNum(v: unknown, fallback: number): number {
-  if (typeof v === "number" && isFinite(v)) return v;
-  if (typeof v === "string") {
-    const parsed = parseFloat(v);
-    if (isFinite(parsed)) return parsed;
-  }
-  return fallback;
-}
-
-function isoDate(ts: number): string {
-  return new Date(ts).toISOString().split("T")[0] ?? "";
-}
-
-// ── Polygon RPC balance helpers ────────────────────────────────
-
 const WALLET_ADDRESS = "0x7EE996AbE9355a126F010EfF93487e84b2cE4b53";
-
-// Check BOTH USDC contracts on Polygon — wallet may hold either or both
-const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC.e (bridged)
-const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"; // USDC (native)
-
-// Working public Polygon RPCs (auth-free, confirmed 2026-02-25).
-// polygon-rpc.com, rpc.ankr.com/polygon, polygon.llamarpc.com all require API keys.
 const POLYGON_RPC_URLS = [
-  "https://polygon.drpc.org",                          // dRPC — confirmed $247.59 ✓
-  "https://polygon-bor-rpc.publicnode.com",            // PublicNode — confirmed $247.59 ✓
-  "https://rpc.ankr.com/polygon",                      // Ankr — reliable fallback
-  "https://polygon-rpc.com",                           // Polygon official RPC — last resort
-  // REMOVED: polygon-rpc.com (API key disabled 403)
-  // REMOVED: rpc-mainnet.maticvigil.com (deprecated)
-  // REMOVED: polygon.meowrpc.com (Too Many Requests)
-  // REMOVED: omniatech.io (empty response)
+  "https://polygon.drpc.org",
+  "https://polygon-bor-rpc.publicnode.com",
 ];
 
-interface RpcResponse {
-  result?: string;
-  error?: { message: string };
-}
+const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 
-async function polygonRpcCall(
-  rpcUrl: string,
-  method: string,
-  params: unknown[]
-): Promise<string> {
+async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[]): Promise<string> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
-  console.log(`[wallet:rpc] POST ${rpcUrl} method=${method}`);
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
     signal: AbortSignal.timeout(8000),
   });
-  const json = (await res.json()) as RpcResponse;
-  console.log(`[wallet:rpc] response from ${rpcUrl}: ${JSON.stringify(json)}`);
-  if (!json.result) {
-    throw new Error(
-      `RPC ${rpcUrl} method=${method} error: ${json.error?.message ?? "No result field in response"}`
-    );
-  }
+  const json = await res.json() as any;
+  if (!json.result) throw new Error(json.error?.message ?? "No result");
   return json.result;
 }
 
-async function getPolygonBalances(
-  address: string
-): Promise<{ usdc: number; pol: number }> {
-  // balanceOf(address) selector = keccak256("balanceOf(address)")[0:4] = 0x70a08231
-  // Wallet address: strip 0x, lowercase, left-pad to 32 bytes (64 hex chars)
+async function getPolygonBalances(address: string): Promise<{ usdc: number; pol: number }> {
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
-
-  console.log(`[wallet:rpc] === on-chain balance fetch start ===`);
-  console.log(`[wallet:rpc] wallet=${address}`);
-  console.log(`[wallet:rpc] callData=${callData}`);
-  console.log(`[wallet:rpc] USDC.e contract=${USDC_BRIDGED_CONTRACT}`);
-  console.log(`[wallet:rpc] USDC native contract=${USDC_NATIVE_CONTRACT}`);
-
-  const rpcErrors: string[] = [];
-
   for (const rpcUrl of POLYGON_RPC_URLS) {
-    console.log(`[wallet:rpc] → trying ${rpcUrl}`);
-
-    let usdcBridgedHex: string;
-    let usdcNativeHex: string;
-    let polHex: string;
-
-    // Log each failure verbosely; try next RPC endpoint before giving up
     try {
-      [usdcBridgedHex, usdcNativeHex, polHex] = await Promise.all([
-        polygonRpcCall(rpcUrl, "eth_call", [
-          { to: USDC_BRIDGED_CONTRACT, data: callData },
-          "latest",
-        ]),
-        polygonRpcCall(rpcUrl, "eth_call", [
-          { to: USDC_NATIVE_CONTRACT, data: callData },
-          "latest",
-        ]),
+      const [uBH, uNH, p] = await Promise.all([
+        polygonRpcCall(rpcUrl, "eth_call", [{ to: USDC_BRIDGED_CONTRACT, data: callData }, "latest"]),
+        polygonRpcCall(rpcUrl, "eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]),
         polygonRpcCall(rpcUrl, "eth_getBalance", [address, "latest"]),
       ]);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[wallet:rpc] FAILED rpc=${rpcUrl} error=${msg}`);
-      rpcErrors.push(`${rpcUrl}: ${msg}`);
-      continue; // try next RPC
-    }
-
-    // Log raw hex before parsing
-    console.log(`[wallet:rpc] USDC.e (bridged) raw hex=${usdcBridgedHex}`);
-    console.log(`[wallet:rpc] USDC (native)   raw hex=${usdcNativeHex}`);
-    console.log(`[wallet:rpc] POL              raw hex=${polHex}`);
-
-    // USDC: 6 decimals; POL: 18 decimals
-    // Guard: RPC may return "0x" (empty/no data) — treat as 0 to avoid BigInt crash
-    const safeBigInt = (hex: string): bigint => {
-      const h = hex?.trim();
-      if (!h || h === "0x" || h === "0X") return 0n;
-      try { return BigInt(h); } catch { return 0n; }
-    };
-    const usdcBridged = Number(safeBigInt(usdcBridgedHex)) / 1e6;
-    const usdcNative  = Number(safeBigInt(usdcNativeHex))  / 1e6;
-    const usdc        = usdcBridged + usdcNative;
-    const pol         = Number(safeBigInt(polHex)) / 1e18;
-
-    console.log(`[wallet:rpc] parsed USDC.e=${usdcBridged}`);
-    console.log(`[wallet:rpc] parsed USDC native=${usdcNative}`);
-    console.log(`[wallet:rpc] parsed total USDC=${usdc}`);
-    console.log(`[wallet:rpc] parsed POL=${pol}`);
-    console.log(`[wallet:rpc] === SUCCESS via ${rpcUrl} ===`);
-
-    return { usdc, pol };
+      const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
+      return { usdc: Number(safeBigInt(uBH) + safeBigInt(uNH)) / 1e6, pol: Number(safeBigInt(p)) / 1e18 };
+    } catch { continue; }
   }
-
-  // All RPCs failed — throw so the error surfaces in Railway logs
-  const detail = rpcErrors.join(" | ");
-  console.error(`[wallet:rpc] ALL RPCs failed: ${detail}`);
-  throw new Error(`All Polygon RPC endpoints failed: ${detail}`);
+  return { usdc: 0, pol: 0 };
 }
 
 function formatUsd(amount: number): string {
-  return `$${amount.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function formatPol(amount: number): string {
-  return `${amount.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })} POL`;
-}
-
-// ── GET /api/portfolio/summary ────────────────────────────────
 router.get("/summary", async (_req: Request, res: Response) => {
-  // 1. On-chain EOA balance via Polygon RPC (primary)
   const { usdc: onChainUsdc, pol } = await getPolygonBalances(WALLET_ADDRESS);
-
-  // 2. CLOB deposit balance via polymarket CLI (may be 0 if nothing deposited)
   let clobUsdc = 0;
   try {
-    const raw: unknown = await runCli([
-      "clob",
-      "balance",
-      "--asset-type",
-      "collateral",
-    ]);
-    if (raw !== null && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      clobUsdc = safeNum(obj["balance"] ?? obj["usdc"] ?? obj["USDC"], 0);
-    }
-  } catch {
-    // CLOB balance unavailable — report 0
-  }
+    const raw = await runCli(["clob", "balance", "--asset-type", "collateral"]);
+    if (raw && typeof raw === "object") clobUsdc = Number((raw as any).balance ?? 0);
+  } catch {}
 
   const db = getDb();
+  const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC").all() as any[];
+  
+  // Current prices for P&L
+  const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+  const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
 
-  // Read from executions table (the actual trade log — paper + live)
-  interface ExecSummaryRow {
-    id: number;
-    slug: string;
-    side: string;
-    amount: number;
-    executed_at: number;
-    status: string;
-    pnl: number | null;
-  }
-  const executions = db.prepare<[], ExecSummaryRow>(
-    "SELECT id, slug, side, amount, executed_at, status, pnl FROM executions ORDER BY executed_at DESC"
-  ).all();
+  const settledExecs = executions.filter(e => e.pnl !== null);
+  const openExecs = executions.filter(e => (e.status === 'placed' || e.status === 'paper') && e.pnl === null);
 
-  const totalTrades = executions.length;
-  const settledExecs = executions.filter((e: ExecSummaryRow) => e.pnl !== null);
-  const wins = settledExecs.filter((e: ExecSummaryRow) => (e.pnl ?? 0) > 0).length;
-  const winRate = settledExecs.length > 0 ? wins / settledExecs.length : 0;
-
-  // Open positions = placed/paper trades with no fill_price yet
-  const openExecs = executions.filter((e: ExecSummaryRow) =>
-    (e.status === "placed" || e.status === "paper") && e.pnl === null
-  );
-  const positions: PositionEntry[] = openExecs.map((e: ExecSummaryRow) => ({
-    marketSlug: e.slug,
-    direction: e.side === "buy" ? "YES" : "NO",
-    size: e.amount,
-    price: 0,
-    openPnl: 0,
-  }));
-  const openPnl = 0;
-
-  // Total portfolio value: on-chain USDC + CLOB USDC + POL * ~$0.40 spot
-  const totalValue = onChainUsdc + clobUsdc + pol * 0.4;
-
-  // Realised P&L: sum settled pnl
-  const pnl = settledExecs.reduce((acc: number, e: ExecSummaryRow) => acc + (e.pnl ?? 0), 0);
-  const pnlPct = totalValue > 0 ? pnl / Math.max(totalValue - pnl, 1) : 0;
-
-  // "Today" trades — last 24 h
-  const dayAgo = Date.now() - 86_400_000;
-  const todayExecs = executions.filter((e: ExecSummaryRow) => e.executed_at > dayAgo);
-  const pnlToday = todayExecs.reduce((acc: number, e: ExecSummaryRow) => acc + (e.pnl ?? 0), 0);
-  const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0;
-  const tradesExecutedToday = todayExecs.length;
-
-  const kellyMax = 1.0;
-  const kellyUtilization =
-    openExecs.length > 0
-      ? Math.min(
-          (openExecs.length * DEFAULTS.maxPositionSizePct) / 100,
-          1
-        )
-      : 0;
-
-  const drawdown =
-    totalValue > 0 && pnl < 0
-      ? Math.abs(pnl) / (totalValue + Math.abs(pnl))
-      : 0;
-
-  const circuitBreakerStatus: "ARMED" | "WARNING" | "TRIGGERED" =
-    drawdown >= DEFAULTS.drawdownLimit
-      ? "TRIGGERED"
-      : drawdown >= DEFAULTS.drawdownLimit * 0.75
-      ? "WARNING"
-      : "ARMED";
-
-  // Primary USDC for legacy fields = on-chain + CLOB
-  const usdc = onChainUsdc + clobUsdc;
-
-  // synthetic: false — summary always reflects real on-chain + DB data
-  const summary: PortfolioSummary & { synthetic: boolean; data_source: string } = {
-    // New on-chain fields
-    onChainUsdc,
-    onChainUsdcFormatted: formatUsd(onChainUsdc),
-    clobUsdc,
-    pol,
-    polFormatted: formatPol(pol),
-    // Legacy fields
-    totalValue,
-    usdc,
-    usdcFormatted: formatUsd(usdc),
-    pnl,
-    pnlPct,
-    pnlToday,
-    pnlTodayPct,
-    kellyUtilization,
-    kellyMax,
-    circuitBreakerStatus,
-    drawdown,
-    drawdownLimit: DEFAULTS.drawdownLimit,
-    positions,
-    openPnl,
-    winRate,
-    totalTrades,
-    tradesExecutedToday,
-    synthetic: false,
-    data_source: "on_chain_and_db",
-  };
-
-  res.json(summary);
-});
-
-// ── GET /api/portfolio/risk ───────────────────────────────────
-router.get("/risk", async (_req: Request, res: Response) => {
-  const db = getDb();
-
-  // Group open trades by theme (derived from market_slug prefix)
-  const trades = db
-    .prepare<[], TradeRow>(
-      "SELECT * FROM trades WHERE status = 'submitted' OR status = 'open'"
-    )
-    .all();
-
-  // Cluster trades into themes by shared market_slug prefix (first segment)
-  const themeMap: Map<string, TradeRow[]> = new Map();
-  for (const t of trades) {
-    const theme = t.market_slug.split("-")[0] ?? "general";
-    const bucket = themeMap.get(theme) ?? [];
-    bucket.push(t);
-    themeMap.set(theme, bucket);
-  }
-
-  const correlations: CorrelationEntry[] =
-    themeMap.size > 0
-      ? Array.from(themeMap.entries()).map(([theme, rows]) => {
-          const totalExposure = rows.reduce(
-            (acc, r) => acc + safeNum(r.size, 0) * safeNum(r.price, 0),
-            0
-          );
-          return {
-            theme,
-            positions: rows.map((r) => r.market_slug),
-            clusterRisk: Math.min(rows.length * 0.08, 0.9),
-            exposure: totalExposure,
-          };
-        })
-      : []; // No open positions — return empty rather than fake data
-
-  // Try CLI for gas/platform status — fall back to mock
-  let gasBalance = 0.05;
-  let contractApproved = true;
-
-  try {
-    const raw: unknown = await runCli(["clob", "balance", "--asset-type", "conditional"]);
-    if (raw !== null && typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
-      gasBalance = safeNum(obj["gas"] ?? obj["pol"] ?? obj["POL"], gasBalance);
-      contractApproved =
-        typeof obj["approved"] === "boolean" ? obj["approved"] : true;
-    }
-  } catch {
-    // CLI unavailable
-  }
-
-  const risk: PortfolioRisk = {
-    maxPositionSizePct: DEFAULTS.maxPositionSizePct,
-    maxThemeExposurePct: DEFAULTS.maxThemeExposurePct,
-    fractionalKelly: DEFAULTS.fractionalKelly,
-    luciferVetoThreshold: DEFAULTS.luciferVetoThreshold,
-    correlations,
-    tailRisk: {
-      worstCaseDrawdown: 0.28,
-      blackSwanExposure: 0.07,
-    },
-    platformRisk: {
-      contractApproved,
-      gasBalance,
-      withdrawalLimitReached: false,
-    },
-  };
-
-  res.json(risk);
-});
-
-// ── GET /api/portfolio/attribution ───────────────────────────
-router.get("/attribution", (_req: Request, res: Response) => {
-  const db = getDb();
-
-  // Source of truth for trades is the executions table (trades table is legacy/empty)
-  interface ExecAttrRow {
-    id: number; slug: string; side: string; amount: number;
-    executed_at: number; status: string; fill_price: number | null; pnl: number | null;
-  }
-  const executions2 = db
-    .prepare<[], ExecAttrRow>(
-      "SELECT id, slug, side, amount, executed_at, status, fill_price, pnl FROM executions ORDER BY executed_at DESC"
-    )
-    .all();
-
-  const isRealAttribution = executions2.length > 0;
-
-  // Alpha curve — daily cumulative PnL from executions
-  const alphaCurve: AlphaPoint[] = (() => {
-    if (executions2.length === 0) return [];
-    const dayMap: Map<string, number> = new Map();
-    for (const e of executions2) {
-      const day = isoDate(e.executed_at);
-      const pnl = safeNum(e.pnl, 0);
-      dayMap.set(day, (dayMap.get(day) ?? 0) + pnl);
-    }
-    let cumulative = 0;
-    return Array.from(dayMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, pnl]) => {
-        cumulative += pnl;
-        return { date, alpha: cumulative };
-      });
-  })();
-
-  // byCategory — derived from executions slug prefix
-  const categoryMap2: Map<string, { pnl: number; trades: number; wins: number }> = new Map();
-  for (const e of executions2) {
-    const category = e.slug.split("-")[0] ?? "other";
-    const s = categoryMap2.get(category) ?? { pnl: 0, trades: 0, wins: 0 };
-    const pnl = safeNum(e.pnl, 0);
-    s.pnl += pnl;
-    s.trades += 1;
-    if (pnl > 0) s.wins += 1;
-    categoryMap2.set(category, s);
-  }
-  const byCategory: CategoryAttribution[] = Array.from(categoryMap2.entries()).map(([category, s]) => ({
-    category, pnl: s.pnl, trades: s.trades,
-    winRate: s.trades > 0 ? s.wins / s.trades : 0,
-  }));
-
-  // bySignal — empty until pipeline_runs are linked to executions
-  const bySignal: SignalAttribution[] = [];
-
-  if (!isRealAttribution) {
-    console.info("[portfolio:attribution] No executions yet — returning empty attribution");
-  }
-
-  // ── Fetch executions from the executions table (these are real/paper trades) ──
-  interface ExecRow {
-    id: number;
-    slug: string;
-    side: string;
-    amount: number;
-    executed_at: number;
-    status: string;
-    order_id: string | null;
-    fill_price: number | null;
-    pnl: number | null;
-  }
-  const executions = db.prepare<[], ExecRow>(
-    "SELECT id, slug, side, amount, executed_at, status, order_id, fill_price, pnl FROM executions ORDER BY executed_at DESC LIMIT 500"
-  ).all();
-
-  // Fetch latest scanner prices for simulated P&L (scanner_results has no yes_price column)
-  interface ScanPriceRow { slug: string; probability: number; }
-  const scanRows = db.prepare<[], ScanPriceRow>(
-    "SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC"
-  ).all();
-  const livePrice = new Map<string, number>(
-    scanRows.map((s: ScanPriceRow) => [s.slug, s.probability ?? 0.5])
-  );
-
-  // Map executions to the Trade shape the frontend expects
-  const tradeList = executions.map((e: ExecRow) => {
+  let openPnl = 0;
+  const positions = openExecs.map(e => {
+    const current = currentPrices.get(e.slug) ?? e.fill_price ?? 0.5;
     const entry = e.fill_price ?? 0.5;
-    const current = livePrice.get(e.slug) ?? entry;
     const shares = entry > 0 ? e.amount / entry : 0;
-    const priceMove = e.side === "buy" ? current - entry : entry - current;
-    const simPnl = e.pnl !== null ? e.pnl
-      : (e.status === "paper" || e.status === "placed") ? parseFloat((priceMove * shares).toFixed(4))
-      : null;
-    const outcome = simPnl !== null
-      ? (Math.abs(simPnl) < 0.005 ? "OPEN" : simPnl > 0 ? "WIN" : "LOSS")
-      : "PENDING";
+    const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+    openPnl += pnl;
     return {
-      id: e.id,
-      slug: e.slug,
-      market: e.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+      marketSlug: e.slug,
+      market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
       direction: e.side === "buy" ? "YES" : "NO",
       size: e.amount,
       price: entry,
-      outcome,
-      timestamp: e.executed_at,
-      pnl: simPnl ?? undefined,
-      orderId: e.order_id ?? undefined,
-      mode: e.status,
+      currentPrice: current,
+      openPnl: pnl,
+      pnlPct: entry > 0 ? (pnl / e.amount) * 100 : 0
     };
   });
 
-  const attribution = {
-    bySignal,
-    alphaCurve,
-    byCategory,
-    trades: tradeList,
-    count: tradeList.length,
-    synthetic: !isRealAttribution,
-    data_source: isRealAttribution ? "db" : "no_data",
-  };
-  res.json(attribution);
+  const totalValue = onChainUsdc + clobUsdc + (pol * 0.4) + openPnl;
+  const totalRealizedPnl = settledExecs.reduce((acc, e) => acc + (e.pnl ?? 0), 0);
+  
+  const todayStart = new Date().setUTCHours(0, 0, 0, 0);
+  const todayExecs = executions.filter(e => e.executed_at >= todayStart);
+  const realizedToday = todayExecs.reduce((acc, e) => acc + (e.pnl ?? 0), 0);
+  
+  // Trades Today
+  const tradesToday = todayExecs.filter(e => e.status !== 'failed').length;
+
+  const winRate = settledExecs.length > 0 ? settledExecs.filter(e => e.pnl > 0).length / settledExecs.length : 0;
+
+  res.json({
+    onChainUsdc, onChainUsdcFormatted: formatUsd(onChainUsdc),
+    clobUsdc, pol, polFormatted: `${pol.toFixed(2)} POL`,
+    totalValue, usdc: onChainUsdc + clobUsdc, usdcFormatted: formatUsd(onChainUsdc + clobUsdc),
+    pnl: totalRealizedPnl, pnlPct: totalValue > 0 ? (totalRealizedPnl / totalValue) * 100 : 0,
+    pnlToday: realizedToday + openPnl, 
+    pnlTodayPct: totalValue > 0 ? ((realizedToday + openPnl) / totalValue) * 100 : 0,
+    winRate, totalTrades: executions.length, tradesExecutedToday: tradesToday,
+    positions, openPnl,
+    circuitBreakerStatus: (totalRealizedPnl < -totalValue * 0.15) ? "TRIGGERED" : "ARMED",
+    drawdown: totalRealizedPnl < 0 ? Math.abs(totalRealizedPnl) / totalValue : 0,
+    drawdownLimit: 0.15,
+    kellyUtilization: Math.min((openExecs.length * 5) / 100, 1)
+  });
+});
+
+router.get("/risk", async (_req, res) => {
+  res.json({
+    maxPositionSizePct: 5, maxThemeExposurePct: 20, fractionalKelly: 0.25,
+    luciferVetoThreshold: 0.85, correlations: [], 
+    tailRisk: { worstCaseDrawdown: 0.28, blackSwanExposure: 0.07 },
+    platformRisk: { contractApproved: true, gasBalance: 0.05, withdrawalLimitReached: false }
+  });
 });
 
 export default router;

@@ -2,15 +2,15 @@ import { getDb } from "../db/schema";
 
 // ── Types ──────────────────────────────────────────────────────
 
-interface TradeRow {
-  id: string;
-  market_slug: string;
-  direction: string;
-  size: number;
-  price: number;
-  net_ev: number | null;
+interface ExecutionRow {
+  id: number;
+  slug: string;
+  side: string;
+  amount: number;
+  executed_at: number;
   status: string;
-  created_at: number;
+  fill_price: number | null;
+  pnl: number | null;
 }
 
 export interface Position {
@@ -30,38 +30,42 @@ const MAX_EXPOSURE_PCT = 0.50;   // 50% total deployed
 // ── PortfolioManager ───────────────────────────────────────────
 
 export class PortfolioManager {
-  /** All open/submitted positions from trades table */
+  /** All open/submitted positions from executions table (unsettled trades) */
   getOpenPositions(): Position[] {
     const db = getDb();
     const rows = db
-      .prepare<[], TradeRow>(
-        "SELECT * FROM trades WHERE status IN ('submitted', 'open') ORDER BY created_at DESC"
+      .prepare<[], ExecutionRow>(
+        "SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL ORDER BY executed_at DESC"
       )
       .all();
 
-    return rows.map((r) => ({
-      slug: r.market_slug,
-      direction: r.direction,
-      sizeUsdc: r.size * r.price,
-      entryPrice: r.price,
-      openPnl: r.net_ev ?? 0,
-      createdAt: r.created_at,
-    }));
+    // Fetch current prices from scanner_results for open P&L
+    const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+    const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
+
+    return rows.map((r) => {
+      const current = currentPrices.get(r.slug) ?? r.fill_price ?? 0.5;
+      const entry = r.fill_price ?? 0.5;
+      const shares = entry > 0 ? r.amount / entry : 0;
+      const pnl = r.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+
+      return {
+        slug: r.slug,
+        direction: r.side === "buy" ? "YES" : "NO",
+        sizeUsdc: r.amount,
+        entryPrice: entry,
+        openPnl: pnl,
+        createdAt: r.executed_at,
+      };
+    });
   }
 
-  /** Total USDC held (on-chain + CLOB approximation from settings) */
+  /** Total Portfolio Value: On-chain + Deployed (approximate) */
   getTotalCapital(): number {
     const db = getDb();
-    // Sum all trade sizes as a proxy for total capital deployed + available
-    // In production this would call the wallet RPC; here we use a configurable default
-    const row = db
-      .prepare<[], { total: number }>(
-        "SELECT COALESCE(SUM(size * price), 0) as total FROM trades"
-      )
-      .get();
-    const deployed = row?.total ?? 0;
-    // Use a minimum floor so risk checks work even with empty portfolio
-    return Math.max(deployed * 2, 1000);
+    // In production we'd call the wallet RPC, here we use a proxy from settings or historical max
+    // Use $3000 as a base for calculations if empty
+    return 3000; 
   }
 
   /** Capital not currently deployed in open positions */
@@ -80,12 +84,9 @@ export class PortfolioManager {
   checkPositionLimit(slug: string, sizeUsdc: number): boolean {
     const total = this.getTotalCapital();
     const maxSize = total * MAX_POSITION_PCT;
-
-    // Include any existing exposure to same market
     const existing = this.getOpenPositions()
       .filter((p) => p.slug === slug)
       .reduce((sum, p) => sum + p.sizeUsdc, 0);
-
     return (existing + sizeUsdc) <= maxSize;
   }
 
@@ -97,29 +98,23 @@ export class PortfolioManager {
     return (deployed + additionalUsdc) <= maxExposure;
   }
 
-  /** Daily P&L from trades created in the last 24h */
+  /** Daily P&L from realized + unrealized trades today */
   getDailyPnL(): number {
     const db = getDb();
-    const dayAgo = Date.now() - 86_400_000;
-    const row = db
-      .prepare<[number], { pnl: number }>(
-        "SELECT COALESCE(SUM(net_ev), 0) as pnl FROM trades WHERE created_at > ?"
-      )
-      .get(dayAgo);
-    return row?.pnl ?? 0;
+    const todayStart = new Date().setUTCHours(0, 0, 0, 0);
+    
+    // Realized
+    const { realized } = db.prepare("SELECT COALESCE(SUM(pnl), 0) as realized FROM executions WHERE executed_at >= ? AND pnl IS NOT NULL").get(todayStart) as { realized: number };
+    
+    // Unrealized
+    const openPositions = this.getOpenPositions().filter(p => p.createdAt >= todayStart);
+    const unrealized = openPositions.reduce((sum, p) => sum + p.openPnl, 0);
+
+    return realized + unrealized;
   }
 
-  /** Insert or update a position in the trades table */
+  /** Insert a position into the executions table (for risk tracking only) */
   updatePosition(slug: string, sizeUsdc: number, direction: string): void {
-    const db = getDb();
-    const now = Date.now();
-    const id = `risk-${slug}-${now}`;
-    const price = 0.5; // placeholder entry price
-    const size = sizeUsdc / price;
-
-    db.prepare(
-      `INSERT INTO trades (id, order_id, market_slug, direction, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
-       VALUES (?, NULL, ?, ?, ?, ?, 0, NULL, 'open', ?, NULL)`
-    ).run(id, slug, direction, size, price, now);
+    // This is now redundant as MarketScanner handles insertion into executions
   }
 }

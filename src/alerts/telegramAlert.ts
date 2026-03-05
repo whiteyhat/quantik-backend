@@ -5,10 +5,6 @@
 
 import { getDb } from "../db/schema";
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
-const CHAT_ID   = process.env.TELEGRAM_CHAT_ID ?? "-5238563355";
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface ScanResult {
@@ -34,12 +30,33 @@ export interface ScanResult {
 
 // ── Core HTTP helper ───────────────────────────────────────────────────────
 
+async function getTelegramConfig() {
+  try {
+    const db = getDb();
+    const rows = db.prepare("SELECT key, value FROM settings_kv WHERE key IN ('telegram_chat_id', 'telegram_bot_token')").all() as any[];
+    const settings: any = {};
+    rows.forEach(r => settings[r.key] = r.value);
+    return {
+      botToken: settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN || "",
+      chatId: settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "-5238563355"
+    };
+  } catch {
+    return {
+      botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+      chatId: process.env.TELEGRAM_CHAT_ID || "-5238563355"
+    };
+  }
+}
+
 async function tgPost(method: string, body: Record<string, unknown>): Promise<unknown> {
-  const url = `${TELEGRAM_API}/${method}`;
+  const config = await getTelegramConfig();
+  if (!config.botToken) throw new Error("Telegram bot token missing");
+  
+  const url = `https://api.telegram.org/bot${config.botToken}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, chat_id: body.chat_id || config.chatId }),
   });
   if (!res.ok) {
     const text = await res.text();

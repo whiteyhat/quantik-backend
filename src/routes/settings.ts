@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { getSettings, setPaperMode } from "../db/queries";
+import { getDb } from "../db/schema";
 
 const router = Router();
 
@@ -17,21 +18,50 @@ router.get("/settings/paper-mode", (_req: Request, res: Response) => {
 
 // ── POST /api/v1/settings/paper-mode ─────────────────────────
 router.post("/settings/paper-mode", (req: Request, res: Response) => {
-  const body: unknown = req.body;
-
-  if (
-    body === null ||
-    typeof body !== "object" ||
-    !("enabled" in body) ||
-    typeof (body as Record<string, unknown>)["enabled"] !== "boolean"
-  ) {
+  const body: any = req.body;
+  if (typeof body?.enabled !== "boolean") {
     res.status(400).json({ error: "Body must be { enabled: boolean }" });
     return;
   }
-
-  const enabled = (body as { enabled: boolean }).enabled;
-  const updated = setPaperMode(enabled);
+  const updated = setPaperMode(body.enabled);
   res.json({ paperMode: updated.paper_mode });
+});
+
+// ── GET /api/v1/settings/telegram ────────────────────────────
+router.get("/settings/telegram", (_req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare("SELECT key, value FROM settings_kv WHERE key IN ('telegram_chat_id', 'telegram_bot_token')").all() as any[];
+    const settings: any = {};
+    rows.forEach(r => settings[r.key] = r.value);
+    
+    res.json({
+      chatId: settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "",
+      botToken: settings.telegram_bot_token ? "********" : (process.env.TELEGRAM_BOT_TOKEN ? "********" : ""),
+      hasToken: !!(settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN)
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ── POST /api/v1/settings/telegram ───────────────────────────
+router.post("/settings/telegram", (req: Request, res: Response) => {
+  try {
+    const { chatId, botToken } = req.body as { chatId?: string; botToken?: string };
+    const db = getDb();
+    
+    if (chatId !== undefined) {
+      db.prepare("INSERT OR REPLACE INTO settings_kv (key, value) VALUES ('telegram_chat_id', ?)").run(chatId);
+    }
+    if (botToken !== undefined && botToken !== "********") {
+      db.prepare("INSERT OR REPLACE INTO settings_kv (key, value) VALUES ('telegram_bot_token', ?)").run(botToken);
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 export default router;
