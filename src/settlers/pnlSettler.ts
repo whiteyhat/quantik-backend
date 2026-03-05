@@ -68,12 +68,14 @@ async function settle(): Promise<void> {
           continue;
         }
 
-        // FIXED PS1: Correct PnL for both BET_YES and BET_NO positions
-        // For both: shares = amount / fillPrice. If our bet wins, payout = shares * 1.0.
-        // Win condition: BET_YES wins when resolutionPrice=1; BET_NO wins when resolutionPrice=0
-        // Direction: if fillPrice < 0.5 → likely YES token (BET_YES); if fillPrice > 0.5 → likely NO token (BET_NO)
-        const isBetNo = fillPrice > 0.5; // NO tokens trade > 0.5 when YES is unlikely
-        const weWon = isBetNo ? resolutionPrice === 0 : resolutionPrice === 1;
+        // FIXED PS1: Correct PnL using recommendation from scanner_results for direction
+        // For both YES and NO bets: shares = amount / fillPrice; payout = shares * 1.0 when winning
+        const scanRec = db.prepare("SELECT recommendation FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1").get(row.slug) as { recommendation: string } | undefined;
+        const isBetNo = (scanRec?.recommendation === "BET_NO"); // use recommendation as direction source
+        // Fallback direction heuristic: fillPrice > 0.5 → NO token (when oracle prob stored)
+        const isBetNoFallback = !scanRec ? fillPrice > 0.5 : isBetNo;
+        // Win condition: NO bet wins when YES resolves false (resolutionPrice=0); YES bet wins when resolutionPrice=1
+        const weWon = isBetNoFallback ? resolutionPrice === 0 : resolutionPrice === 1;
         const shares = row.amount / fillPrice;
         const pnl = weWon ? shares * (1 - fillPrice) : -row.amount;
 
