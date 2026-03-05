@@ -1,3 +1,4 @@
+import { CircuitBreaker } from "../risk/circuitBreaker";
 import { execFile } from "child_process";
 import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
@@ -267,6 +268,14 @@ function buildPipelineResult(slug: string, yesPrice: number): {
 
 export class MarketScanner {
   async scan(): Promise<void> {
+    // GLOBAL KILL SWITCH: Respect panic_mode and circuit breaker
+    const db = getDb();
+    const panicMode = db.prepare("SELECT panic_mode_enabled FROM global_circuit_breakers LIMIT 1").get() as { panic_mode_enabled: number } | undefined;
+    if (panicMode?.panic_mode_enabled === 1) {
+      console.log("[Scanner] GLOBAL KILL SWITCH: panic_mode_enabled is 1. Stopping scan.");
+      return;
+    }
+
     if (scannerRunning) {
       console.log("[Scanner] Already running, skipping cycle");
       return;
