@@ -1,3 +1,4 @@
+import { existsSync } from "fs";
 import { runCli } from "../cli";
 
 interface ScanMarket {
@@ -11,6 +12,10 @@ const scanState = new Map<string, number>();
 export function startHotScanner(): void {
   // Run every 60s
   setInterval(async () => {
+    // Skip silently if CLI binary not configured or not present on this machine
+    const cliPath = process.env.POLYMARKET_CLI;
+    if (!cliPath || !existsSync(cliPath)) return;
+
     try {
       // Mocking fetch of top 50 markets by volume
       // In reality, this would be a CLI call sorted by volume
@@ -38,7 +43,8 @@ export function startHotScanner(): void {
         scanState.set(m.slug, currentPrice);
       }
     } catch (err) {
-      console.error("[HotScanner] Error during scan:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[HotScanner] Error during scan:", msg);
     }
   }, 60000);
 

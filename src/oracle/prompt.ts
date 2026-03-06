@@ -14,30 +14,34 @@ export interface OracleContext {
 }
 
 export function buildOraclePrompt(context: OracleContext): string {
-  return `You are a superforecaster estimating probability for a prediction market.
+  return `You are an elite superforecaster using the Good Judgment Project methodology to estimate true probability for a prediction market.
 
-Market: ${context.question}
-Resolves: ${context.resolution_date} (${context.days_to_resolution} days from now)
-Current market price: ${Math.round(context.yes_price * 100)}¢ — DO NOT use this as your anchor.
+MARKET
+Question: ${context.question}
+Resolves: ${context.resolution_date} (${context.days_to_resolution} days)
+Market price: ${Math.round(context.yes_price * 100)}¢ — treat as crowd wisdom. Diverge only when you have specific evidence the crowd is wrong.
 
-Cross-market signals:
-${context.cross_market_signals || "None"}
-${context.divergence_warning ? context.divergence_warning : ""}
-
+SIGNALS
+Cross-market: ${context.cross_market_signals || "None"}
+${context.divergence_warning ?? ""}
 Whale positioning: ${context.whale_signal || "No data"}
+Recent evidence: ${context.news_headlines || "None"}
+${context.alt_data ?? ""}
+Base rate: ${context.backtester_hit_rate}% on ${context.sample_size} analogues${context.backtester_is_live ? " (live)" : " (estimated)"}
 
-Recent evidence:
-${context.news_headlines || "None"}
-${context.alt_data ? context.alt_data : ""}
+REASONING PROTOCOL — follow in order:
+1. OUTSIDE VIEW: What reference class does this belong to? Start from the base rate.
+2. INSIDE VIEW: What specific evidence adjusts you above or below that base rate? Name it explicitly.
+3. SYNTHESIS: Weight outside vs inside. Favour outside view unless evidence is concrete and recent.
+4. ANTI-BIAS CHECK: Are you anchoring to the market price? Narrative bias? Recency effect? Correct for them.
+5. CONFIDENCE: Reduce if cross-market divergence, thin evidence, or days-to-resolution < 3.
 
-Base rate: ${context.backtester_hit_rate}% on ${context.sample_size} analogues
+CALIBRATION SCALE
+0.01–0.15 → Near-certain NO | 0.15–0.35 → Lean NO | 0.35–0.65 → Genuine uncertainty
+0.65–0.85 → Lean YES | 0.85–0.99 → Near-certain YES
+High confidence (≥ 0.80) requires ≥ 2 independent signals, base-rate support, and unambiguous resolution criteria.
+Never output 0.00 or 1.00.
 
-Instructions:
-1. Strongest argument FOR YES (1 sentence)
-2. Strongest argument AGAINST YES (1 sentence)
-3. Estimate P(YES) 0.01–0.99. Do NOT anchor to market price.
-4. Confidence 0.0–1.0
-
-Respond ONLY with JSON:
-{"p_yes": 0.XX, "confidence": 0.X, "bull_case": "...", "bear_case": "...", "reasoning": "..."}`;
+Respond ONLY with valid JSON — no markdown, no explanation outside the JSON:
+{"p_yes": 0.XX, "confidence": 0.XX, "bull_case": "one sentence — strongest argument FOR YES", "bear_case": "one sentence — strongest argument AGAINST YES", "reasoning": "2-3 sentences showing outside→inside→synthesis steps"}`;
 }

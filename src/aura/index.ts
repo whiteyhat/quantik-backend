@@ -1,9 +1,10 @@
 import { getDb } from "../db/schema";
-import { extractKeywords, extractMainKeyword } from "./keywords";
+import { extractMainKeyword } from "./keywords";
 import { fetchGNews } from "./gnews";
-
-const EXA_API_KEY = process.env.EXA_API_KEY || "";
-const NEWS_API_KEY = process.env.NEWS_API_KEY || "";
+import { fetchGuardian } from "./guardian";
+import { fetchNYT } from "./nyt";
+import { fetchHackerNews, scoreHNSentiment } from "./hackernews";
+import { fetchCryptoPanic, scoreCryptoPanic } from "./cryptopanic";
 
 export interface AuraResult {
   marketSlug: string;
@@ -19,6 +20,7 @@ export interface AuraResult {
   telegramBias: "BULLISH" | "BEARISH" | "NEUTRAL" | "UNAVAILABLE";
   breakingNews: boolean;
   newsHeadlines: string[];
+  newsArticles: { title: string; url: string; source: string }[];
   searchTrendSpike: boolean;
   searchTrendValue: number;
   whalePosYesPct: number;
@@ -43,10 +45,10 @@ function parseWeights(envVar: string | undefined, defaultWeights: Record<string,
 }
 
 const WEIGHTS = {
-  crypto: parseWeights(process.env.AURA_WEIGHTS_CRYPTO, { twitter: 2, telegram: 2, news: 1, trends: 1, default: 1 }),
-  political: parseWeights(process.env.AURA_WEIGHTS_POLITICAL, { twitter: 1, telegram: 1, news: 2, trends: 1, default: 1 }),
-  sports: parseWeights(process.env.AURA_WEIGHTS_SPORTS, { twitter: 1, telegram: 1, news: 1, trends: 2, default: 1 }),
-  default: parseWeights(process.env.AURA_WEIGHTS_DEFAULT, { twitter: 1, telegram: 1, news: 1, trends: 1, default: 1 }),
+  crypto: parseWeights(process.env.AURA_WEIGHTS_CRYPTO, { social: 2, cryptopanic: 3, news: 1, trends: 1 }),
+  political: parseWeights(process.env.AURA_WEIGHTS_POLITICAL, { social: 1, cryptopanic: 0, news: 2, trends: 1 }),
+  sports: parseWeights(process.env.AURA_WEIGHTS_SPORTS, { social: 1, cryptopanic: 0, news: 1, trends: 2 }),
+  default: parseWeights(process.env.AURA_WEIGHTS_DEFAULT, { social: 1, cryptopanic: 1, news: 1, trends: 1 }),
 };
 
 const timeout = <T>(ms: number): Promise<T> =>
@@ -59,64 +61,6 @@ async function runWithTimeout<T>(promise: Promise<T>, ms: number = 20000): Promi
 // Market data cache TTL: 10 mins
 let marketDataCache: { data: { yesProbability: number; volume24h: number }; slug: string; timestamp: number } | null = null;
 const MARKET_CACHE_TTL = 10 * 60 * 1000;
-
-// --- Free data source functions ---
-
-const POSITIVE_KEYWORDS = ["win","wins","won","leads","ahead","victory","confirmed","passes","approved","elected","surges","rises","gains","advances","succeeds","closes","reaches","hits","achieves","launches","signs","agrees"];
-const NEGATIVE_KEYWORDS = ["loses","lost","defeated","drops","falls","fails","rejected","vetoed","cancelled","delayed","withdrew","reversed","denied","blocked","suspended","crashed","collapse","retreat","ceasefire","truce","peace","backs down"];
-
-async function searchExa(query: string, daysBack: number): Promise<{ title: string; snippet: string; url: string }[]> {
-  try {
-    const startDate = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-    const res = await fetch("https://api.exa.ai/search", {
-      method: "POST",
-      headers: { "x-api-key": EXA_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query,
-        numResults: 10,
-        startPublishedDate: startDate,
-      }),
-    });
-    if (!res.ok) return [];
-    const data = await res.json() as { results?: { title?: string; text?: string; url?: string }[] };
-    return (data.results || []).map((r) => ({
-      title: r.title || "",
-      snippet: r.text || "",
-      url: r.url || "",
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function fetchNewsApi(keyword: string): Promise<{ title: string; publishedAt: string; source?: string }[]> {
-  try {
-    const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keyword)}&pageSize=5&sortBy=publishedAt&apiKey=${NEWS_API_KEY}`;
-    const res = await fetch(url);
-    if (!res.ok) return [];
-    const data = await res.json() as { articles?: { title?: string; publishedAt?: string }[] };
-    return (data.articles || []).map((a) => ({
-      title: a.title || "",
-      publishedAt: a.publishedAt || "",
-    }));
-  } catch {
-    return [];
-  }
-}
-
-async function fetchAllNews(query: string): Promise<{ title: string; publishedAt: string; source?: string; description?: string }[]> {
-  // Primary: Google News (no API key, no rate limit, real-time)
-  const gnewsArticles = await fetchGNews(query, { maxResults: 15, periodDays: 7 });
-
-  if (gnewsArticles.length > 0) {
-    console.log(`[Aura] GNews returned ${gnewsArticles.length} articles for: ${query}`);
-    return gnewsArticles.map(a => ({ title: a.title, publishedAt: a.publishedAt, source: a.source, description: a.description }));
-  }
-
-  // Fallback: NewsAPI
-  console.log(`[Aura] GNews returned 0 — falling back to NewsAPI`);
-  return await fetchNewsApi(query);
-}
 
 async function getMarketData(slug: string): Promise<{ yesProbability: number; volume24h: number }> {
   try {
@@ -140,30 +84,53 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
   }
 }
 
-// BUG 2+3: Accept pre-fetched articles to avoid double GNews calls; score title+description
-function computeSentimentFromArticles(articles: { title: string; description?: string }[]): { score: number; volumeDelta: number; resultCount: number } {
-  if (articles.length === 0) return { score: 0, volumeDelta: 0, resultCount: 0 };
+// Aggregate news from GNews + Guardian + NYT in parallel, deduplicated
+async function fetchAllNews(
+  query: string
+): Promise<{ title: string; publishedAt: string; source?: string; description?: string; url?: string }[]> {
+  const [gnews, guardian, nyt] = await Promise.allSettled([
+    fetchGNews(query, { maxResults: 10, periodDays: 7 }),
+    fetchGuardian(query, { maxResults: 10, daysBack: 7 }),
+    fetchNYT(query, { maxResults: 10, daysBack: 7 }),
+  ]);
 
-  let pos = 0, neg = 0;
-  for (const a of articles) {
-    const text = (a.title + " " + (a.description || "")).toLowerCase();
-    if (POSITIVE_KEYWORDS.some(k => text.includes(k))) pos++;
-    if (NEGATIVE_KEYWORDS.some(k => text.includes(k))) neg++;
-  }
-  const score = (pos - neg) / Math.max(articles.length, 1);
-  return { score: Math.max(-1, Math.min(1, score)), volumeDelta: 0, resultCount: articles.length };
+  const articles: { title: string; publishedAt: string; source?: string; description?: string; url?: string }[] = [];
+  const seen = new Set<string>();
+
+  const add = (items: { title: string; publishedAt: string; source?: string; description?: string; snippet?: string; url?: string }[]) => {
+    for (const a of items) {
+      const key = a.title.toLowerCase().slice(0, 60);
+      if (!seen.has(key)) {
+        seen.add(key);
+        articles.push({
+          title: a.title,
+          publishedAt: a.publishedAt,
+          source: a.source,
+          description: (a as any).description || (a as any).snippet || "",
+          url: a.url,
+        });
+      }
+    }
+  };
+
+  if (gnews.status === "fulfilled") add(gnews.value);
+  if (guardian.status === "fulfilled") add(guardian.value);
+  if (nyt.status === "fulfilled") add(nyt.value);
+
+  return articles;
 }
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
-  if (process.env.APIFY_MOCK === "true") {
+  if (process.env.AURA_MOCK === "true") {
     return getMockResult(market.slug);
   }
 
-  const mainKeyword = extractMainKeyword(market.question);
   const sourceStatus: Record<string, "ok" | "unavailable" | "timeout"> = {};
   const sourcesUsed: string[] = [];
+  const cat = market.category?.toLowerCase() || "default";
+  const isCrypto = cat === "crypto";
 
-  // Fetch market data with cache
+  // --- Market data (cached) ---
   const fetchMarketDataCached = async () => {
     if (marketDataCache && marketDataCache.slug === market.slug && Date.now() - marketDataCache.timestamp < MARKET_CACHE_TTL) {
       sourceStatus["leaderboard"] = "ok";
@@ -181,53 +148,77 @@ export async function runAura(market: { slug: string; question: string; category
     return data;
   };
 
-  // BUG 3 fix: Fetch news articles ONCE, share between sentiment + headlines
-  let sharedArticles: { title: string; publishedAt: string; source?: string; description?: string }[] = [];
+  // --- News: GNews + Guardian + NYT ---
+  let sharedArticles: { title: string; publishedAt: string; source?: string; description?: string; url?: string }[] = [];
   try {
     sharedArticles = await runWithTimeout(fetchAllNews(market.question));
     if (sharedArticles.length === 0) {
-      const shortQuery = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
+      const shortQuery = market.question.split(" ").filter((w) => w.length > 3).slice(0, 3).join(" ");
       if (shortQuery) sharedArticles = await runWithTimeout(fetchAllNews(shortQuery));
     }
   } catch {
     // timeout — sharedArticles stays empty
   }
 
-  // Social sentiment from shared articles (no extra GNews call)
-  const fetchSocial = async () => {
-    const result = computeSentimentFromArticles(sharedArticles);
-    if (result.resultCount > 0) {
-      sourceStatus["twitter"] = "ok";
-      sourcesUsed.push("twitter");
-    } else {
-      sourceStatus["twitter"] = "unavailable";
-    }
-    return result;
-  };
-
-  // News headlines from shared articles (no extra GNews call)
   const fetchNewsData = async () => {
     if (sharedArticles.length > 0) {
+      // Track which news sources contributed
+      const newsSources = new Set(sharedArticles.map((a) => a.source).filter(Boolean));
+      if (newsSources.has("The Guardian")) { sourceStatus["guardian"] = "ok"; sourcesUsed.push("guardian"); }
+      if (newsSources.has("The New York Times")) { sourceStatus["nyt"] = "ok"; sourcesUsed.push("nyt"); }
+      const hasGNews = sharedArticles.some((a) => !a.source || a.source === "");
+      if (hasGNews || newsSources.size > 0) { sourceStatus["gnews"] = "ok"; if (!sourcesUsed.includes("gnews")) sourcesUsed.push("gnews"); }
       sourceStatus["news"] = "ok";
-      if (!sourcesUsed.includes("news")) sourcesUsed.push("news");
     } else {
+      sourceStatus["guardian"] = "unavailable";
+      sourceStatus["nyt"] = "unavailable";
+      sourceStatus["gnews"] = "unavailable";
       sourceStatus["news"] = "unavailable";
     }
     return sharedArticles;
   };
 
-  // Trends via GNews 7d vs 30d ratio (replaces broken Exa ratio)
+  // --- HN social sentiment ---
+  const fetchHNSentiment = async () => {
+    const keyword = market.question.split(" ").filter((w) => w.length > 3).slice(0, 4).join(" ");
+    const stories = await fetchHackerNews(keyword, { maxResults: 15, daysBack: 7 });
+    const result = scoreHNSentiment(stories);
+    if (result.resultCount > 0) {
+      sourceStatus["hackernews"] = "ok";
+      sourcesUsed.push("hackernews");
+    } else {
+      sourceStatus["hackernews"] = "unavailable";
+    }
+    return result;
+  };
+
+  // --- CryptoPanic sentiment (crypto markets or general) ---
+  const fetchCPSentiment = async () => {
+    if (!process.env.CRYPTOPANIC_API_KEY) {
+      sourceStatus["cryptopanic"] = "unavailable";
+      return { score: 0, resultCount: 0 };
+    }
+    const posts = await fetchCryptoPanic({ filter: isCrypto ? "hot" : "important", maxResults: 20 });
+    const result = scoreCryptoPanic(posts);
+    if (result.resultCount > 0) {
+      sourceStatus["cryptopanic"] = "ok";
+      sourcesUsed.push("cryptopanic");
+    } else {
+      sourceStatus["cryptopanic"] = "unavailable";
+    }
+    return result;
+  };
+
+  // --- Trends: GNews 7d vs 30d ratio ---
   const fetchTrends = async () => {
     try {
-      const keywords = market.question.split(" ").filter(w => w.length > 3).slice(0, 3).join(" ");
-
+      const keywords = market.question.split(" ").filter((w) => w.length > 3).slice(0, 3).join(" ");
       const [recent, older] = await Promise.all([
         fetchGNews(keywords, { maxResults: 20, periodDays: 7 }),
         fetchGNews(keywords, { maxResults: 20, periodDays: 30 }),
       ]);
 
       if (older.length === 0) {
-        // Fall back to Gamma volume
         const gammaRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&limit=1`);
         if (gammaRes.ok) {
           const data = await gammaRes.json() as any[];
@@ -242,10 +233,9 @@ export async function runAura(market: { slug: string; question: string; category
         return { spike: false, value: 0 };
       }
 
-      // GNews 7d vs 30d ratio gives real trend signal
-      const ratio = older.length > 0 ? recent.length / older.length : 1;
+      const ratio = recent.length / older.length;
       const value = Math.min(100, Math.round(ratio * 50));
-      const spike = ratio > 1.5; // recent activity > 50% above baseline
+      const spike = ratio > 1.5;
       sourceStatus["trends"] = "ok";
       if (!sourcesUsed.includes("trends")) sourcesUsed.push("trends");
       return { spike, value };
@@ -255,72 +245,73 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
-  // Telegram — always UNAVAILABLE (removed to save cost)
   sourceStatus["telegram"] = "unavailable";
 
-  const [socialRes, newsRes, trendsRes, marketRes] = await Promise.allSettled([
-    runWithTimeout(fetchSocial()),
+  const [newsRes, hnRes, cpRes, trendsRes, marketRes] = await Promise.allSettled([
     runWithTimeout(fetchNewsData()),
+    runWithTimeout(fetchHNSentiment()),
+    runWithTimeout(fetchCPSentiment()),
     runWithTimeout(fetchTrends()),
     runWithTimeout(fetchMarketDataCached()),
   ]);
 
-  const social = socialRes.status === "fulfilled" ? socialRes.value : { score: 0, volumeDelta: 0, resultCount: 0 };
   const newsArticles = newsRes.status === "fulfilled" ? newsRes.value : [];
+  const hn = hnRes.status === "fulfilled" ? hnRes.value : { score: 0, resultCount: 0 };
+  const cp = cpRes.status === "fulfilled" ? cpRes.value : { score: 0, resultCount: 0 };
   const trends = trendsRes.status === "fulfilled" ? trendsRes.value : { spike: false, value: 50 };
   const marketData = marketRes.status === "fulfilled" ? marketRes.value : { yesProbability: 0.5, volume24h: 0 };
 
-  // Mark timeout on failed promises
-  if (socialRes.status === "rejected") sourceStatus["twitter"] = "timeout";
-  if (newsRes.status === "rejected") sourceStatus["news"] = "timeout";
+  if (newsRes.status === "rejected") { sourceStatus["guardian"] = "timeout"; sourceStatus["nyt"] = "timeout"; sourceStatus["gnews"] = "timeout"; sourceStatus["news"] = "timeout"; }
+  if (hnRes.status === "rejected") sourceStatus["hackernews"] = "timeout";
+  if (cpRes.status === "rejected") sourceStatus["cryptopanic"] = "timeout";
   if (trendsRes.status === "rejected") sourceStatus["trends"] = "timeout";
   if (marketRes.status === "rejected") sourceStatus["leaderboard"] = "timeout";
 
-  const twitterSentiment = social.score;
-  const twitterVolumeDelta = social.volumeDelta;
+  // --- Social sentiment: weighted HN + CryptoPanic ---
+  const weights = WEIGHTS[cat as keyof typeof WEIGHTS] || WEIGHTS.default;
+  const hnWeight = weights.social ?? 1;
+  const cpWeight = (weights.cryptopanic ?? 1);
+  const socialDenominator = (hn.resultCount > 0 ? hnWeight : 0) + (cp.resultCount > 0 ? cpWeight : 0) || 1;
+  const twitterSentiment = (
+    (hn.resultCount > 0 ? hn.score * hnWeight : 0) +
+    (cp.resultCount > 0 ? cp.score * cpWeight : 0)
+  ) / socialDenominator;
+  const twitterVolumeDelta = 0;
+
   const telegramBias: "BULLISH" | "BEARISH" | "NEUTRAL" | "UNAVAILABLE" = "UNAVAILABLE";
 
-  // News
-  const newsHeadlines = newsArticles.slice(0, 3).map((a) => a.title);
+  // --- News headlines ---
+  const newsHeadlines = newsArticles.slice(0, 5).map((a) => a.title);
   const now = Date.now();
   const breakingNews = newsArticles.some((a) => {
     const published = new Date(a.publishedAt).getTime();
     return now - published < 24 * 60 * 60 * 1000;
   });
 
-  // Trends
   const searchTrendSpike = trends.spike;
   const searchTrendValue = trends.value;
 
-  // NOTE A1: whalePosYesPct is derived from market price (Gamma yesProbability) — NOT actual whale order data.
-  // True whale tracking requires on-chain wallet analysis (future enhancement).
   const whalePosYesPct = Math.round(marketData.yesProbability * 100);
   const whalePositioning: "LONG" | "SHORT" | "NEUTRAL" | "MIXED" =
     whalePosYesPct > 60 ? "LONG" : whalePosYesPct < 40 ? "SHORT" : "NEUTRAL";
 
-  // Data sufficiency
-  const dataSufficiency = computeDataSufficiency(social.resultCount, 0, newsArticles.length);
+  const socialCount = hn.resultCount + cp.resultCount;
+  const dataSufficiency = computeDataSufficiency(socialCount, newsArticles.length);
 
-  // Confidence
-  // Confidence cap: 0.40 + dataSufficiency*0.45 prevents overconfidence when data is thin
   let confidence = Math.min(0.40 + dataSufficiency * 0.45, dataSufficiency + 0.15);
-  if (social.resultCount < 3) confidence = Math.min(confidence, 0.35);
+  if (socialCount < 3) confidence = Math.min(confidence, 0.35);
   if (newsArticles.length === 0) confidence = Math.min(confidence - 0.1, 0.30);
 
-  // Weight computation based on category
-  const cat = market.category?.toLowerCase() || "default";
-  const weights = WEIGHTS[cat as keyof typeof WEIGHTS] || WEIGHTS.default;
-
-  const tBiasScore = 0; // telegram always unavailable
   const nScore = breakingNews ? 0.5 : 0;
   const trScore = searchTrendSpike ? 0.5 : 0;
+  const newsWeight = weights.news ?? 1;
+  const trendsWeight = weights.trends ?? 1;
+  const totalWeight = hnWeight + cpWeight + newsWeight + trendsWeight;
 
-  const totalWeight = weights.twitter + weights.telegram + weights.news + weights.trends;
   const sentimentDelta = (
-    (twitterSentiment * weights.twitter) +
-    (tBiasScore * weights.telegram) +
-    (nScore * weights.news) +
-    (trScore * weights.trends)
+    (twitterSentiment * (hnWeight + cpWeight)) +
+    (nScore * newsWeight) +
+    (trScore * trendsWeight)
   ) / totalWeight;
 
   const shiftDetected = Math.abs(sentimentDelta) > 0.15;
@@ -334,17 +325,15 @@ export async function runAura(market: { slug: string; question: string; category
   ).all(market.slug);
 
   const baselineRun = lastRuns.length > 0 ? lastRuns[lastRuns.length - 1] : null;
-  const hoursSinceBaseline = baselineRun ? Math.max((Date.now() - baselineRun.scored_at) / (1000 * 60 * 60), 1.0) : 1.0;
+  const hoursSinceBaseline = baselineRun
+    ? Math.max((Date.now() - baselineRun.scored_at) / (1000 * 60 * 60), 1.0)
+    : 1.0;
 
   const shiftVelocity = sentimentDelta / hoursSinceBaseline;
   let shiftPersistence = 0;
-
   for (const run of lastRuns) {
-    if (run.shift_direction === shiftDirection) {
-      shiftPersistence++;
-    } else {
-      break;
-    }
+    if (run.shift_direction === shiftDirection) shiftPersistence++;
+    else break;
   }
 
   let shiftTrend: "ACCELERATING" | "STEADY" | "DECELERATING" | "REVERSING" = "STEADY";
@@ -359,7 +348,7 @@ export async function runAura(market: { slug: string; question: string; category
     }
   }
 
-  const echoChamberRisk = Math.abs(twitterSentiment) > 0.7 ? 0.8 - (dataSufficiency * 0.3) : 0.3;
+  const echoChamberRisk = Math.abs(twitterSentiment) > 0.7 ? 0.8 - dataSufficiency * 0.3 : 0.3;
 
   const result: AuraResult = {
     marketSlug: market.slug,
@@ -375,6 +364,11 @@ export async function runAura(market: { slug: string; question: string; category
     telegramBias,
     breakingNews,
     newsHeadlines,
+    newsArticles: newsArticles.slice(0, 5).map((a) => ({
+      title: a.title,
+      url: a.url ?? "",
+      source: a.source ?? "",
+    })),
     searchTrendSpike,
     searchTrendValue,
     whalePosYesPct,
@@ -386,7 +380,6 @@ export async function runAura(market: { slug: string; question: string; category
     sourceStatus,
   };
 
-  // Persist
   db.prepare(`
     INSERT INTO aura_results (
       slug, scored_at, sentiment_delta, shift_detected, shift_direction, shift_velocity, shift_trend,
@@ -407,13 +400,15 @@ export async function runAura(market: { slug: string; question: string; category
   return result;
 }
 
-function computeDataSufficiency(socialLen: number, telegramLen: number, newsLen: number): number {
+function computeDataSufficiency(socialCount: number, newsCount: number): number {
   let score = 0;
-  if (socialLen >= 5) score += 0.4;
-  else if (socialLen > 0) score += 0.2;
+  if (socialCount >= 10) score += 0.4;
+  else if (socialCount >= 3) score += 0.25;
+  else if (socialCount > 0) score += 0.1;
 
-  if (telegramLen >= 5) score += 0.3;
-  if (newsLen > 0) score += 0.3;
+  if (newsCount >= 5) score += 0.4;
+  else if (newsCount >= 2) score += 0.25;
+  else if (newsCount > 0) score += 0.15;
 
   return Math.min(score, 1.0);
 }
@@ -433,6 +428,10 @@ function getMockResult(slug: string): AuraResult {
     telegramBias: "BULLISH",
     breakingNews: true,
     newsHeadlines: ["House Democrats push impeachment vote...", "Market rallies on news"],
+    newsArticles: [
+      { title: "House Democrats push impeachment vote...", url: "", source: "The Guardian" },
+      { title: "Market rallies on news", url: "", source: "NYT" },
+    ],
     searchTrendSpike: true,
     searchTrendValue: 87,
     whalePosYesPct: 65,
@@ -440,9 +439,10 @@ function getMockResult(slug: string): AuraResult {
     echoChamberRisk: 0.3,
     dataSufficiency: 0.9,
     confidence: 0.85,
-    sourcesUsed: ["twitter", "googlenews", "trends", "leaderboard"],
+    sourcesUsed: ["hackernews", "cryptopanic", "guardian", "nyt", "gnews", "trends", "leaderboard"],
     sourceStatus: {
-      twitter: "ok", telegram: "timeout", news: "ok", trends: "ok", leaderboard: "ok",
+      hackernews: "ok", cryptopanic: "ok", guardian: "ok", nyt: "ok",
+      gnews: "ok", trends: "ok", leaderboard: "ok", telegram: "unavailable",
     },
   };
 

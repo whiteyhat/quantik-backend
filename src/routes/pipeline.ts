@@ -197,7 +197,27 @@ router.post("/run", async (req: Request, res: Response) => {
   sendEvent("pipeline:start", { runId, slug: effectiveSlug, timestamp: now });
 
   // ── Pre-fetch full market data once — shared across all agents ──
-  const marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
+  let marketRaw: Record<string, unknown> = {};
+  try {
+    marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
+  } catch {
+    // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
+    try {
+      const gammaRes = await fetch(
+        `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(effectiveSlug)}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (gammaRes.ok) {
+        const gammaData = await gammaRes.json() as unknown[];
+        const m = (Array.isArray(gammaData) ? gammaData[0] : gammaData) as Record<string, unknown> | undefined;
+        if (m) marketRaw = m;
+      }
+    } catch {
+      // Both sources failed — pipeline continues with slug as question and 0.5 default price
+      sendEvent("pipeline:warning", { message: "Market data unavailable, running with defaults" });
+    }
+  }
+
   const rawPrices = typeof marketRaw.outcomePrices === "string"
     ? JSON.parse(marketRaw.outcomePrices as string)
     : (marketRaw.outcomePrices ?? ["0.5","0.5"]);

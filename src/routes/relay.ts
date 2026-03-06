@@ -14,6 +14,7 @@ interface RelayRequestBody {
   message: string;
   history?: { role: string; content: string }[];
   slug?: string;
+  pipelineData?: Record<string, unknown>;
 }
 
 interface RelayResponse {
@@ -32,8 +33,8 @@ interface SessionEntry {
 // ── Config ─────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
-const GEMINI_FALLBACK = "gemini-flash-latest";
+const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
+const GEMINI_FALLBACK = "gemini-2.5-flash-lite";
 const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_HISTORY = 10;
@@ -344,23 +345,34 @@ router.post("/stream", async (req: Request, res: Response) => {
   const slug = detectSlug(body.message, body.slug);
   const { routedTo, endpoints } = detectAgentRoutes(body.message, slug);
 
-  // Start agent fetch Promise in parallel (non-blocking)
-  const agentFetchPromise: Promise<Record<string, unknown>> =
-    endpoints.length > 0 ? fetchAgentData(endpoints) : Promise.resolve({});
+  // Use pipeline data if provided (from completed pipeline run), otherwise fetch from agents
+  const fetchedAgentData: Record<string, unknown> =
+    endpoints.length > 0 && !body.pipelineData ? await fetchAgentData(endpoints) : {};
+  const agentData: Record<string, unknown> = {
+    ...fetchedAgentData,
+    ...(body.pipelineData ?? {}),
+  };
 
-  // Build messages
+  // Build messages with agent context injected
   const sessionMessages = getSession(sessionId);
   const messages: OllamaMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     ...sessionMessages,
-    { role: "user", content: body.message },
   ];
+  if (Object.keys(agentData).length > 0) {
+    messages.push({
+      role: "system",
+      content: `[AGENT DATA]\n${JSON.stringify(agentData, null, 2)}\n[/AGENT DATA]`,
+    });
+  }
+  messages.push({ role: "user", content: body.message });
 
   const geminiBody = buildGeminiBody(messages);
   let fullReply = "";
   let wordCount = 0;
   let stopped = false;
   let usedModel = GEMINI_MODEL;
+  let wordBuffer = ""; // accumulates partial words between Gemini chunks
 
   try {
     // Start Gemini streamGenerateContent immediately
@@ -416,8 +428,14 @@ router.post("/stream", async (req: Request, res: Response) => {
           fullReply += tokenToSend;
           wordCount = fullReply.split(/\s+/).filter(Boolean).length;
 
-          // Pipe token → client
-          res.write(`data: ${JSON.stringify({ type: "token", token: tokenToSend })}\n\n`);
+          // Emit word-by-word: buffer until we have a complete word (space after it)
+          wordBuffer += tokenToSend;
+          const parts = wordBuffer.split(" ");
+          for (let i = 0; i < parts.length - 1; i++) {
+            const word = (i === 0 ? "" : " ") + parts[i];
+            if (word) res.write(`data: ${JSON.stringify({ type: "token", token: word + " " })}\n\n`);
+          }
+          wordBuffer = parts[parts.length - 1];
 
           if (stopped) break;
         } catch {
@@ -426,8 +444,13 @@ router.post("/stream", async (req: Request, res: Response) => {
       }
     }
 
-    // Wait for agent data, then write metadata event
-    const agentData = await agentFetchPromise;
+    // Flush any remaining partial word in buffer
+    if (wordBuffer) {
+      res.write(`data: ${JSON.stringify({ type: "token", token: wordBuffer })}\n\n`);
+      wordBuffer = "";
+    }
+
+    // Write metadata event (agentData already resolved before stream started)
     if (Object.keys(agentData).length > 0) {
       res.write(`data: ${JSON.stringify({ type: "metadata", routedTo, agentData })}\n\n`);
     }
@@ -461,7 +484,6 @@ router.post("/stream", async (req: Request, res: Response) => {
 
       res.write(`data: ${JSON.stringify({ type: "token", token: reply })}\n\n`);
 
-      const agentData = await agentFetchPromise;
       if (Object.keys(agentData).length > 0) {
         res.write(`data: ${JSON.stringify({ type: "metadata", routedTo, agentData })}\n\n`);
       }

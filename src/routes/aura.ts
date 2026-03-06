@@ -11,8 +11,14 @@ auraRouter.get("/status", (req, res) => {
   const lastRun = db.prepare("SELECT scored_at FROM aura_results ORDER BY scored_at DESC LIMIT 1").get() as { scored_at: number } | undefined;
 
   res.json({
-    exaConnected: !!process.env.EXA_API_KEY,
-    newsApiConnected: !!process.env.NEWS_API_KEY,
+    sources: {
+      hackernews: !!process.env.ALGOLIA_HN_API_KEY,
+      guardian: !!process.env.GUARDIAN_API_KEY,
+      nyt: !!process.env.NYT_API_KEY,
+      cryptopanic: !!process.env.CRYPTOPANIC_API_KEY,
+      gnews: true, // no key required
+      newsApiLegacy: !!process.env.NEWS_API_KEY,
+    },
     lastRunAt: lastRun?.scored_at || null,
     totalRuns: totalRuns.c || 0,
   });

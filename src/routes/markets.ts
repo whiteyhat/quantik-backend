@@ -203,6 +203,18 @@ interface GammaMarketRaw {
   [key: string]: unknown;
 }
 
+/** Gamma returns clobTokenIds as either an array or a JSON-encoded string */
+function parseClobTokenId(raw: unknown): string | null {
+  if (Array.isArray(raw) && raw.length > 0) return String(raw[0]);
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return String(parsed[0]);
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
 function transformTrendingMarket(raw: GammaMarketRaw): unknown {
   let outcomePrices: number[] = [];
   try {
@@ -224,7 +236,7 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
     volume: raw.volume24hr ?? 0,
     liquidity,
     liquidityGrade,
-    tokenId: (Array.isArray(raw.clobTokenIds) && raw.clobTokenIds.length > 0 ? raw.clobTokenIds[0] : null) ?? raw.conditionId ?? "",
+    tokenId: parseClobTokenId(raw.clobTokenIds) ?? raw.conditionId ?? "",
   };
 }
 
@@ -415,8 +427,10 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
 
   // 2) Try Gamma API for price history (tokenId is the condition ID or token ID)
   try {
+    // Map frontend intervals to CLOB API intervals
+    const clobInterval = interval === "1h" ? "1h" : interval === "1w" ? "1w" : interval === "all" ? "max" : "1d";
     const gammaRes = await fetch(
-      `https://clob.polymarket.com/prices-history?market=${encodeURIComponent(tokenId)}&interval=${interval || "1d"}&fidelity=10`,
+      `https://clob.polymarket.com/prices-history?market=${encodeURIComponent(tokenId)}&interval=${clobInterval}&fidelity=10`,
       {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(8000),

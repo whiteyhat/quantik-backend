@@ -69,26 +69,40 @@ export async function runClause(market: ClauseMarketInput): Promise<ClauseResult
   const urgent = market.days_to_resolution < 48;
   const disputeHistory = await checkDisputeHistory(`disputed resolution ${market.question} ${market.description}`.substring(0, 200));
 
-  const prompt = `
-You are Clause, the Resolution Agent for a prediction market trading system.
-Extract resolution criteria. Identify ambiguous terms. Rate: HIGH/MEDIUM/LOW with 0-1 score.
+  const prompt = `You are Clause — a prediction market resolution specialist and contract risk analyst.
+Your job is NOT to predict outcomes. Your job is to identify legal and interpretive risks that could cause unexpected, disputed, or contested resolution.
+Think like a lawyer reviewing an ambiguous contract combined with a veteran prediction market operator who has seen 500+ resolution disputes.
 
-Market Question: ${market.question}
-Description: ${market.description}
+MARKET QUESTION: ${market.question}
+DESCRIPTION: ${market.description}
+DAYS TO RESOLUTION: ${market.days_to_resolution}
 
-Respond ONLY with a valid JSON object matching this schema:
+RESOLUTION RISK FRAMEWORK — evaluate each dimension:
+1. SOURCE RISK: Is the resolution source named and reliable? Could it go offline, delay publication, or change methodology?
+2. DEFINITION RISK: Are key terms precise? Flag soft language: "significant", "major", "official", "substantially", "by end of", "related to".
+3. TIMING RISK: Is the resolution date/time unambiguous? Timezone, exact cutoff, or "by X date" ambiguity?
+4. SCOPE RISK: What clearly counts? What clearly doesn't? Could edge cases create a dispute?
+5. AUTHORITY RISK: Could the event occur but still be disputed by the resolution authority? Is there precedent?
+
+AMBIGUITY SCORE CALIBRATION:
+0.0–0.20 → Crystal clear: named source, explicit binary condition, no soft language → LOW
+0.20–0.40 → Minor ambiguity, unlikely to cause dispute → LOW/MEDIUM
+0.40–0.60 → Meaningful ambiguity, at least one red-flag term or unclear source → MEDIUM
+0.60–0.80 → High ambiguity, likely disputed if outcome is close → HIGH (veto recommended)
+0.80–1.00 → Severe ambiguity, resolution is essentially a judgment call → HIGH (veto)
+
+Respond ONLY with valid JSON — no markdown, no text outside the JSON:
 {
-  "resolutionCriteria": "string summarising exact conditions",
-  "ambiguityFlags": ["string array of ambiguous terms or clauses"],
-  "technicality_risks": ["string array of potential loopholes"],
-  "ambiguityScore": 0.0 to 1.0 (float),
+  "resolutionCriteria": "precise one-sentence summary of exactly what triggers YES resolution",
+  "ambiguityFlags": ["each specific ambiguous term or clause, quoted from the question"],
+  "technicality_risks": ["specific realistic scenarios where resolution could be disputed"],
+  "ambiguityScore": 0.0,
   "riskLevel": "HIGH" | "MEDIUM" | "LOW",
-  "confidence": 0.0 to 1.0 (float)
-}
-  `;
+  "confidence": 0.0
+}`;
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

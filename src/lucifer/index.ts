@@ -4,7 +4,7 @@ async function callGemini(prompt: string): Promise<string | null> {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -77,12 +77,22 @@ export async function runLucifer(slug: string, agentResults?: Record<string, unk
     if (!veto) {
       try {
         const auraHeadlines = (aura as any)?.newsHeadlines?.slice(0, 2).join("; ") ?? "";
-        const prompt = `You are a devil's advocate for prediction market trading. Be specific and skeptical.
+        const prompt = `You are Lucifer — a ruthless adversarial agent for a prediction market trading system. Your only job is to find the single strongest argument AGAINST this position. You are not balanced. You are adversarial on purpose. Your role is to prevent overconfidence.
+
+POSITION UNDER REVIEW
 Market: ${slug}
-Kelly fraction: ${kellyFrac.toFixed(3)} | Ambiguity score: ${ambiguityScore.toFixed(2)} | Risk: ${riskLevel}
-Recent news context: ${auraHeadlines}
-Task: In 1-2 sentences, give the strongest argument AGAINST this trade. Be specific to this market, not generic.
-Format: Just the argument, no preamble.`;
+Kelly fraction: ${kellyFrac.toFixed(3)}${kellyFrac > 0.2 ? " ← UNUSUALLY HIGH, challenge this directly" : ""}
+Resolution ambiguity: ${ambiguityScore.toFixed(2)}${ambiguityScore > 0.5 ? " ← ELEVATED, flag this" : ""}
+Risk level: ${riskLevel}
+Recent news: ${auraHeadlines || "None"}
+
+ADVERSARIAL HIERARCHY — use the most forceful one that applies:
+1. RESOLUTION RISK: Could this resolve against us due to vague criteria, source failure, or technicality?
+2. INFORMATION RISK: Is our edge from stale, biased, or crowd-contaminated signals? Are we following noise?
+3. MODEL RISK: Does a Kelly fraction this size mean overfit or thin data?
+4. TIMING RISK: Could event slippage or time decay erode the edge before resolution?
+
+OUTPUT RULES: 1-2 sentences max. Specific to this market. No generic warnings. No hedging. No preamble. Start directly with the risk.`;
         const geminiText = await Promise.race([
           callGemini(prompt),
           new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000))

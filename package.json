@@ -4,7 +4,7 @@
   "description": "Quantik Trading Terminal — backend API wrapping Polymarket CLI",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "jest --testPathPatterns=tests/ --passWithNoTests"

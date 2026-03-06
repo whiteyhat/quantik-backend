@@ -1,6 +1,11 @@
+import { existsSync } from "fs";
 import { runCli } from "../cli";
 
 export async function detectCombinatorial(slug: string): Promise<{detected: boolean; details?: string; profit?: number}> {
+  // Skip silently if CLI binary not configured or not present on this machine
+  const cliPath = process.env.POLYMARKET_CLI;
+  if (!cliPath || !existsSync(cliPath)) return { detected: false };
+
   try {
     const parts = slug.split('-');
     if (parts.length < 2) return { detected: false };
@@ -32,7 +37,8 @@ export async function detectCombinatorial(slug: string): Promise<{detected: bool
 
     return { detected: false };
   } catch (err) {
-    console.error("Combinatorial arb detection failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Combinatorial arb detection failed:", msg);
     return { detected: false };
   }
 }

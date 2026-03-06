@@ -38,19 +38,25 @@ function fetchPortfolioUsdc(slug: string): { value: number; source: string } {
     return { value: envValue, source: "env_var" };
   }
 
-  // Try polymarket-cli with 3s timeout
-  try {
-    const output = execSync("polymarket wallet balance", { timeout: 3000, encoding: "utf8" });
-    // Parse lines like "USDC: 1234.56" or "Balance: 1234.56 USDC"
-    const match = output.match(/(?:USDC|Balance)[:\s]+([\d.]+)/i);
-    if (match) {
-      const value = parseFloat(match[1]);
-      if (!isNaN(value) && value > 0) {
-        return { value, source: "cli" };
+  // Try polymarket-cli with 3s timeout (only if binary path is set and exists)
+  const cliPath = process.env.POLYMARKET_CLI;
+  if (cliPath) {
+    try {
+      const output = execSync(`"${cliPath}" wallet balance`, {
+        timeout: 3000,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"], // suppress stderr — avoids shell error spam
+      });
+      const match = output.match(/(?:USDC|Balance)[:\s]+([\d.]+)/i);
+      if (match) {
+        const value = parseFloat(match[1]);
+        if (!isNaN(value) && value > 0) {
+          return { value, source: "cli" };
+        }
       }
+    } catch (_) {
+      // CLI unavailable or binary not found — continue to fallback
     }
-  } catch (_) {
-    // CLI unavailable or timed out — continue to fallback
   }
 
   // Fallback: env var

@@ -37,25 +37,34 @@ export interface SigmaInputs {
   market: any;
 }
 
+const SIGMA_MODELS = ["gemini-3.1-pro-preview", "gemini-2.5-flash"];
+
 async function askGemini(prompt: string): Promise<any> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY not set");
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.1
-      }
-    })
-  });
-  if (!res.ok) throw new Error("Gemini API error: " + await res.text());
-  const data: any = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("No text from Gemini");
-  return JSON.parse(text);
+  for (const model of SIGMA_MODELS) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.1
+          }
+        })
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) continue;
+      return JSON.parse(text);
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("All Gemini models failed");
 }
 
 export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
@@ -204,9 +213,9 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
       recommended_direction,
       recommendation,
       skip_reason,
-      thesis: "Auto-synthesized agreement among agents. Strong directional alignment.",
-      bear_case: "Minor liquidity or time decay risks.",
-      bull_case: "Unanimous quantitative edge.",
+      thesis: `Agents converged: Oracle ${(p_oracle * 100).toFixed(0)}%, Edge ${(p_edge * 100).toFixed(0)}%, Aura ${(p_aura * 100).toFixed(0)}%. Composite ${(composite_prob * 100).toFixed(0)}% with ${(confidence * 100).toFixed(0)}% confidence — directional bias ${recommended_direction}.`,
+      bear_case: `Agents agree, which itself is a risk — consensus can mask shared blind spots. ${flux?.soft_veto ? "Flux flags thin liquidity; execution may not match model price." : "Monitor liquidity and time decay before execution."}`,
+      bull_case: `Quantitative alignment across Oracle, Edge, and Aura on ${recommended_direction} direction at ${(composite_prob * 100).toFixed(0)}%. Inter-agent variance ${variance.toFixed(3)} — strong consistency.`,
       agent_weights,
       lucifer_da_score: lucifer?.devils_advocate_score,
       auto_synthesized: true,
@@ -214,25 +223,31 @@ export async function runSigma(inputs: SigmaInputs): Promise<ResearchNote> {
     };
   } else {
     // LLM Fallback
-    const prompt = `
-You are Sigma, the lead synthesis agent for Quantik.
-Reconcile the following agent inputs for the market "${market?.question}".
-The agents strongly disagree (variance >= 0.1).
-Inputs:
-- Oracle Prob: ${p_oracle.toFixed(2)}
-- Edge Prob: ${p_edge.toFixed(2)}
-- Aura Prob: ${p_aura.toFixed(2)}
-- Clause Veto: ${clause?.veto}
-- Lucifer DA Score: ${lucifer?.devils_advocate_score ?? 'N/A'}
+    const prompt = `You are Sigma — the lead synthesis agent for Quantik, a prediction market trading system. Your job is to reconcile conflicting agent signals and produce a definitive, well-reasoned trading recommendation.
 
-Weighted composite probability calculated: ${composite_prob.toFixed(2)}
+MARKET: "${market?.question}"
 
-Provide a JSON object with:
+AGENT INPUTS (agents disagree — variance ${variance.toFixed(3)} ≥ 0.10):
+- Oracle (Gemini superforecaster): ${(p_oracle * 100).toFixed(0)}%
+- Edge (Kelly/EV model): ${(p_edge * 100).toFixed(0)}%
+- Aura (sentiment-adjusted): ${(p_aura * 100).toFixed(0)}%
+- Flux (depth-implied): ${(p_flux * 100).toFixed(0)}%
+- Clause veto: ${clause?.veto ?? false}${clause?.veto ? " ← HARD VETO — recommendation must be SKIP unless overridden with strong reasoning" : ""}
+- Lucifer DA score: ${lucifer?.devils_advocate_score ?? "N/A"}${(lucifer?.devils_advocate_score ?? 0) > 0.6 ? " ← HIGH adversarial score" : ""}
+- Weighted composite: ${(composite_prob * 100).toFixed(0)}%
+
+SYNTHESIS PROTOCOL:
+1. IDENTIFY THE GAP: Which two agents diverge most, and what does that imply about the market?
+2. WEIGHT BY RELIABILITY: Oracle and Edge are quantitative — weight them higher than sentiment under uncertainty.
+3. APPLY VETO LOGIC: If Clause vetoed, the thesis must explain why or defer to SKIP.
+4. PRODUCE A VERDICT: Clear 2-3 sentence position on whether to trade and why.
+
+Respond ONLY with valid JSON — no markdown, no text outside the JSON:
 {
   "composite_prob": ${composite_prob},
-  "thesis": "Your 2-3 sentence reconciliation thesis",
-  "bull_case": "The best steelmanned argument for YES",
-  "bear_case": "The best steelmanned argument for NO"
+  "thesis": "2-3 sentences reconciling the disagreement and stating the synthesis verdict with specific numbers",
+  "bull_case": "The strongest steelmanned argument FOR the trade, citing agent data",
+  "bear_case": "The strongest steelmanned argument AGAINST the trade, citing agent data"
 }`;
 
     try {

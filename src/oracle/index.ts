@@ -27,22 +27,31 @@ export interface OracleResult {
   data_sources: Record<string, string>;
 }
 
+const ORACLE_MODELS = ["gemini-3.1-pro-preview", "gemini-2.5-flash"];
+
 async function askGemini(prompt: string): Promise<any> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY not set");
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json" }
-    })
-  });
-  if (!res.ok) throw new Error("Gemini API error: " + await res.text());
-  const data: any = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("No text from Gemini");
-  return JSON.parse(text);
+  for (const model of ORACLE_MODELS) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json" }
+        })
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) continue;
+      return JSON.parse(text);
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("All Gemini models failed");
 }
 
 export async function runOracle(market: any): Promise<OracleResult> {

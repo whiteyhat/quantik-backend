@@ -116,7 +116,10 @@ export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    console.error("[telegramAlert] sendSignalAlert failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("bot token missing")) {
+      console.error("[telegramAlert] sendSignalAlert failed:", msg);
+    }
     return false;
   }
 }
@@ -129,7 +132,10 @@ export async function sendStatusUpdate(message: string): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    console.error("[telegramAlert] sendStatusUpdate failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("bot token missing")) {
+      console.error("[telegramAlert] sendStatusUpdate failed:", msg);
+    }
     return false;
   }
 }
@@ -171,6 +177,10 @@ export function ensureAlertColumns(): void {
 
 export class AlertPoller {
   async pollAndAlert(): Promise<void> {
+    // Skip entirely if Telegram not configured — avoids flooding logs on startup
+    const config = await getTelegramConfig();
+    if (!config.botToken) return;
+
     const db = getDb();
 
     // Check mute
