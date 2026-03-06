@@ -20,7 +20,7 @@ interface GammaMarket {
 async function settle(): Promise<void> {
   try {
     const db = getDb();
-    const rows = db.prepare(`SELECT * FROM executions WHERE status = 'placed' AND pnl IS NULL`).all() as ExecutionRow[];
+    const rows = db.prepare(`SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`).all() as ExecutionRow[];
 
     if (rows.length === 0) return;
     console.log(`[pnlSettler] Checking ${rows.length} open positions`);

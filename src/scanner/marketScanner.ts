@@ -6,6 +6,7 @@ import { runClause } from "../clause/index";
 import { runAura } from "../aura/index";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
+import { getSettings } from "../db/queries";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -630,7 +631,8 @@ export class MarketScanner {
 
   async autoExecute(result: ScanResult, question: string): Promise<void> {
     const db = getDb();
-    const paperMode = process.env.PAPER_TRADING === "true";
+    const settings = getSettings();
+    const paperMode = settings.paper_mode;
     const maxBet = parseFloat(process.env.MAX_BET_USDC ?? "10");
     const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "50", 10);
     const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");

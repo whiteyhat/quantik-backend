@@ -28,13 +28,13 @@ const circuitBreaker = new CircuitBreaker();
  * Run all risk checks in sequence for a proposed position.
  * Returns first failure, or approval with (potentially adjusted) size.
  */
-export function approvePosition(
+export async function approvePosition(
   slug: string,
   sizeUsdc: number,
   category?: string
-): RiskApproval {
+): Promise<RiskApproval> {
   // 1. Circuit breaker check
-  const cbStatus = circuitBreaker.checkAndTrip();
+  const cbStatus = await circuitBreaker.checkAndTrip();
   if (cbStatus.triggered) {
     return {
       approved: false,
@@ -45,7 +45,7 @@ export function approvePosition(
   }
 
   // 2. Exposure limit (50% total deployed)
-  if (!portfolio.checkExposureLimit(sizeUsdc)) {
+  if (!(await portfolio.checkExposureLimit(sizeUsdc))) {
     return {
       approved: false,
       adjustedSize: 0,
@@ -55,8 +55,8 @@ export function approvePosition(
   }
 
   // 3. Position limit (5% per market)
-  if (!portfolio.checkPositionLimit(slug, sizeUsdc)) {
-    const totalCapital = portfolio.getTotalCapital();
+  if (!(await portfolio.checkPositionLimit(slug, sizeUsdc))) {
+    const totalCapital = await portfolio.getTotalCapital();
     const maxSize = totalCapital * 0.05;
     const existing = portfolio.getOpenPositions()
       .filter((p) => p.slug === slug)
@@ -83,7 +83,7 @@ export function approvePosition(
 
   // 4. Theme/correlation limit (20% per theme)
   const theme = category ?? correlation.categorize(slug);
-  const totalCapital = portfolio.getTotalCapital();
+  const totalCapital = await portfolio.getTotalCapital();
   if (!correlation.checkThemeLimit(theme, sizeUsdc, totalCapital)) {
     return {
       approved: false,

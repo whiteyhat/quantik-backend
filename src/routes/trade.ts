@@ -1,9 +1,54 @@
 import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
 import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
+import { getDb } from "../db/schema";
 import { v4 as uuid } from "uuid";
 
 const router = Router();
+
+// ── GET /api/trade ────────────────────────────────────────────
+router.get("/", (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
+    
+    const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+    const livePrice = new Map(priceRows.map(r => [r.slug, r.probability]));
+
+    const tradeList = executions.map(e => {
+      const entry = e.fill_price ?? 0.5;
+      const current = livePrice.get(e.slug) ?? entry;
+      const shares = entry > 0 ? e.amount / entry : 0;
+      const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      
+      let outcome = "OPEN";
+      if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
+      else if (e.status === "failed") outcome = "LOSS";
+
+      return {
+        id: e.id,
+        slug: e.slug,
+        market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+        direction: e.side === "buy" ? "YES" : "NO",
+        size: e.amount,
+        price: entry,
+        outcome,
+        timestamp: e.executed_at,
+        pnl: e.pnl ?? pnl,
+        orderId: e.order_id,
+        mode: e.status,
+      };
+    });
+
+    res.json({
+      trades: tradeList,
+      count: tradeList.length,
+      winRate: tradeList.filter(t => t.outcome === "WIN").length / Math.max(tradeList.filter(t => t.outcome !== "OPEN").length, 1)
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ── POST /api/trade/execute ───────────────────────────────────
 router.post("/execute", async (req: Request, res: Response) => {

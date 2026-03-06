@@ -1,4 +1,5 @@
 import { getDb } from "../db/schema";
+import { getUsdcBalance, getClobBalance } from "../utils/balances";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ export class PortfolioManager {
     const db = getDb();
     const rows = db
       .prepare<[], ExecutionRow>(
-        "SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL ORDER BY executed_at DESC"
+        "SELECT * FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL ORDER BY executed_at DESC"
       )
       .all();
 
@@ -60,18 +61,26 @@ export class PortfolioManager {
     });
   }
 
-  /** Total Portfolio Value: On-chain + Deployed (approximate) */
-  getTotalCapital(): number {
-    const db = getDb();
-    // In production we'd call the wallet RPC, here we use a proxy from settings or historical max
-    // Use $3000 as a base for calculations if empty
-    return 3000; 
+  /** Total Portfolio Value: On-chain + Deployed (unified async source) */
+  async getTotalCapital(): Promise<number> {
+    const [onChain, clob] = await Promise.all([
+      getUsdcBalance(),
+      getClobBalance(),
+    ]);
+    const deployed = this.getDeployedCapital();
+    const openPnl = this.getOpenPositions().reduce((sum, p) => sum + p.openPnl, 0);
+    
+    const total = onChain + clob + deployed + openPnl;
+    return total > 0 ? total : 3000; // Final safety fallback only
   }
 
   /** Capital not currently deployed in open positions */
-  getAvailableCapital(): number {
-    const deployed = this.getDeployedCapital();
-    return this.getTotalCapital() - deployed;
+  async getAvailableCapital(): Promise<number> {
+    const [onChain, clob] = await Promise.all([
+      getUsdcBalance(),
+      getClobBalance(),
+    ]);
+    return onChain + clob;
   }
 
   /** Total USDC currently in open positions */
@@ -81,8 +90,8 @@ export class PortfolioManager {
   }
 
   /** Check if a new position would exceed the 5% per-market limit */
-  checkPositionLimit(slug: string, sizeUsdc: number): boolean {
-    const total = this.getTotalCapital();
+  async checkPositionLimit(slug: string, sizeUsdc: number): Promise<boolean> {
+    const total = await this.getTotalCapital();
     const maxSize = total * MAX_POSITION_PCT;
     const existing = this.getOpenPositions()
       .filter((p) => p.slug === slug)
@@ -91,8 +100,8 @@ export class PortfolioManager {
   }
 
   /** Check if total deployed would exceed 50% exposure limit */
-  checkExposureLimit(additionalUsdc: number = 0): boolean {
-    const total = this.getTotalCapital();
+  async checkExposureLimit(additionalUsdc: number = 0): Promise<boolean> {
+    const total = await this.getTotalCapital();
     const maxExposure = total * MAX_EXPOSURE_PCT;
     const deployed = this.getDeployedCapital();
     return (deployed + additionalUsdc) <= maxExposure;
@@ -111,10 +120,5 @@ export class PortfolioManager {
     const unrealized = openPositions.reduce((sum, p) => sum + p.openPnl, 0);
 
     return realized + unrealized;
-  }
-
-  /** Insert a position into the executions table (for risk tracking only) */
-  updatePosition(slug: string, sizeUsdc: number, direction: string): void {
-    // This is now redundant as MarketScanner handles insertion into executions
   }
 }

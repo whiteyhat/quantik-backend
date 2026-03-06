@@ -86,10 +86,10 @@ export class CircuitBreaker {
   }
 
   /** Check daily drawdown and auto-trip if thresholds exceeded */
-  checkAndTrip(): CircuitBreakerStatus {
+  async checkAndTrip(): Promise<CircuitBreakerStatus> {
     const db = getDb();
     const dailyPnl = this.portfolio.getDailyPnL();
-    const totalCapital = this.portfolio.getTotalCapital();
+    const totalCapital = await this.portfolio.getTotalCapital();
     const drawdownPct = totalCapital > 0 ? Math.abs(Math.min(dailyPnl, 0)) / totalCapital : 0;
     const now = Date.now();
 
@@ -126,5 +126,10 @@ export class CircuitBreaker {
     db.prepare(
       "UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL, last_checked_at = ? WHERE id = 1"
     ).run(Date.now());
+    
+    // Also reset the global kill switch used by the scanner
+    try {
+      db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();
+    } catch {}
   }
 }

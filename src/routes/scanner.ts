@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { MarketScanner, getScannerStatus } from "../scanner/marketScanner";
 import { getDb } from "../db/schema";
+import { getCircuitBreaker, getPortfolioManager } from "../risk";
+import { getSettings } from "../db/queries";
 
 const router = Router();
 const scanner = new MarketScanner();
@@ -19,11 +21,23 @@ router.post("/run", async (_req: Request, res: Response) => {
 // ── GET /api/scanner/status ────────────────────────────────────
 router.get("/status", (_req: Request, res: Response) => {
   const s = getScannerStatus();
+  const cb = getCircuitBreaker().getStatus();
+  const portfolio = getPortfolioManager();
+  const settings = getSettings();
+  
+  const todayStart = new Date().setUTCHours(0, 0, 0, 0);
+  const db = getDb();
+  const { tradesToday } = db.prepare("SELECT COUNT(*) AS tradesToday FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayStart) as any;
+
   res.json({
-    running: s.running,
-    lastScanAt: s.lastScan,
+    isRunning: s.running,
+    lastScan: s.lastScan ? new Date(s.lastScan).toISOString() : null,
     scannedToday: s.scannedToday,
     alertsTriggered: s.alertsTriggered,
+    marketsChecked: s.scannedToday, // approximate for UI
+    tradesToday: tradesToday || 0,
+    circuitBreakerTriggered: cb.triggered,
+    paperMode: !!settings.paper_mode,
   });
 });
 
