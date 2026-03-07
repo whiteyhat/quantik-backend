@@ -76,6 +76,11 @@ app.use(express.json());
 getDb();
 ensureCircuitBreakerTable();
 
+// Root route
+app.get("/", (_req, res) => {
+  res.json({ status: "ok", service: "quantik-backend", message: "Quantik Backend Online" });
+});
+
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", timestamp: Date.now() });

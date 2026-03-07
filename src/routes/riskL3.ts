@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { getDb } from "../db/schema";
 import {
   approvePosition,
   getPortfolioManager,
@@ -98,6 +99,18 @@ router.post("/circuit-breaker/reset", (_req: Request, res: Response) => {
   const cb = getCircuitBreaker();
   cb.reset();
   res.json({ message: "Circuit breaker reset to ARMED.", circuitBreaker: cb.getStatus() });
+});
+
+// ── EMERGENCY RESET ───────────────────────────────────────────
+router.get("/emergency/reset-panic", (_req: Request, res: Response) => {
+  const db = getDb();
+  try {
+    db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();
+    db.prepare("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1").run();
+    res.json({ success: true, message: "Panic mode and circuit breaker reset successfully." });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
 });
 
 export default router;
