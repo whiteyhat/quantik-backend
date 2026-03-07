@@ -1,5 +1,4 @@
 import { Router, Request, Response } from "express";
-import { getDb } from "../db/schema";
 import {
   approvePosition,
   getPortfolioManager,
