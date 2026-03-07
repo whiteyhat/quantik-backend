@@ -227,23 +227,32 @@ router.put("/risk-config", (req: Request, res: Response) => {
 
 // ── POST /api/v1/panic-mode/activate ─────────────────────────
 // Triggers panic mode, creates a panic_mode_events record, seeds
-// a dummy liquidation report, and returns the report ID.
+// Activates panic mode using real open positions from executions table.
 
 router.post("/panic-mode/activate", (_req: Request, res: Response) => {
   const db = getDb();
   const now = Date.now();
 
+  // Read real open positions
+  const openPositions = db.prepare<[], { slug: string; side: string; amount: number; fill_price: number | null }>(
+    "SELECT slug, side, amount, fill_price FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+  ).all();
+
+  // Get current prices from scanner
+  const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+  const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
+
+  const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
+
   const eventId = uuidv4();
   const requestCode = `PMR-${Date.now().toString(36).toUpperCase()}`;
 
-  // Create panic mode event
   db.prepare<[string, string, number, number, number, number]>(`
     INSERT INTO panic_mode_events
       (id, request_code, status, pending_orders_count, active_positions_count, estimated_total_value, initiated_at)
     VALUES (?, ?, 'processing', ?, ?, ?, ?)
-  `).run(eventId, requestCode, 3, 4, 1287.5, now);
+  `).run(eventId, requestCode, 0, openPositions.length, estimatedValue, now);
 
-  // Create dummy liquidation report
   const reportId = uuidv4();
   const reportCode = `LQR-${Date.now().toString(36).toUpperCase()}`;
 
@@ -253,63 +262,34 @@ router.post("/panic-mode/activate", (_req: Request, res: Response) => {
     VALUES (?, ?, ?, 'processing', NULL, NULL, NULL, 'pending')
   `).run(reportId, reportCode, eventId);
 
-  // Seed dummy line items
-  const MOCK_LINE_ITEMS: Omit<LiquidationLineItemRow, "id" | "liquidation_report_id">[] = [
-    {
-      asset_symbol: "US-ELECTION-YES",
-      asset_label: "US Election 2026 — YES",
-      execution_price: 0.61,
-      trigger_price: 0.65,
-      size: 200,
-      size_unit: "shares",
-      pnl_impact: -8.0,
-    },
-    {
-      asset_symbol: "BTC-100K-YES",
-      asset_label: "BTC $100K EoY — YES",
-      execution_price: 0.44,
-      trigger_price: 0.50,
-      size: 150,
-      size_unit: "shares",
-      pnl_impact: -9.0,
-    },
-    {
-      asset_symbol: "ETH-MERGE-NO",
-      asset_label: "ETH Merge v2 — NO",
-      execution_price: 0.72,
-      trigger_price: 0.70,
-      size: 80,
-      size_unit: "shares",
-      pnl_impact: 1.6,
-    },
-    {
-      asset_symbol: "NBA-FINALS-LAL",
-      asset_label: "NBA Finals 2026 — Lakers",
-      execution_price: 0.33,
-      trigger_price: 0.35,
-      size: 120,
-      size_unit: "shares",
-      pnl_impact: -2.4,
-    },
-  ];
-
+  // Build liquidation line items from real positions
   const insertItem = db.prepare<[string, string, string, string, number, number, number, string, number]>(`
     INSERT INTO liquidation_line_items
       (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  for (const item of MOCK_LINE_ITEMS) {
+  for (const pos of openPositions) {
+    const entry = pos.fill_price ?? 0.5;
+    const current = currentPrices.get(pos.slug) ?? entry;
+    const shares = entry > 0 ? pos.amount / entry : 0;
+    const pnl = pos.side === "buy"
+      ? (current - entry) * shares
+      : (entry - current) * shares;
+
+    const direction = pos.side === "buy" ? "YES" : "NO";
+    const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
     insertItem.run(
       uuidv4(),
       reportId,
-      item.asset_symbol,
-      item.asset_label,
-      item.execution_price,
-      item.trigger_price,
-      item.size,
-      item.size_unit,
-      item.pnl_impact
+      `${pos.slug.toUpperCase()}-${direction}`,
+      `${label} — ${direction}`,
+      current,
+      entry,
+      shares,
+      "shares",
+      parseFloat(pnl.toFixed(2))
     );
   }
 
@@ -318,11 +298,18 @@ router.post("/panic-mode/activate", (_req: Request, res: Response) => {
     "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
   ).run(now);
 
+  // Also trip the circuit breaker state
+  db.prepare(
+    "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
+  ).run(now, now);
+
   res.status(202).json({
     eventId,
     requestCode,
     status: "processing",
     liquidationReportId: reportId,
+    positionsLiquidated: openPositions.length,
+    estimatedValue: parseFloat(estimatedValue.toFixed(2)),
     message: "Panic mode activated. Liquidation in progress.",
   });
 });

@@ -2,11 +2,11 @@ import { getDb } from "../db/schema";
 
 // ── Types ──────────────────────────────────────────────────────
 
-interface TradeRow {
-  market_slug: string;
-  direction: string;
-  size: number;
-  price: number;
+interface ExecutionRow {
+  slug: string;
+  side: string;
+  amount: number;
+  fill_price: number | null;
   status: string;
 }
 
@@ -66,16 +66,15 @@ export class CorrelationMonitor {
   getThemeExposure(): Map<string, number> {
     const db = getDb();
     const rows = db
-      .prepare<[], TradeRow>(
-        "SELECT * FROM trades WHERE status IN ('submitted', 'open')"
+      .prepare<[], ExecutionRow>(
+        "SELECT slug, side, amount, fill_price, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
       )
       .all();
 
     const themes = new Map<string, number>();
     for (const row of rows) {
-      const theme = this.categorize(row.market_slug);
-      const exposure = row.size * row.price;
-      themes.set(theme, (themes.get(theme) ?? 0) + exposure);
+      const theme = this.categorize(row.slug);
+      themes.set(theme, (themes.get(theme) ?? 0) + row.amount);
     }
     return themes;
   }

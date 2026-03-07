@@ -8,6 +8,7 @@ import { runEdge } from "../edge/index";
 import { runFlux } from "../flux/index";
 import { runClause } from "../clause/index";
 import { runLucifer } from "../lucifer/index";
+import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 
 const router = Router();
 
@@ -258,9 +259,9 @@ router.post("/run", async (req: Request, res: Response) => {
   sendEvent("agent:start", { agent: "clause" });
 
   const [auraRes, fluxRes, clauseRes] = await Promise.allSettled([
-    withAgentTimeout("aura", runAura({ slug: marketInput.slug, question: marketInput.question, category: marketInput.category }), 30000),
-    withAgentTimeout("flux", runFlux({ slug: marketInput.slug, token_id: marketInput.token_id }), 10000),
-    withAgentTimeout("clause", runClause({ slug: marketInput.slug, question: marketInput.question, description: marketInput.description, days_to_resolution: marketInput.days_to_resolution }), 15000),
+    trackAgent("aura", () => withAgentTimeout("aura", runAura({ slug: marketInput.slug, question: marketInput.question, category: marketInput.category }), 30000)),
+    trackAgent("flux", () => withAgentTimeout("flux", runFlux({ slug: marketInput.slug, token_id: marketInput.token_id }), 10000)),
+    trackAgent("clause", () => withAgentTimeout("clause", runClause({ slug: marketInput.slug, question: marketInput.question, description: marketInput.description, days_to_resolution: marketInput.days_to_resolution }), 15000)),
   ]);
   const auraResult = auraRes.status === "fulfilled" ? auraRes.value : null;
   const fluxResult = fluxRes.status === "fulfilled" ? fluxRes.value : null;
@@ -289,7 +290,7 @@ router.post("/run", async (req: Request, res: Response) => {
   sendEvent("agent:start", { agent: "oracle" });
   let oracleResult: any = null;
   try {
-    oracleResult = await withAgentTimeout("oracle", runOracle(marketInput), 30000);
+    oracleResult = await trackAgent("oracle", () => withAgentTimeout("oracle", runOracle(marketInput), 30000));
   } catch { /* Oracle failed */ }
   if (!oracleResult) {
     sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "oracle_failed", runId });
@@ -304,7 +305,7 @@ router.post("/run", async (req: Request, res: Response) => {
   sendEvent("agent:start", { agent: "edge" });
   let edgeResult: any = null;
   try {
-    edgeResult = await withAgentTimeout("edge", runEdge(marketInput, oracleResult), 15000);
+    edgeResult = await trackAgent("edge", () => withAgentTimeout("edge", runEdge(marketInput, oracleResult), 15000));
   } catch { /* Edge failed */ }
   if (!edgeResult) {
     sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "edge_failed", runId });
@@ -324,14 +325,14 @@ router.post("/run", async (req: Request, res: Response) => {
     oracle: oracleResult,
     edge: edgeResult,
   };
-  const luciferResult = await runLucifer(effectiveSlug, combinedResults);
+  const luciferResult = await trackAgent("lucifer", () => runLucifer(effectiveSlug, combinedResults));
   combinedResults.lucifer = luciferResult?.data;
   sendEvent("agent:complete", { agent: "lucifer", status: "complete", data: luciferResult?.data });
   storeAgentResult("lucifer", luciferResult?.data);
 
   // ── Phase 5: Sigma (reads combinedResults) ──
   sendEvent("agent:start", { agent: "sigma" });
-  const sigma = runSigma(combinedResults);
+  const sigma = trackAgentSync("sigma", () => runSigma(combinedResults));
   combinedResults["sigma"] = sigma.data;
   sendEvent("agent:complete", sigma);
 
@@ -356,23 +357,29 @@ router.post("/run", async (req: Request, res: Response) => {
 });
 
 // ── GET /api/pipeline/results — formatted signals for frontend ─
+// Mirrors /api/signals logic: uses persisted signal_state, consistent edge extraction
 router.get("/results", (_req: Request, res: Response) => {
   try {
     const runs = getPipelineHistory(20);
     const signals = runs.map((r) => {
-      let edge: number | null = null;
+      let edge = 0;
       if (r.edge_output) {
         try {
           const edgeData = JSON.parse(r.edge_output) as Record<string, unknown>;
-          edge = typeof edgeData["edge"] === "number" ? edgeData["edge"]
-               : typeof edgeData["net_edge"] === "number" ? edgeData["net_edge"]
-               : typeof edgeData["net_ev"] === "number" ? edgeData["net_ev"]
-               : null;
+          edge =
+            typeof edgeData["net_edge"] === "number" ? edgeData["net_edge"]
+              : typeof edgeData["edge"] === "number" ? edgeData["edge"]
+              : typeof edgeData["net_ev"] === "number" ? edgeData["net_ev"]
+              : 0;
         } catch { /* ignore parse error */ }
       }
 
+      // Use persisted signal_state if available (set by /api/signals/validate)
+      const row = r as PipelineRun & { signal_state?: string };
       let status: "TRADE" | "WATCH" | "SKIP" = "WATCH";
-      if (r.sigma_output) {
+      if (row.signal_state === "TRADE" || row.signal_state === "WATCH" || row.signal_state === "SKIP") {
+        status = row.signal_state;
+      } else if (r.sigma_output) {
         try {
           const sigma = JSON.parse(r.sigma_output) as Record<string, unknown>;
           const rec = sigma["recommendation"] ?? sigma["decision"];
@@ -387,7 +394,7 @@ router.get("/results", (_req: Request, res: Response) => {
         question: r.market_question || r.market_slug,
         decision: r.decision ?? "HOLD",
         confidence: r.confidence ?? 0,
-        edge: edge ?? 0,
+        edge,
         timestamp: r.created_at,
         status,
       };

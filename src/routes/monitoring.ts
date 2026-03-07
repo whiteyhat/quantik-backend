@@ -42,7 +42,10 @@ router.get("/attribution", (_req: Request, res: Response) => {
 // ── GET /api/monitoring/calibration — agent weights + trends ─────
 router.get("/calibration", (_req: Request, res: Response) => {
   try {
-    const weights = modelCalibration.getAgentWeights();
+    const weights = modelCalibration.getAgentWeights().map((w) => ({
+      ...w,
+      confidence: w.brierScore !== null ? Math.max(0, 1 - w.brierScore) : null,
+    }));
     res.json({ weights });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -54,7 +57,7 @@ router.get("/drift", (_req: Request, res: Response) => {
   try {
     const microstructure = driftDetection.checkMicrostructureDrift();
     const concept = driftDetection.checkConceptDrift();
-    res.json({ microstructure, concept });
+    res.json({ microstructure, concept, lastChecked: Date.now() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { getState, getCandidates, runScan } from "../orchestrator/index";
+import { getState, getCandidates, runScan, SCAN_COOLDOWN_MS } from "../orchestrator/index";
 
 const router = Router();
 
@@ -18,6 +18,7 @@ router.get("/status", (_req: Request, res: Response) => {
 });
 
 // ── GET /api/orchestrator/candidates ────────────────────────────
+// Note: tokenId is Polymarket conditionId (not CLOB token ID)
 
 router.get("/candidates", (_req: Request, res: Response) => {
   const result = getCandidates();
@@ -38,8 +39,25 @@ router.get("/candidates", (_req: Request, res: Response) => {
 
 // ── POST /api/orchestrator/scan (manual trigger) ────────────────
 
+let lastManualScanAt = 0;
+
 router.post("/scan", async (_req: Request, res: Response) => {
+  const now = Date.now();
+  const s = getState();
+
+  // Rate limit: reject if already scanning or cooldown hasn't elapsed
+  if (s.status === "scanning") {
+    res.status(429).json({ error: "Scan already in progress", triggered: false });
+    return;
+  }
+  if (now - lastManualScanAt < SCAN_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((SCAN_COOLDOWN_MS - (now - lastManualScanAt)) / 1000);
+    res.status(429).json({ error: `Rate limited — retry in ${retryAfter}s`, triggered: false });
+    return;
+  }
+
   try {
+    lastManualScanAt = now;
     const result = await runScan();
     res.json({
       triggered: true,
@@ -47,7 +65,7 @@ router.post("/scan", async (_req: Request, res: Response) => {
       candidatesFound: result.candidatesFound,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 

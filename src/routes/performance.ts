@@ -1,9 +1,13 @@
 import { Router } from "express";
 import { getDb } from "../db/schema";
 import { AttributionEngine } from "../monitoring/attribution";
+import { DriftDetection } from "../monitoring/drift";
+import { ModelCalibration } from "../monitoring/calibration";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
+const driftDetection = new DriftDetection();
+const modelCalibration = new ModelCalibration();
 
 router.get("/summary", async (_req, res) => {
   try {
@@ -40,6 +44,19 @@ router.get("/summary", async (_req, res) => {
     const worstTrade = db.prepare("SELECT slug, pnl FROM executions WHERE pnl IS NOT NULL ORDER BY pnl ASC LIMIT 1").get() as any;
     const { totalVolume } = db.prepare("SELECT COALESCE(SUM(amount), 0) as totalVolume FROM executions WHERE status != 'failed'").get() as any;
     
+    // Recent trades (fallback for Execution Log)
+    const recentTradeRows = db.prepare(
+      "SELECT id, slug, side, amount, status, executed_at FROM executions WHERE status != 'failed' ORDER BY executed_at DESC LIMIT 20"
+    ).all() as any[];
+    const recentTrades = recentTradeRows.map(e => ({
+      id: e.id,
+      slug: e.slug,
+      direction: e.side === "buy" ? "YES" : "NO",
+      amount: e.amount,
+      status: (e.status ?? "").toUpperCase(),
+      executedAt: new Date(e.executed_at).toISOString(),
+    }));
+
     // Win streak
     const lastTrades = db.prepare("SELECT pnl FROM executions WHERE pnl IS NOT NULL ORDER BY executed_at DESC LIMIT 20").all() as any[];
     let currentStreak = 0;
@@ -59,6 +76,7 @@ router.get("/summary", async (_req, res) => {
       tradesToday: tradesToday ?? 0,
       winRate: total > 0 ? (wins ?? 0) / total : 0,
       openPositions: openExecs.length,
+      recentTrades,
       attribution,
       alphaDecay,
       metrics: {
@@ -73,7 +91,7 @@ router.get("/summary", async (_req, res) => {
     });
   } catch (err) {
     console.error("[performance:summary] error:", err);
-    res.json({ pnlToday: 0, tradesToday: 0, winRate: 0, openPositions: 0 });
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -89,18 +107,32 @@ router.get("/brier", (_req, res) => {
 });
 
 router.get("/drift", (_req, res) => {
-  // Mock drift logic for now (could be expanded)
-  res.json({
-    microstructure: "clear",
-    concept: "clear",
-    lastChecked: Date.now()
-  });
+  try {
+    const microstructure = driftDetection.checkMicrostructureDrift();
+    const concept = driftDetection.checkConceptDrift();
+    res.json({
+      microstructure: microstructure.detected ? "detected" : "clear",
+      concept: concept.detected ? "detected" : "clear",
+      lastChecked: Date.now(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.get("/calibration", (_req, res) => {
-  const db = getDb();
-  const rows = db.prepare("SELECT agent_name as agent, var_threshold as weight FROM agent_thresholds").all();
-  res.json(rows);
+  try {
+    const weights = modelCalibration.getAgentWeights();
+    res.json(
+      weights.map((w) => ({
+        agent: w.agent,
+        weight: w.weight,
+        confidence: w.brierScore !== null ? Math.max(0, 1 - w.brierScore) : null,
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 export default router;

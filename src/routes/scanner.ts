@@ -42,11 +42,37 @@ router.get("/status", (_req: Request, res: Response) => {
 });
 
 // ── GET /api/scanner/results ───────────────────────────────────
+// ?executed=true  → returns execution log from executions table
+// ?alerts=true    → returns high-confidence scanner signals only
+// default         → returns all scanner results
 router.get("/results", (req: Request, res: Response) => {
   const db = getDb();
   const limit = Math.min(Number(req.query["limit"] ?? 50), 200);
   const since = req.query["since"] ? Number(req.query["since"]) : 0;
   const alertsOnly = req.query["alerts"] === "true";
+  const executedOnly = req.query["executed"] === "true";
+
+  // When ?executed=true, return data from executions table for the Execution Log
+  if (executedOnly) {
+    const execRows = db.prepare(
+      "SELECT id, slug, side, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
+    ).all(since, limit) as any[];
+
+    const results = execRows.map((e: any) => ({
+      id: String(e.id),
+      slug: e.slug,
+      direction: e.side === "buy" ? "YES" : "NO",
+      amount: e.amount,
+      confidence: null, // executions table doesn't store confidence
+      status: (e.status ?? "").toUpperCase(),
+      executedAt: new Date(e.executed_at).toISOString(),
+      fillPrice: e.fill_price,
+      pnl: e.pnl,
+    }));
+
+    res.json(results);
+    return;
+  }
 
   type Row = {
     id: number;

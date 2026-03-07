@@ -189,6 +189,25 @@ function migrate(db: Database.Database): void {
       pipeline_triggered_at INTEGER
     );
 
+    -- ── Orchestrator Scan State (persisted across restarts) ─────
+
+    CREATE TABLE IF NOT EXISTS orchestrator_scan_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_scan_at INTEGER NOT NULL DEFAULT 0,
+      markets_scanned INTEGER NOT NULL DEFAULT 0,
+      candidates_found INTEGER NOT NULL DEFAULT 0,
+      scan_cycle INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT OR IGNORE INTO orchestrator_scan_state (id) VALUES (1);
+
+    -- ── Market Volume Snapshots (spike detection) ─────────────
+
+    CREATE TABLE IF NOT EXISTS market_volume_snapshots (
+      slug TEXT PRIMARY KEY,
+      volume REAL NOT NULL,
+      snapshot_at INTEGER NOT NULL
+    );
+
     -- ── Market Price Snapshots (1hr delta computation) ──────────
 
     CREATE TABLE IF NOT EXISTS market_price_snapshots (

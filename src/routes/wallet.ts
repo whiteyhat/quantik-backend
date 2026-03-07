@@ -32,7 +32,7 @@ router.get("/positions", async (_req, res) => {
     res.json(positions);
   } catch (err) {
     console.error("[wallet:positions] error:", err);
-    res.json([]);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 

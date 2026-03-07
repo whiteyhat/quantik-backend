@@ -5,7 +5,7 @@ import {
   getCorrelationMonitor,
   getCircuitBreaker,
 } from "../risk";
-import { getUsdcBalance, getClobBalance } from "../utils/balances";
+import { getDb } from "../db/schema";
 
 const router = Router();
 
@@ -15,7 +15,7 @@ router.get("/status", async (_req: Request, res: Response) => {
   const cb = getCircuitBreaker();
 
   const cbStatus = await cb.checkAndTrip();
-  
+
   const totalCapital = await portfolio.getTotalCapital();
   const deployed = portfolio.getDeployedCapital();
   const available = await portfolio.getAvailableCapital();
@@ -26,6 +26,25 @@ router.get("/status", async (_req: Request, res: Response) => {
     themeExposure[theme] = exposure;
   }
 
+  // Fetch risk config from DB (real, not hardcoded)
+  const db = getDb();
+  const gcb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+     FROM global_circuit_breakers gcb
+     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+     WHERE rc.is_active = 1 LIMIT 1`
+  ).get();
+
+  const rawMaxPos = gcb?.max_position_size_pct ?? 0.10;
+  const maxPositionSizePct = rawMaxPos > 1 ? rawMaxPos / 100 : rawMaxPos;
+
+  const luciferRow = db.prepare<[], { var_threshold: number }>(
+    `SELECT at.var_threshold
+     FROM agent_thresholds at
+     JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+     WHERE rc.is_active = 1 AND at.agent_name = 'lucifer' LIMIT 1`
+  ).get();
+
   res.json({
     totalCapital,
     deployedCapital: deployed,
@@ -33,9 +52,15 @@ router.get("/status", async (_req: Request, res: Response) => {
     exposurePct: totalCapital > 0 ? (deployed / totalCapital) * 100 : 0,
     dailyPnl,
     dailyPnlPct: totalCapital > 0 ? (dailyPnl / totalCapital) * 100 : 0,
-    circuitBreaker: cbStatus,
+    circuitBreaker: cbStatus.state, // Frontend expects string: "ARMED" | "WARNING" | "TRIGGERED"
+    circuitBreakerDetail: cbStatus,  // Full object for advanced consumers
     themeExposure,
     positionCount: portfolio.getOpenPositions().length,
+    // Risk configuration (live from DB)
+    maxDrawdownPct: gcb?.drawdown_limit_pct ?? 0.15,
+    maxPositionSizePct,
+    kellyFraction: gcb?.kelly_fraction_multiplier ?? 0.25,
+    luciferVetoThreshold: luciferRow?.var_threshold ?? 0.03,
   });
 });
 

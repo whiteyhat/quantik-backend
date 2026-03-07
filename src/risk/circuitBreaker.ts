@@ -22,8 +22,26 @@ interface CircuitBreakerRow {
 
 // ── Thresholds ─────────────────────────────────────────────────
 
-const WARNING_DRAWDOWN = 0.075;   // 7.5% daily drawdown → WARNING
-const TRIGGER_DRAWDOWN = 0.10;    // 10% daily drawdown → TRIGGERED
+const DEFAULT_WARNING_DRAWDOWN = 0.075;
+const DEFAULT_TRIGGER_DRAWDOWN = 0.10;
+
+/** Read drawdown limit from DB config; derive WARNING at 75% of limit, TRIGGER at limit */
+function getDrawdownThresholds(): { warning: number; trigger: number } {
+  try {
+    const db = getDb();
+    const row = db.prepare<[], { drawdown_limit_pct: number }>(
+      `SELECT gcb.drawdown_limit_pct
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    ).get();
+    if (row) {
+      const limit = row.drawdown_limit_pct;
+      return { warning: limit * 0.75, trigger: limit };
+    }
+  } catch {}
+  return { warning: DEFAULT_WARNING_DRAWDOWN, trigger: DEFAULT_TRIGGER_DRAWDOWN };
+}
 
 // ── Schema migration ───────────────────────────────────────────
 
@@ -92,12 +110,13 @@ export class CircuitBreaker {
     const totalCapital = await this.portfolio.getTotalCapital();
     const drawdownPct = totalCapital > 0 ? Math.abs(Math.min(dailyPnl, 0)) / totalCapital : 0;
     const now = Date.now();
+    const { warning, trigger } = getDrawdownThresholds();
 
     // Determine new state based on drawdown
     let newState: CircuitBreakerState;
-    if (drawdownPct >= TRIGGER_DRAWDOWN) {
+    if (drawdownPct >= trigger) {
       newState = "TRIGGERED";
-    } else if (drawdownPct >= WARNING_DRAWDOWN) {
+    } else if (drawdownPct >= warning) {
       newState = "WARNING";
     } else {
       // Only go back to ARMED if currently not TRIGGERED (manual reset required)

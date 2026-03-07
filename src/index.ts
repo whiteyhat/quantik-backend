@@ -39,6 +39,7 @@ import relayRouter, { warmGemini } from "./routes/relay";
 import performanceRouter from "./routes/performance";
 import scannerRouter from "./routes/scanner";
 import versionsRouter from "./routes/versions";
+import agentHealthRouter from "./routes/agentHealth";
 import { MarketScanner } from "./scanner/marketScanner";
 import { ensureCircuitBreakerTable } from "./risk";
 import { startFillMonitor } from "./execution";
@@ -109,6 +110,7 @@ app.use("/api/alerts", alertsRouter);
 app.use("/api/scanner", scannerRouter);
 app.use("/api/performance", performanceRouter);
 app.use("/api/versions", versionsRouter);
+app.use("/api/agents", agentHealthRouter);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {
@@ -177,7 +179,7 @@ app.listen(PORT, () => {
 
 // Set CLOB allowances at startup (EOA mode — approve CLOB contracts to spend USDC)
 async function ensureClobAllowances(): Promise<void> {
-  if (process.env.PAPER_TRADING === "true") return;
+  if (process.env.PAPER_TRADING !== "false") return; // default: skip in paper mode
   try {
     const { runCli } = await import("./cli");
     const result = await runCli(["clob", "update-balance", "--asset-type", "collateral", "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"]);

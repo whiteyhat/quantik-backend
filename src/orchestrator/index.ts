@@ -30,6 +30,7 @@ export interface OrchestratorState {
 // ── Constants ──────────────────────────────────────────────────
 
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (aggressive mode)
+export const SCAN_COOLDOWN_MS = 30 * 1000; // 30s cooldown for manual scans
 const TOP_N = 20;
 const MIN_SCORE = 15;
 const GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets";
@@ -44,14 +45,48 @@ const W_RECENCY = 0.15;
 
 // ── State ──────────────────────────────────────────────────────
 
+function loadPersistedState(): Omit<OrchestratorState, "nextScanAt" | "scanIntervalMs" | "status"> {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare<[], { last_scan_at: number; markets_scanned: number; candidates_found: number; scan_cycle: number }>(
+        "SELECT last_scan_at, markets_scanned, candidates_found, scan_cycle FROM orchestrator_scan_state WHERE id = 1"
+      )
+      .get();
+    if (row) {
+      return {
+        lastScanAt: row.last_scan_at,
+        marketsScanned: row.markets_scanned,
+        candidatesFound: row.candidates_found,
+        scanCycle: row.scan_cycle,
+      };
+    }
+  } catch { /* table may not exist yet on first boot */ }
+  return { lastScanAt: 0, marketsScanned: 0, candidatesFound: 0, scanCycle: 0 };
+}
+
+function persistState(): void {
+  try {
+    const db = getDb();
+    db.prepare(
+      "UPDATE orchestrator_scan_state SET last_scan_at = ?, markets_scanned = ?, candidates_found = ?, scan_cycle = ? WHERE id = 1"
+    ).run(state.lastScanAt, state.marketsScanned, state.candidatesFound, state.scanCycle);
+  } catch (err) {
+    console.error("[orchestrator] Failed to persist state:", err);
+  }
+}
+
+const persisted = loadPersistedState();
 let state: OrchestratorState = {
-  lastScanAt: 0,
-  nextScanAt: Date.now() + SCAN_INTERVAL_MS,
-  marketsScanned: 0,
-  candidatesFound: 0,
+  lastScanAt: persisted.lastScanAt,
+  nextScanAt: persisted.lastScanAt > 0
+    ? persisted.lastScanAt + SCAN_INTERVAL_MS
+    : Date.now() + SCAN_INTERVAL_MS,
+  marketsScanned: persisted.marketsScanned,
+  candidatesFound: persisted.candidatesFound,
   scanIntervalMs: SCAN_INTERVAL_MS,
   status: "idle",
-  scanCycle: 0,
+  scanCycle: persisted.scanCycle,
 };
 
 let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -73,10 +108,30 @@ interface GammaMarket {
 
 // ── Scoring functions ──────────────────────────────────────────
 
-function computeVolumeScore(market: GammaMarket, _prevVolume?: number): number {
-  // Volume score based on 24h volume magnitude (simple heuristic)
-  // Since we don't have 48h volume from API, use absolute volume tiers
+function computeVolumeScore(market: GammaMarket): number {
   const vol = market.volume24hr ?? market.volume ?? 0;
+  const slug = market.slug ?? market.conditionId ?? "";
+
+  // Check for volume spike by comparing to previous snapshot
+  if (slug) {
+    try {
+      const db = getDb();
+      const prev = db
+        .prepare<[string], { volume: number }>(
+          "SELECT volume FROM market_volume_snapshots WHERE slug = ?"
+        )
+        .get(slug);
+      if (prev && prev.volume > 0) {
+        const ratio = vol / prev.volume;
+        // >2x volume increase = spike bonus
+        if (ratio > 5) return 100;
+        if (ratio > 3) return 90;
+        if (ratio > 2) return 80;
+      }
+    } catch { /* table may not exist yet */ }
+  }
+
+  // Fallback: absolute volume tiers
   if (vol > 500000) return 100;
   if (vol > 100000) return 80;
   if (vol > 50000) return 60;
@@ -138,7 +193,7 @@ function detectTriggers(
 ): string[] {
   const triggers: string[] = [];
 
-  // Volume spike: volumeScore >= 80 approximates >100% change
+  // Volume spike: score >= 80 from either absolute tier or spike detection
   if (volumeScore >= 80) triggers.push("volume_spike");
 
   // Sharp price move: >7c in 1hr
@@ -229,6 +284,22 @@ function savePriceSnapshots(markets: GammaMarket[]): void {
   );
 }
 
+function saveVolumeSnapshots(markets: GammaMarket[]): void {
+  const db = getDb();
+  const now = Date.now();
+  const upsert = db.prepare(
+    "INSERT OR REPLACE INTO market_volume_snapshots (slug, volume, snapshot_at) VALUES (?, ?, ?)"
+  );
+  const tx = db.transaction(() => {
+    for (const market of markets) {
+      const slug = market.slug ?? market.conditionId ?? "";
+      const vol = market.volume24hr ?? market.volume ?? 0;
+      if (slug && vol > 0) upsert.run(slug, vol, now);
+    }
+  });
+  tx();
+}
+
 // ── Candidate persistence ──────────────────────────────────────
 
 function upsertCandidates(candidates: MarketScore[]): void {
@@ -312,7 +383,7 @@ export async function runScan(): Promise<{
     const markets = await fetchAllMarkets();
     state.marketsScanned = markets.length;
 
-    // Save price snapshots for delta computation
+    // Save price snapshots for delta computation (before scoring so current scan has prior data)
     savePriceSnapshots(markets);
 
     // Score all markets
@@ -353,8 +424,11 @@ export async function runScan(): Promise<{
     // Re-sort final list
     candidates.sort((a, b) => b.opportunityScore - a.opportunityScore);
 
-    // Persist
+    // Persist candidates
     upsertCandidates(candidates);
+
+    // Save volume snapshots AFTER scoring so next scan can detect spikes
+    saveVolumeSnapshots(markets);
 
     // Queue Aura runs for the top 5 candidates
     candidates.slice(0, 5).forEach((c) => {
@@ -369,6 +443,7 @@ export async function runScan(): Promise<{
     state.candidatesFound = candidates.length;
     state.scanCycle += 1;
     state.status = "idle";
+    persistState();
 
     console.log(
       `[orchestrator] Scan #${state.scanCycle}: ${markets.length} markets scanned, ${candidates.length} candidates found`

@@ -71,7 +71,10 @@ export class PortfolioManager {
     const openPnl = this.getOpenPositions().reduce((sum, p) => sum + p.openPnl, 0);
     
     const total = onChain + clob + deployed + openPnl;
-    return total > 0 ? total : 3000; // Final safety fallback only
+    if (total <= 0) {
+      console.warn("[PortfolioManager] getTotalCapital resolved to 0 — wallet RPC or CLOB balance may be unreachable");
+    }
+    return total;
   }
 
   /** Capital not currently deployed in open positions */
@@ -107,16 +110,16 @@ export class PortfolioManager {
     return (deployed + additionalUsdc) <= maxExposure;
   }
 
-  /** Daily P&L from realized + unrealized trades today */
+  /** Daily P&L from realized trades closed today + unrealized on ALL open positions */
   getDailyPnL(): number {
     const db = getDb();
     const todayStart = new Date().setUTCHours(0, 0, 0, 0);
-    
-    // Realized
+
+    // Realized: trades that settled today
     const { realized } = db.prepare("SELECT COALESCE(SUM(pnl), 0) as realized FROM executions WHERE executed_at >= ? AND pnl IS NOT NULL").get(todayStart) as { realized: number };
-    
-    // Unrealized
-    const openPositions = this.getOpenPositions().filter(p => p.createdAt >= todayStart);
+
+    // Unrealized: ALL open positions (not just today's), since price moves affect daily P&L
+    const openPositions = this.getOpenPositions();
     const unrealized = openPositions.reduce((sum, p) => sum + p.openPnl, 0);
 
     return realized + unrealized;
