@@ -489,6 +489,73 @@ function migrate(db: Database.Database): void {
   // Seed default settings row (id=1) if it doesn't exist
   db.prepare(`INSERT OR IGNORE INTO settings (id, paper_mode) VALUES (1, 0)`).run();
 
+  // ── Users (Clerk-linked accounts) ──────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      clerk_id TEXT UNIQUE NOT NULL,
+      email TEXT,
+      agent_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_clerk_id ON users(clerk_id);
+  `);
+
+  // ── Trading Agents (Agent Factory) ──────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      agent_code TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'inactive',
+      name TEXT NOT NULL,
+      avatar_emoji TEXT NOT NULL,
+      animal_type TEXT,
+      avatar_image TEXT,
+      personality TEXT NOT NULL,
+      decision_style TEXT NOT NULL,
+      trading_instinct TEXT NOT NULL,
+      time_patience TEXT NOT NULL,
+      profit_dream TEXT NOT NULL,
+      money_approach TEXT NOT NULL,
+      protection_mindset TEXT NOT NULL,
+      leverage_vibe TEXT NOT NULL,
+      market_sense TEXT NOT NULL,
+      asset_love TEXT NOT NULL,
+      system_prompt TEXT NOT NULL,
+      wallet_address TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deployed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+  `);
+
+  // Migration: add user_id to agents table
+  try { db.exec("ALTER TABLE agents ADD COLUMN user_id TEXT"); } catch {}
+
+  // ── Chat History (persistent across sessions) ──────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_message_at INTEGER NOT NULL,
+      summary TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, last_message_at DESC);
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('user', 'agent', 'system')),
+      content TEXT NOT NULL,
+      metadata TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
+  `);
+
   // ── Versions / Changelog ──────────────────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS versions (

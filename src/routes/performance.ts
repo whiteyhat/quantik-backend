@@ -100,6 +100,55 @@ router.get("/attribution", (_req, res) => {
   res.json(data);
 });
 
+// Trade history (moved from /api/portfolio/attribution)
+router.get("/trades", (_req, res) => {
+  try {
+    const db = getDb();
+    const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
+
+    const priceRows2 = db.prepare(
+      `SELECT s.slug, s.probability FROM scanner_results s
+       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
+       ON s.slug = t.slug AND s.scanned_at = t.latest`
+    ).all() as any[];
+    const livePrice = new Map(priceRows2.map(r => [r.slug, r.probability]));
+
+    const tradeList = executions.map(e => {
+      const entry = e.fill_price ?? 0.5;
+      const current = livePrice.get(e.slug) ?? entry;
+      const shares = entry > 0 ? e.amount / entry : 0;
+      const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+
+      let outcome = "OPEN";
+      if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
+      else if (e.status === "failed") outcome = "LOSS";
+
+      return {
+        id: e.id,
+        slug: e.slug,
+        market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+        direction: e.side === "buy" ? "YES" : "NO",
+        size: e.amount,
+        price: entry,
+        outcome,
+        timestamp: e.executed_at,
+        pnl: e.pnl ?? pnl,
+        orderId: e.order_id,
+        mode: e.status,
+      };
+    });
+
+    res.json({
+      trades: tradeList,
+      count: tradeList.length,
+      winRate: tradeList.filter(t => t.outcome === "WIN").length / Math.max(tradeList.filter(t => t.outcome !== "OPEN").length, 1)
+    });
+  } catch (err) {
+    console.error("[performance:trades] error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 router.get("/brier", (_req, res) => {
   const db = getDb();
   const rows = db.prepare("SELECT market_slug as slug, brier_score as score, resolved_at as timestamp FROM resolutions ORDER BY resolved_at DESC LIMIT 50").all();

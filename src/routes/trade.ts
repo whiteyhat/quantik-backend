@@ -3,8 +3,14 @@ import { runCli, CliError } from "../cli";
 import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
 import { getDb } from "../db/schema";
 import { v4 as uuid } from "uuid";
+import { tradeRateLimit } from "../infra/rateLimit";
+import { emitTradeExecuted } from "../infra/socket";
+import { getUserId } from "../middleware/auth";
 
 const router = Router();
+
+// Apply trade rate limit to all POST routes
+router.use(tradeRateLimit);
 
 // ── GET /api/trade ────────────────────────────────────────────
 router.get("/", (req: Request, res: Response) => {
@@ -12,7 +18,11 @@ router.get("/", (req: Request, res: Response) => {
     const db = getDb();
     const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
     
-    const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+    const priceRows = db.prepare(
+      `SELECT s.slug, s.probability FROM scanner_results s
+       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
+       ON s.slug = t.slug AND s.scanned_at = t.latest`
+    ).all() as any[];
     const livePrice = new Map(priceRows.map(r => [r.slug, r.probability]));
 
     const tradeList = executions.map(e => {
@@ -85,7 +95,7 @@ router.post("/execute", async (req: Request, res: Response) => {
         pnl: null,
       });
 
-      res.json({
+      const paperResult = {
         orderId: paperId,
         status: "submitted",
         paper: true,
@@ -93,7 +103,20 @@ router.post("/execute", async (req: Request, res: Response) => {
         side,
         price: Number(price),
         size: Number(size),
+      };
+
+      emitTradeExecuted(getUserId(req), {
+        orderId: paperId,
+        slug: String(tokenId),
+        direction: String(side),
+        size: Number(size),
+        price: Number(price),
+        status: "submitted",
+        paper: true,
+        timestamp: Date.now(),
       });
+
+      res.json(paperResult);
       return;
     }
 
@@ -138,6 +161,17 @@ router.post("/execute", async (req: Request, res: Response) => {
         typeof body["pipelineRunId"] === "string"
           ? body["pipelineRunId"]
           : null,
+    });
+
+    emitTradeExecuted(getUserId(req), {
+      orderId: orderId ?? "",
+      slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : "",
+      direction: String(side),
+      size: Number(size),
+      price: Number(price),
+      status: "submitted",
+      paper: false,
+      timestamp: Date.now(),
     });
 
     res.json(rawData);

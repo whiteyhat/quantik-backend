@@ -9,44 +9,38 @@ interface ScanMarket {
 
 const scanState = new Map<string, number>();
 
-export function startHotScanner(): void {
-  // Run every 60s
-  setInterval(async () => {
-    // Skip silently if CLI binary not configured or not present on this machine
-    const cliPath = process.env.POLYMARKET_CLI;
-    if (!cliPath || !existsSync(cliPath)) return;
+export async function runHotScan(): Promise<void> {
+  const cliPath = process.env.POLYMARKET_CLI;
+  if (!cliPath || !existsSync(cliPath)) return;
 
-    try {
-      // Mocking fetch of top 50 markets by volume
-      // In reality, this would be a CLI call sorted by volume
-      const res: any = await runCli(["markets", "list", "--active", "true"]);
-      let markets = Array.isArray(res) ? res : (res.markets || []);
-      
-      // Sort by volume descending if volume exists
-      markets.sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
-      markets = markets.slice(0, 50);
+  try {
+    const res: any = await runCli(["markets", "list", "--active", "true"]);
+    let markets = Array.isArray(res) ? res : (res.markets || []);
 
-      for (const m of markets) {
-        if (!m.slug) continue;
-        const currentPrice = typeof m.yes_price === 'number' ? m.yes_price : 
-                            (m.tokens && m.tokens[0] && typeof m.tokens[0].price === 'number') ? m.tokens[0].price : 0.5;
-        
-        const prevPrice = scanState.get(m.slug);
-        if (prevPrice !== undefined) {
-          const move = Math.abs(currentPrice - prevPrice);
-          if (move > 0.03) {
-            console.log(`[HotScanner] Market ${m.slug} moved ${(move * 100).toFixed(1)}¢ in 60s!`);
-            // Emit event for pipeline trigger - placeholder
-            // eventBus.emit("pipeline:trigger", m.slug);
-          }
+    markets.sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
+    markets = markets.slice(0, 50);
+
+    for (const m of markets) {
+      if (!m.slug) continue;
+      const currentPrice = typeof m.yes_price === 'number' ? m.yes_price :
+                          (m.tokens && m.tokens[0] && typeof m.tokens[0].price === 'number') ? m.tokens[0].price : 0.5;
+
+      const prevPrice = scanState.get(m.slug);
+      if (prevPrice !== undefined) {
+        const move = Math.abs(currentPrice - prevPrice);
+        if (move > 0.03) {
+          console.log(`[HotScanner] Market ${m.slug} moved ${(move * 100).toFixed(1)}¢ in 60s!`);
         }
-        scanState.set(m.slug, currentPrice);
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[HotScanner] Error during scan:", msg);
+      scanState.set(m.slug, currentPrice);
     }
-  }, 60000);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[HotScanner] Error during scan:", msg);
+  }
+}
 
+export function startHotScanner(): void {
+  setInterval(() => runHotScan().catch(console.error), 60000);
   console.log("[HotScanner] Started 60s polling for top 50 markets.");
 }

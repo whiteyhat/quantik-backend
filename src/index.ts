@@ -1,3 +1,4 @@
+import "dotenv/config";
 import * as Sentry from "@sentry/node";
 Sentry.init({
   dsn: "https://3452bb639c2bd626cc575d5936d234b3@o4506259886833664.ingest.us.sentry.io/4510949180047360",
@@ -12,12 +13,13 @@ Sentry.init({
 import express from "express";
 import cors from "cors";
 import { getDb } from "./db/schema";
+import { isPgEnabled, migratePg } from "./db/postgres";
+import { clerkAuth, ensureUser } from "./middleware/auth";
 import marketsRouter from "./routes/markets";
 import walletRouter from "./routes/wallet";
 import pipelineRouter from "./routes/pipeline";
 import tradeRouter from "./routes/trade";
 import streamRouter from "./routes/stream";
-import portfolioRouter from "./routes/portfolio";
 import riskRouter from "./routes/risk";
 import settingsRouter from "./routes/settings";
 import chatRouter from "./routes/chat";
@@ -40,15 +42,15 @@ import performanceRouter from "./routes/performance";
 import scannerRouter from "./routes/scanner";
 import versionsRouter from "./routes/versions";
 import agentHealthRouter from "./routes/agentHealth";
-import { MarketScanner } from "./scanner/marketScanner";
+import agentsRouter from "./routes/agents";
+import agentChatRouter from "./routes/agentChat";
 import { ensureCircuitBreakerTable } from "./risk";
-import { startFillMonitor } from "./execution";
-import { startScheduler } from "./orchestrator/index";
-import { startHotScanner } from "./oracle/hot-scanner";
 import alertsRouter from "./routes/alerts";
-import { AlertPoller, ensureAlertColumns } from "./alerts/telegramAlert";
-import { ResolutionMonitor } from "./monitoring/resolution";
-import { startPnlSettler } from "./settlers/pnlSettler";
+import { initScheduler } from "./infra/scheduler";
+import { apiRateLimit } from "./infra/rateLimit";
+import { isRedisEnabled } from "./infra/redis";
+import { createServer } from "http";
+import { initSocketIO } from "./infra/socket";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
@@ -72,9 +74,20 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Initialize database on startup
+// Clerk auth — attaches auth info to all requests (does NOT block unauthenticated)
+app.use(clerkAuth);
+app.use(ensureUser);
+
+// Redis-backed rate limiting (no-op when REDIS_URL is not set)
+app.use(apiRateLimit);
+
+// Initialize databases on startup
 getDb();
 ensureCircuitBreakerTable();
+if (isPgEnabled()) {
+  migratePg().then(() => console.log("[startup] PostgreSQL ready"))
+    .catch((err) => console.error("[startup] PostgreSQL migration failed:", err.message));
+}
 
 // Root route
 app.get("/", (_req, res) => {
@@ -92,7 +105,6 @@ app.use("/api/wallet", walletRouter);
 app.use("/api/pipeline", pipelineRouter);
 app.use("/api/trade", tradeRouter);
 app.use("/api/stream", streamRouter);
-app.use("/api/portfolio", portfolioRouter);
 app.use("/api/v1", riskRouter);
 app.use("/api/v1", settingsRouter);
 app.use("/api/v1", chatRouter);
@@ -116,6 +128,8 @@ app.use("/api/scanner", scannerRouter);
 app.use("/api/performance", performanceRouter);
 app.use("/api/versions", versionsRouter);
 app.use("/api/agents", agentHealthRouter);
+app.use("/api/v1", agentsRouter);
+app.use("/api/v1", agentChatRouter);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {
@@ -145,41 +159,22 @@ app.use(
   }
 );
 
-app.listen(PORT, () => {
+const httpServer = createServer(app);
+initSocketIO(httpServer);
+
+httpServer.listen(PORT, () => {
   console.log(`[quantik-backend] Running on http://localhost:${PORT}`);
   console.log(`[quantik-backend] Health: http://localhost:${PORT}/api/health`);
+  console.log(`[quantik-backend] Redis: ${isRedisEnabled() ? "enabled (BullMQ)" : "disabled (setInterval fallback)"}`);
+  console.log(`[quantik-backend] WebSocket: enabled (Socket.IO)`);
 
-  // Start orchestrator scheduler (10-minute scan cycle)
-  startScheduler();
-  // Start 60s hot markets scanner
-  startHotScanner();
-  // Start L4 fill monitor (30s paper order polling)
-  startFillMonitor();
-
-  // Pre-warm Gemini + start PnL settler
+  // Pre-warm Gemini
   warmGemini().catch(() => {});
-  startPnlSettler();
 
-  // Start Phase 1 market scanner (15-minute cron)
-  const autoScanner = new MarketScanner();
-  autoScanner.scan().catch(console.error); // initial scan on startup
-  setInterval(() => {
-    autoScanner.scan().catch(console.error);
-  }, 5 * 60 * 1000); // 5min aggressive scan
-
-  // Ensure alert columns exist
-  ensureAlertColumns();
-  // Start 60s alert poller
-  const alertPoller = new AlertPoller();
-  setInterval(() => alertPoller.pollAndAlert().catch(console.error), 60 * 1000);
-  alertPoller.pollAndAlert().catch(console.error); // immediate first run
-
-  // Start L5 resolution monitor (check on startup + every 15 minutes)
-  const resolutionMonitor = new ResolutionMonitor();
-  resolutionMonitor.checkResolutions().catch(console.error);
-  setInterval(() => {
-    resolutionMonitor.checkResolutions().catch(console.error);
-  }, 5 * 60 * 1000); // 5min aggressive scan
+  // Start all scheduled jobs — BullMQ when Redis available, setInterval fallback otherwise
+  initScheduler().catch((err) => {
+    console.error("[startup] Scheduler init failed:", err.message);
+  });
 });
 
 // Set CLOB allowances at startup (EOA mode — approve CLOB contracts to spend USDC)

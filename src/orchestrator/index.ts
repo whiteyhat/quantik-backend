@@ -533,6 +533,11 @@ export function startScheduler(): void {
   }, SCAN_INTERVAL_MS);
 }
 
+/** Single scan run — used by BullMQ worker. */
+export async function startSchedulerOnce(): Promise<void> {
+  await runScan();
+}
+
 export function stopScheduler(): void {
   if (scanTimer) {
     clearInterval(scanTimer);

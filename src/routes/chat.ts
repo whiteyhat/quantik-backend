@@ -32,7 +32,7 @@ function routeMessage(message: string): { routedTo: AgentId; reply: string } {
     return {
       routedTo: "stack",
       reply:
-        "Routing to Stack 🔩 — the portfolio endpoint (/api/portfolio/summary) returns your current USDC balance, open positions, P&L today and all-time, Kelly utilisation, drawdown, and circuit-breaker status. The /api/portfolio/risk breakdown adds theme correlations and tail-risk metrics. Want me to pull live numbers?",
+        "Routing to Stack 🔩 — the performance endpoint (/api/performance/summary) returns your current P&L today and all-time, trade count, win rate, and open positions. Want me to pull live numbers?",
     };
   }
 

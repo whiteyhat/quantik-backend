@@ -17,7 +17,7 @@ interface GammaMarket {
   resolutionPrice?: string;
 }
 
-async function settle(): Promise<void> {
+export async function settle(): Promise<void> {
   try {
     const db = getDb();
     const rows = db.prepare(`SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`).all() as ExecutionRow[];

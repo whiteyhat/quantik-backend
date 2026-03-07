@@ -62,7 +62,7 @@ TONE — clever, dry, intellectual:
 QUANTIK PLATFORM KNOWLEDGE (use for Tips):
 - /autopilot page → live scanner feed, execution log, P&L ticker, system status
 - /markets page → find any Polymarket market, run full pipeline analysis
-- /portfolio page → P&L, open positions, risk attribution
+- /trade-history page → trade history, P&L, outcomes
 - Relay chat (here) → ask about any market by slug or question
 - Scanner runs every 15min, auto-executes when σ ≥ 0.72 + Kelly ≥ 0.40
 - Circuit breakers: $10 max/bet, 5 trades/day, -$25 daily loss limit
@@ -74,7 +74,7 @@ User: "How is the market looking today?"
 Relay: "Volatility is dancing with unusual grace across major contracts. Edge stays positive on resolution plays. Tip: Check the Autopilot page — scanner fired 3 signals in the last hour."
 
 User: "What's my exposure?"
-Relay: "62% concentrated in AI regulation — overweight by any sensible measure. Tip: Open Portfolio → Risk to see your correlation breakdown before adding more."
+Relay: "62% concentrated in AI regulation — overweight by any sensible measure. Tip: Check the dashboard Risk Limits card to see your correlation breakdown before adding more."
 
 AGENTS: Aura /api/aura/:slug | Oracle /api/oracle/:slug | Edge /api/edge/:slug | Flux /api/flux/:slug | Sigma /api/sigma/:slug | Clause /api/clause/:slug | Risk /api/risk/status
 When [AGENT DATA] is present: extract the numbers, cite them naturally in plain English. NEVER quote, echo, or repeat the raw JSON — not even a single field.`;
@@ -505,6 +505,82 @@ router.post("/stream", async (req: Request, res: Response) => {
       res.write(`data: ${JSON.stringify({ type: "error", error: "Relay is momentarily offline." })}\n\n`);
       res.end();
     }
+  }
+});
+
+// ── POST /api/relay/imagine — Generate 3D character via Gemini ─
+
+const IMAGINE_MODEL = "gemini-2.0-flash-exp";
+
+router.post("/imagine", async (req: Request, res: Response) => {
+  const { animal } = req.body as { animal?: string };
+
+  if (!animal || typeof animal !== "string") {
+    res.status(400).json({ error: "animal is required" });
+    return;
+  }
+
+  if (!GEMINI_API_KEY) {
+    res.status(502).json({ error: "Gemini API key not configured" });
+    return;
+  }
+
+  try {
+    const prompt = `Generate a high-quality 3D rendered character of a ${animal}. The character should be stylized like a modern game avatar, with vibrant colors, clean lighting, and a slightly cartoonish but polished 3D look. The character should be standing in a heroic pose against a transparent or dark gradient background. Make it look like a professional trading bot mascot.`;
+
+    const body = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ["IMAGE", "TEXT"],
+        temperature: 1.0,
+      },
+    };
+
+    const apiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${IMAGINE_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90_000),
+      }
+    );
+
+    if (!apiRes.ok) {
+      const errText = await apiRes.text().catch(() => "");
+      console.error("[relay/imagine] Gemini error:", apiRes.status, errText);
+      res.status(502).json({ error: `Image generation failed (${apiRes.status})` });
+      return;
+    }
+
+    const data = await apiRes.json() as {
+      candidates?: {
+        content?: {
+          parts?: { inlineData?: { mimeType: string; data: string }; text?: string }[];
+        };
+      }[];
+    };
+
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const imagePart = parts.find(p => p.inlineData);
+
+    if (!imagePart?.inlineData) {
+      res.status(502).json({ error: "No image returned from model" });
+      return;
+    }
+
+    const { mimeType, data: b64 } = imagePart.inlineData;
+    const dataUri = `data:${mimeType};base64,${b64}`;
+
+    res.json({
+      image: dataUri,
+      animal,
+      model: IMAGINE_MODEL,
+    });
+  } catch (err) {
+    console.error("[relay/imagine] error:", err);
+    const message = err instanceof Error ? err.message : "Image generation failed";
+    res.status(502).json({ error: message });
   }
 });
 

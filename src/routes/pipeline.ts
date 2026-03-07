@@ -6,6 +6,7 @@ import { runAura } from "../aura/index";
 import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runFlux } from "../flux/index";
+import { pipelineRateLimit } from "../infra/rateLimit";
 import { runClause } from "../clause/index";
 import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
@@ -126,7 +127,7 @@ function resolveSlug(body: Record<string, unknown>): string | null {
 
 // ── POST /api/pipeline/run — SSE stream ────────────────────────
 
-router.post("/run", async (req: Request, res: Response) => {
+router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const body = req.body as Record<string, unknown>;
 
   const slug = resolveSlug(body);

@@ -135,3 +135,6 @@ export function getFillMonitor(): FillMonitor { return fillMonitor; }
 
 /** Start the fill monitor (call from app startup). */
 export function startFillMonitor(): void { fillMonitor.start(); }
+
+/** Single fill check — used by BullMQ worker. */
+export async function runFillCheck(): Promise<void> { fillMonitor.pollOrders(); }

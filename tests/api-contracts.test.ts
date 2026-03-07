@@ -16,8 +16,8 @@ async function get(path: string): Promise<{ status: number; body: any }> {
 describe("Backend API Contracts", () => {
 
   describe("Health", () => {
-    it("portfolio/summary returns 200", async () => {
-      const { status } = await get("/api/portfolio/summary");
+    it("performance/summary returns 200", async () => {
+      const { status } = await get("/api/performance/summary");
       expect(status).toBe(200);
     }, TIMEOUT);
   });
