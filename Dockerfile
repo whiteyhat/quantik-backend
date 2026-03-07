@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js v20 (Direct binary install for speed and reliability)
-RUN curl -fsSL https://nodejs.org/dist/v20.12.2/node-v20.12.2-linux-x64.tar.xz | tar -xJ --strip-components=1 -C /usr/local
+# Install Node.js v22 (Required by @tetherto/wdk — bare-node-runtime + sodium-native)
+RUN curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz | tar -xJ --strip-components=1 -C /usr/local
 
 # Install Polymarket CLI (Requires GLIBC 2.38+)
 RUN curl -sSL https://raw.githubusercontent.com/Polymarket/polymarket-cli/main/install.sh | sh
