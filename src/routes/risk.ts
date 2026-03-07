@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
+import { runCli } from "../cli";
 
 const router = Router();
 
@@ -226,48 +227,82 @@ router.put("/risk-config", (req: Request, res: Response) => {
 });
 
 // ── POST /api/v1/panic-mode/activate ─────────────────────────
-// Triggers panic mode, creates a panic_mode_events record, seeds
-// Activates panic mode using real open positions from executions table.
+// Emergency protocol: cancels orders, liquidates positions, trips circuit breaker,
+// generates a persisted liquidation report retrievable by ID.
 
-router.post("/panic-mode/activate", (_req: Request, res: Response) => {
+router.post("/panic-mode/activate", async (req: Request, res: Response) => {
   const db = getDb();
   const now = Date.now();
+  const body = req.body as { cancelOrders?: boolean; liquidatePositions?: boolean } | undefined;
+  const cancelOrders = body?.cancelOrders !== false; // default true
+  const liquidatePositions = body?.liquidatePositions ?? false;
 
-  // Read real open positions
-  const openPositions = db.prepare<[], { slug: string; side: string; amount: number; fill_price: number | null }>(
-    "SELECT slug, side, amount, fill_price FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+  // 1. Trip circuit breaker + global kill switch immediately
+  db.prepare(
+    "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
+  ).run(now);
+  db.prepare(
+    "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
+  ).run(now, now);
+
+  // 2. Read open positions before we close them
+  const openPositions = db.prepare<[], { id: string; slug: string; side: string; amount: number; fill_price: number | null; order_id: string | null; status: string }>(
+    "SELECT id, slug, side, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
   ).all();
 
-  // Get current prices from scanner
   const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
   const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
 
   const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
 
+  // 3. Cancel all open orders
+  let cancelledCount = 0;
+  if (cancelOrders) {
+    // Cancel paper orders
+    const paperResult = db.prepare("UPDATE paper_orders SET status = 'cancelled' WHERE status = 'open'").run();
+    cancelledCount += paperResult.changes;
+
+    // Cancel live orders via CLI (best-effort)
+    try {
+      await runCli(["clob", "cancel-all"]);
+      cancelledCount += 1; // CLI doesn't return individual count
+    } catch {
+      // CLI unavailable or no live orders — continue
+    }
+  }
+
+  // 4. Create panic event record
   const eventId = uuidv4();
   const requestCode = `PMR-${Date.now().toString(36).toUpperCase()}`;
 
-  db.prepare<[string, string, number, number, number, number]>(`
+  db.prepare(`
     INSERT INTO panic_mode_events
       (id, request_code, status, pending_orders_count, active_positions_count, estimated_total_value, initiated_at)
     VALUES (?, ?, 'processing', ?, ?, ?, ?)
-  `).run(eventId, requestCode, 0, openPositions.length, estimatedValue, now);
+  `).run(eventId, requestCode, cancelledCount, openPositions.length, estimatedValue, now);
 
+  // 5. Create liquidation report
   const reportId = uuidv4();
   const reportCode = `LQR-${Date.now().toString(36).toUpperCase()}`;
 
-  db.prepare<[string, string, string]>(`
+  db.prepare(`
     INSERT INTO liquidation_reports
       (id, report_code, panic_mode_event_id, status, total_realized_value, slippage_pct, gas_execution_cost, recovery_status)
     VALUES (?, ?, ?, 'processing', NULL, NULL, NULL, 'pending')
   `).run(reportId, reportCode, eventId);
 
-  // Build liquidation line items from real positions
-  const insertItem = db.prepare<[string, string, string, string, number, number, number, string, number]>(`
+  // 6. Build line items + close positions
+  const insertItem = db.prepare(`
     INSERT INTO liquidation_line_items
       (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const closeExecution = db.prepare(
+    "UPDATE executions SET status = 'liquidated', pnl = ? WHERE id = ?"
+  );
+
+  let totalRealizedValue = 0;
+  let totalPnl = 0;
 
   for (const pos of openPositions) {
     const entry = pos.fill_price ?? 0.5;
@@ -276,6 +311,7 @@ router.post("/panic-mode/activate", (_req: Request, res: Response) => {
     const pnl = pos.side === "buy"
       ? (current - entry) * shares
       : (entry - current) * shares;
+    const realizedValue = current * shares;
 
     const direction = pos.side === "buy" ? "YES" : "NO";
     const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
@@ -291,26 +327,31 @@ router.post("/panic-mode/activate", (_req: Request, res: Response) => {
       "shares",
       parseFloat(pnl.toFixed(2))
     );
+
+    // Mark position as liquidated with realized PnL
+    if (liquidatePositions) {
+      closeExecution.run(parseFloat(pnl.toFixed(2)), pos.id);
+    }
+
+    totalRealizedValue += realizedValue;
+    totalPnl += pnl;
   }
 
-  // Mark circuit breaker as panic mode enabled
-  db.prepare(
-    "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
-  ).run(now);
+  // 7. Finalize report
+  const completedAt = Date.now();
+  const reportStatus = liquidatePositions ? "complete" : "partial";
 
-  // Also trip the circuit breaker state
   db.prepare(
-    "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
-  ).run(now, now);
+    "UPDATE liquidation_reports SET status = ?, completion_timestamp = ?, total_realized_value = ?, slippage_pct = 0, gas_execution_cost = 0, recovery_status = ? WHERE id = ?"
+  ).run(reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId);
 
-  res.status(202).json({
-    eventId,
-    requestCode,
-    status: "processing",
-    liquidationReportId: reportId,
-    positionsLiquidated: openPositions.length,
-    estimatedValue: parseFloat(estimatedValue.toFixed(2)),
-    message: "Panic mode activated. Liquidation in progress.",
+  db.prepare(
+    "UPDATE panic_mode_events SET status = ?, completed_at = ? WHERE id = ?"
+  ).run(reportStatus, completedAt, eventId);
+
+  res.json({
+    success: true,
+    reportId,
   });
 });
 
