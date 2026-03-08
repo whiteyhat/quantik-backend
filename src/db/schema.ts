@@ -536,6 +536,7 @@ function migrate(db: Database.Database): void {
   // Migration: BYO agent columns
   try { db.exec("ALTER TABLE agents ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'created'"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN endpoint_url TEXT"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN agent_url TEXT"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN connection_status TEXT DEFAULT 'pending'"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN last_heartbeat INTEGER"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN description TEXT"); } catch {}
@@ -550,7 +551,7 @@ function migrate(db: Database.Database): void {
       user_id TEXT NOT NULL,
       key_hash TEXT NOT NULL,
       key_prefix TEXT NOT NULL,
-      scopes TEXT NOT NULL DEFAULT '["read","trade","analysis"]',
+      scopes TEXT NOT NULL DEFAULT '["read","trade","analysis","config"]',
       rate_limit_tier TEXT NOT NULL DEFAULT 'standard',
       created_at INTEGER NOT NULL,
       revoked_at INTEGER,
@@ -592,6 +593,30 @@ function migrate(db: Database.Database): void {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_webhook_log_agent_time ON webhook_delivery_log(agent_id, created_at DESC);
+  `);
+
+  // ── BYO Onboarding Sessions ─────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS byo_onboarding_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      claimed_at INTEGER,
+      agent_id TEXT,
+      identity_name TEXT,
+      identity_description TEXT,
+      identity_avatar TEXT,
+      agent_url TEXT,
+      endpoint_url TEXT,
+      webhook_events TEXT DEFAULT '["*"]',
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_byo_onboarding_user ON byo_onboarding_sessions(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
   `);
 
   // ── Chat History (persistent across sessions) ──────────────────────────

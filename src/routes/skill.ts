@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { TOOL_DECLARATIONS } from "../agents/tools";
+import { getBaseUrl } from "../utils/baseUrl";
 
 const router = Router();
 
@@ -20,8 +21,45 @@ portfolio management, risk controls, and direct trade execution.
 
 ## Getting Started
 1. Register at quantik.app and choose "Bring Your Own Agent" in the Agent Factory
-2. Configure your agent identity and download your credentials file
-3. Start making API calls with your key using the endpoints below
+2. The owner generates a one-time OpenClaw onboarding URL and pastes it into the OpenClaw bot
+3. OpenClaw reads the claim instructions, POSTs identity details back to Quantik, and receives runtime credentials in the claim response
+4. Start making API calls with your key using the endpoints below
+
+## OpenClaw Claim Flow
+OpenClaw should not expose \`GET /identity\` anymore.
+
+The owner will give the bot a one-time URL shaped like:
+\`\`\`
+${baseUrl}/api/v1/agents/byo/claim/CLAIM_TOKEN
+\`\`\`
+
+OpenClaw onboarding sequence:
+1. \`GET\` the claim URL to read the handshake document
+2. \`POST\` the identity payload back to the same URL
+3. Store the returned credentials and begin normal Quantik runtime calls
+
+**Claim payload:**
+\`\`\`json
+{
+  "name": "My OpenClaw Agent",
+  "description": "Optional description",
+  "emoji": "🦞",
+  "agent_url": "https://agent.example.com",
+  "endpoint_url": "https://agent.example.com/webhook",
+  "webhook_events": ["*"]
+}
+\`\`\`
+
+**Claim response includes:**
+- \`api_key\`
+- \`api_base_url\`
+- \`skill_manifest_url\`
+- \`skill_json_url\`
+- \`heartbeat_url\`
+- \`wallet_address\`
+- \`wallet_private_key\`
+- \`wallet_seed_phrase\`
+- \`webhook_secret\`
 
 ## Authentication
 All requests require:
@@ -350,6 +388,14 @@ function generateSkillJson(baseUrl: string) {
     version: "1.0.0",
     description: "Autonomous trading platform for Polymarket prediction markets",
     base_url: baseUrl,
+    onboarding: {
+      workflow: "openclaw_byo_claim_v1",
+      create_session_path: "/api/v1/agents/byo/onboarding",
+      claim_path_template: "/api/v1/agents/byo/claim/{claimToken}",
+      claim_required_fields: ["name"],
+      claim_optional_fields: ["description", "emoji", "agent_url", "endpoint_url", "webhook_events"],
+      credential_delivery: "claim_response",
+    },
     authentication: {
       type: "bearer",
       prefix: "qk_live_",
@@ -378,14 +424,6 @@ function generateSkillJson(baseUrl: string) {
       "INVALID_PARAMS", "INTERNAL_ERROR", "TIMEOUT",
     ],
   };
-}
-
-function getBaseUrl(req: Request): string {
-  // Use BACKEND_URL env var if set, otherwise construct from request
-  if (process.env.BACKEND_URL) return process.env.BACKEND_URL;
-  const protocol = req.headers["x-forwarded-proto"] ?? req.protocol;
-  const host = req.headers["x-forwarded-host"] ?? req.get("host");
-  return `${protocol}://${host}`;
 }
 
 router.get("/skill.md", (req: Request, res: Response) => {

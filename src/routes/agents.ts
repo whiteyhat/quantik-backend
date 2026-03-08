@@ -4,7 +4,9 @@ import crypto from "crypto";
 import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
-import { generateApiKey, requireEitherAuth } from "../middleware/apiKeyAuth";
+import { requireEitherAuth } from "../middleware/apiKeyAuth";
+import { normalizeLegacyByoIdentity, resolveByoIdentity, validateExternalHttpsUrl } from "./byoIdentity";
+import { provisionByoAgent } from "./byoOnboarding";
 
 const router = Router();
 
@@ -358,61 +360,73 @@ router.post("/agents", async (req: Request, res: Response) => {
 // ── POST /api/v1/agents/byo — Create BYO agent ──────────────
 
 interface ByoCreateBody {
-  name: string;
+  name?: string;
   avatar?: string;
   description?: string;
   endpoint_url?: string;
+  agent_url?: string;
+  webhook_events?: string[];
 }
 
 router.post("/agents/byo", async (req: Request, res: Response) => {
   const body = req.body as ByoCreateBody;
+  const endpointInput = typeof body.endpoint_url === "string" ? body.endpoint_url.trim() : "";
+  const agentInput = typeof body.agent_url === "string" ? body.agent_url.trim() : "";
 
-  if (!body.name || typeof body.name !== "string" || !body.name.trim()) {
-    res.status(400).json({ error: "name is required" });
-    return;
-  }
-
-  // Validate name + description length (server-side enforcement)
-  if (body.name.trim().length > 100) {
-    res.status(400).json({ error: "name must be 100 characters or less" });
-    return;
-  }
-  if (body.description && body.description.length > 500) {
-    res.status(400).json({ error: "description must be 500 characters or less" });
-    return;
-  }
-
-  // Validate endpoint_url for SSRF prevention
-  if (body.endpoint_url) {
-    if (body.endpoint_url.length > 500) {
-      res.status(400).json({ error: "endpoint_url must be 500 characters or less" });
+  let endpointUrl: string | null = null;
+  if (endpointInput) {
+    const endpointValidation = validateExternalHttpsUrl(endpointInput, "endpoint_url");
+    if (!endpointValidation.ok) {
+      res.status(400).json({ error: endpointValidation.error });
       return;
     }
-    try {
-      const parsed = new URL(body.endpoint_url);
-      if (parsed.protocol !== "https:") {
-        res.status(400).json({ error: "endpoint_url must use HTTPS" });
-        return;
-      }
-      const host = parsed.hostname;
-      if (
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "0.0.0.0" ||
-        host.startsWith("10.") ||
-        host.startsWith("192.168.") ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-        host === "[::1]" ||
-        host.endsWith(".local") ||
-        host.endsWith(".internal")
-      ) {
-        res.status(400).json({ error: "endpoint_url must not point to a private/internal address" });
-        return;
-      }
-    } catch {
-      res.status(400).json({ error: "endpoint_url is not a valid URL" });
+    endpointUrl = endpointValidation.normalizedUrl;
+  }
+
+  let agentUrl: string | null = null;
+  if (agentInput) {
+    const agentValidation = validateExternalHttpsUrl(agentInput, "agent_url");
+    if (!agentValidation.ok) {
+      res.status(400).json({ error: agentValidation.error });
       return;
     }
+    agentUrl = agentValidation.normalizedUrl;
+  }
+
+  let identitySource: "remote" | "random_fallback" | "manual_legacy" = "manual_legacy";
+  let identityWarning: string | null = null;
+  let resolvedName: string;
+  let resolvedAvatar: string;
+  let resolvedDescription: string | null;
+
+  if (agentUrl) {
+    const resolved = await resolveByoIdentity(agentUrl);
+    resolvedName = resolved.name;
+    resolvedAvatar = resolved.avatar;
+    resolvedDescription = resolved.description;
+    identitySource = resolved.identity_source;
+    if (resolved.identity_source === "random_fallback") {
+      identityWarning = "Could not fetch identity from external agent. A random identity was assigned.";
+    }
+  } else {
+    // Legacy compatibility path
+    if (typeof body.name === "string" && body.name.length > 100) {
+      res.status(400).json({ error: "name must be 100 characters or less" });
+      return;
+    }
+    if (typeof body.description === "string" && body.description.length > 500) {
+      res.status(400).json({ error: "description must be 500 characters or less" });
+      return;
+    }
+
+    const normalized = normalizeLegacyByoIdentity(body);
+    if (!normalized.ok) {
+      res.status(400).json({ error: normalized.error });
+      return;
+    }
+    resolvedName = normalized.identity.name;
+    resolvedAvatar = normalized.identity.avatar;
+    resolvedDescription = normalized.identity.description;
   }
 
   // 1-agent-per-user limit (same as regular create)
@@ -436,65 +450,35 @@ router.post("/agents/byo", async (req: Request, res: Response) => {
       return;
     }
 
-    const id = uuidv4();
-    const agentCode = generateAgentCode();
-    const now = Date.now();
-
-    // BYO agents don't need personality params — use defaults for required NOT NULL columns
-    // Wrap in transaction to prevent orphaned records on partial failure
-    const { fullKey, keyHash, keyPrefix } = generateApiKey();
-    const keyId = uuidv4();
-    const webhookSecret = crypto.randomBytes(32).toString("hex");
-
-    const createByoTransaction = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO agents (
-          id, agent_code, status, name, avatar_emoji, agent_type, description, endpoint_url,
-          connection_status, webhook_secret, personality, decision_style, trading_instinct,
-          time_patience, profit_dream, money_approach, protection_mindset, leverage_vibe,
-          market_sense, asset_love, system_prompt, user_id, created_at, updated_at
-        ) VALUES (?, ?, 'inactive', ?, ?, 'byo', ?, ?, 'pending', ?,
-          'balanced', 'analyst', 'value_hunter', 'swing', 'wealth_builder',
-          'smart_scaling', 'flexible', 'none', 'mood_reader', 'crypto',
-          'BYO agent — externally managed', ?, ?, ?)
-      `).run(
-        id, agentCode,
-        body.name.trim(),
-        body.avatar ?? "🤖",
-        body.description?.trim() ?? null,
-        body.endpoint_url ?? null,
-        webhookSecret,
-        userId, now, now,
-      );
-
-      // Link agent to user
-      db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
-
-      // Auto-generate API key
-      db.prepare(`
-        INSERT INTO api_keys (id, agent_id, user_id, key_hash, key_prefix, scopes, rate_limit_tier, created_at)
-        VALUES (?, ?, ?, ?, ?, '["read","trade","analysis","config"]', 'standard', ?)
-      `).run(keyId, id, userId, keyHash, keyPrefix, now);
+    const provisioned = await provisionByoAgent(req, {
+      userId,
+      name: resolvedName,
+      avatar: resolvedAvatar,
+      description: resolvedDescription,
+      agentUrl,
+      endpointUrl,
+      webhookEvents: body.webhook_events ?? ["*"],
     });
 
-    createByoTransaction();
-
     res.status(201).json({
-      id,
-      agent_code: agentCode,
+      id: provisioned.agent.id,
       status: "inactive",
       agent_type: "byo",
-      name: body.name.trim(),
-      avatar_emoji: body.avatar ?? "🤖",
-      description: body.description?.trim() ?? null,
-      endpoint_url: body.endpoint_url ?? null,
+      name: provisioned.agent.name,
+      avatar_emoji: provisioned.agent.avatar_emoji,
+      description: provisioned.agent.description,
+      endpoint_url: provisioned.agent.endpoint_url,
+      agent_url: provisioned.agent.agent_url,
+      webhook_events: provisioned.agent.webhook_events,
+      identity_source: identitySource,
+      identity_warning: identityWarning,
       connection_status: "pending",
-      wallet_address: null,
-      api_key: fullKey,
-      api_key_prefix: keyPrefix,
-      webhook_secret: webhookSecret,
-      created_at: now,
-      updated_at: now,
+      wallet_address: provisioned.agent.wallet_address,
+      api_key: provisioned.credentials.api_key,
+      api_key_prefix: provisioned.agent.api_key_prefix,
+      webhook_secret: provisioned.credentials.webhook_secret,
+      created_at: Date.now(),
+      updated_at: Date.now(),
       deployed_at: null,
       warning: "Save this API key and webhook secret now. They will never be shown again.",
     });
@@ -559,7 +543,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     personality, decision_style, trading_instinct, time_patience, profit_dream,
     money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
     wallet_address, created_at, updated_at, deployed_at,
-    agent_type, endpoint_url, connection_status, last_heartbeat, description`;
+    agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events`;
 
   if (isPgEnabled()) {
     const userId = await getUserIdAsync(req);
@@ -570,6 +554,23 @@ router.get("/agent/me", async (req: Request, res: Response) => {
 
     const agent = await pgQueryOne(`SELECT ${AGENT_COLS} FROM agents WHERE id = $1`, [user.agent_id]);
     if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
+
+    if ((agent as Record<string, unknown>).agent_type === "byo") {
+      const apiKey = await pgQueryOne<{ key_prefix: string }>(
+        "SELECT key_prefix FROM api_keys WHERE agent_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        [user.agent_id]
+      );
+      (agent as Record<string, unknown>).api_key_prefix = apiKey?.key_prefix ?? null;
+      const rawEvents = (agent as Record<string, unknown>).webhook_events;
+      if (typeof rawEvents === "string") {
+        try {
+          (agent as Record<string, unknown>).webhook_events = JSON.parse(rawEvents);
+        } catch {
+          (agent as Record<string, unknown>).webhook_events = ["*"];
+        }
+      }
+    }
+
     res.json(agent);
   } else {
     const userId = getUserId(req);
@@ -588,6 +589,14 @@ router.get("/agent/me", async (req: Request, res: Response) => {
         `SELECT key_prefix FROM api_keys WHERE agent_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1`
       ).get(user.agent_id) as { key_prefix: string } | undefined;
       (agent as Record<string, unknown>).api_key_prefix = apiKey?.key_prefix ?? null;
+      const rawEvents = (agent as Record<string, unknown>).webhook_events;
+      if (typeof rawEvents === "string") {
+        try {
+          (agent as Record<string, unknown>).webhook_events = JSON.parse(rawEvents);
+        } catch {
+          (agent as Record<string, unknown>).webhook_events = ["*"];
+        }
+      }
     }
 
     res.json(agent);
@@ -602,11 +611,25 @@ router.get("/agents", (_req: Request, res: Response) => {
     SELECT id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
            personality, decision_style, trading_instinct, time_patience, profit_dream,
            money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
-           wallet_address, created_at, updated_at, deployed_at
+           wallet_address, created_at, updated_at, deployed_at, agent_type, endpoint_url, agent_url,
+           connection_status, last_heartbeat, description, webhook_events
     FROM agents ORDER BY created_at DESC
   `).all();
 
-  res.json({ agents });
+  res.json({
+    agents: (agents as Array<Record<string, unknown>>).map((agent) => ({
+      ...agent,
+      webhook_events: typeof agent.webhook_events === "string"
+        ? (() => {
+            try {
+              return JSON.parse(agent.webhook_events);
+            } catch {
+              return ["*"];
+            }
+          })()
+        : agent.webhook_events,
+    })),
+  });
 });
 
 // ── GET /api/v1/agents/:id — Get agent detail ────────────────
@@ -921,6 +944,9 @@ router.delete("/agents/:id", async (req: Request, res: Response) => {
         res.status(403).json({ error: "Forbidden" });
         return;
       }
+      await pgExec(`DELETE FROM webhook_delivery_log WHERE agent_id = $1`, [req.params.id]);
+      await pgExec(`DELETE FROM byo_request_log WHERE agent_id = $1`, [req.params.id]);
+      await pgExec(`DELETE FROM api_keys WHERE agent_id = $1`, [req.params.id]);
       await pgExec(`DELETE FROM agents WHERE id = $1 AND user_id = $2`, [req.params.id, userId]);
       await pgExec(`UPDATE users SET agent_id = NULL WHERE id = $1`, [userId]);
     } else {
@@ -941,6 +967,9 @@ router.delete("/agents/:id", async (req: Request, res: Response) => {
         res.status(403).json({ error: "Forbidden" });
         return;
       }
+      db.prepare(`DELETE FROM webhook_delivery_log WHERE agent_id = ?`).run(req.params.id);
+      db.prepare(`DELETE FROM byo_request_log WHERE agent_id = ?`).run(req.params.id);
+      db.prepare(`DELETE FROM api_keys WHERE agent_id = ?`).run(req.params.id);
       db.prepare(`DELETE FROM agents WHERE id = ? AND user_id = ?`).run(req.params.id, userId);
       db.prepare(`UPDATE users SET agent_id = NULL WHERE id = ?`).run(userId);
     }

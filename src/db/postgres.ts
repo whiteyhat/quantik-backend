@@ -97,6 +97,81 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
   `);
 
+  await db.query(`
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'created';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS endpoint_url TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_url TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS connection_status TEXT DEFAULT 'pending';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_heartbeat BIGINT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS webhook_events TEXT DEFAULT '["*"]';
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      key_hash TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT '["read","trade","analysis","config"]',
+      rate_limit_tier TEXT NOT NULL DEFAULT 'standard',
+      created_at BIGINT NOT NULL,
+      revoked_at BIGINT,
+      last_used_at BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS byo_request_log (
+      id BIGSERIAL PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      method TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      latency_ms INTEGER NOT NULL,
+      error TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_byo_log_agent_time ON byo_request_log(agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_byo_log_time ON byo_request_log(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS webhook_delivery_log (
+      id BIGSERIAL PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      url TEXT NOT NULL,
+      status_code INTEGER,
+      latency_ms INTEGER,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      error TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_log_agent_time ON webhook_delivery_log(agent_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS byo_onboarding_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at BIGINT NOT NULL,
+      claimed_at BIGINT,
+      agent_id TEXT,
+      identity_name TEXT,
+      identity_description TEXT,
+      identity_avatar TEXT,
+      agent_url TEXT,
+      endpoint_url TEXT,
+      webhook_events TEXT DEFAULT '["*"]',
+      last_error TEXT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_byo_onboarding_user ON byo_onboarding_sessions(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
+  `);
+
   // ── Trading tables (with user_id for multi-tenancy) ─────────────────────────
   await db.query(`
     -- Pipeline Runs

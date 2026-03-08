@@ -1,7 +1,6 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/schema";
-import WDK from "@tetherto/wdk";
-import WalletManagerEvm from "@tetherto/wdk-wallet-evm";
+import { generateWalletCredentials } from "../wallet/generate";
 
 const router = Router();
 
@@ -11,32 +10,7 @@ const router = Router();
 
 router.post("/generate", async (_req: Request, res: Response) => {
   try {
-    // 1. Generate a random BIP-39 seed phrase
-    const seedPhrase = WDK.getRandomSeedPhrase();
-
-    // 2. Initialize WDK and register EVM wallet (no provider needed for key generation)
-    const wdk = new WDK(seedPhrase);
-    wdk.registerWallet("ethereum", WalletManagerEvm, {});
-
-    // 3. Derive the first account (BIP-44 index 0)
-    const account = await wdk.getAccount("ethereum", 0);
-
-    // 4. Extract address and private key
-    const address = await account.getAddress();
-    const privateKeyBytes = account.keyPair.privateKey;
-    if (!privateKeyBytes) {
-      res.status(500).json({ error: "Failed to derive private key" });
-      return;
-    }
-
-    // Convert Uint8Array to hex string with 0x prefix
-    const privateKey = "0x" + Buffer.from(privateKeyBytes).toString("hex");
-
-    // 5. Erase private key from WDK memory
-    account.dispose();
-
-    // 6. Return credentials (NEVER logged, NEVER stored)
-    res.json({ address, privateKey, seedPhrase });
+    res.json(await generateWalletCredentials());
   } catch (err) {
     console.error("[wallet:generate] error:", err instanceof Error ? err.message : err);
     res.status(500).json({ error: "Failed to generate wallet" });
