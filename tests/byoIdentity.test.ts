@@ -71,11 +71,11 @@ describe("BYO identity helpers", () => {
     }
   });
 
-  test("normalizeClaimedByoIdentity accepts OpenClaw claim payloads", () => {
+  test("normalizeClaimedByoIdentity forces the lobster avatar for OpenClaw imports", () => {
     const normalized = normalizeClaimedByoIdentity({
       name: "  OpenClaw Claimed  ",
       description: "  Claimed from callback  ",
-      emoji: "🦞",
+      emoji: "🦊",
     });
 
     expect(normalized.ok).toBe(true);

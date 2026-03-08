@@ -23,7 +23,8 @@ portfolio management, risk controls, and direct trade execution.
 1. Register at quantik.app and choose "Bring Your Own Agent" in the Agent Factory
 2. The owner generates a one-time OpenClaw onboarding URL and pastes it into the OpenClaw bot
 3. OpenClaw reads the claim instructions, POSTs identity details back to Quantik, and receives runtime credentials in the claim response
-4. Start making API calls with your key using the endpoints below
+4. The owner reviews the import in Quantik, downloads the wallet backup once, configures webhook delivery, and activates the agent
+5. Start making API calls with your key using the endpoints below
 
 ## OpenClaw Claim Flow
 OpenClaw should not expose \`GET /identity\` anymore.
@@ -43,10 +44,8 @@ OpenClaw onboarding sequence:
 {
   "name": "My OpenClaw Agent",
   "description": "Optional description",
-  "emoji": "🦞",
   "agent_url": "https://agent.example.com",
-  "endpoint_url": "https://agent.example.com/webhook",
-  "webhook_events": ["*"]
+  "endpoint_url": "https://agent.example.com/webhook"
 }
 \`\`\`
 
@@ -60,6 +59,8 @@ OpenClaw onboarding sequence:
 - \`wallet_private_key\`
 - \`wallet_seed_phrase\`
 - \`webhook_secret\`
+
+Quantik always renders imported OpenClaw agents as lobster avatars (\`🦞\`) in the owner dashboard.
 
 ## Authentication
 All requests require:
@@ -378,7 +379,7 @@ if not verify_signature(request.body, sig, WEBHOOK_SECRET):
 
 **Events:** trade:executed, agent:alert, autopilot:status, position:update, pipeline:complete, market:signal, risk:alert
 
-You can filter which events are delivered via the \`webhook_events\` setting during setup. Default is all events (\`["*"]\`).
+The owner can filter which events are delivered via the \`webhook_events\` setting in Quantik before activation. Default is all events (\`["*"]\`).
 `;
 }
 
@@ -392,8 +393,8 @@ function generateSkillJson(baseUrl: string) {
       workflow: "openclaw_byo_claim_v1",
       create_session_path: "/api/v1/agents/byo/onboarding",
       claim_path_template: "/api/v1/agents/byo/claim/{claimToken}",
-      claim_required_fields: ["name"],
-      claim_optional_fields: ["description", "emoji", "agent_url", "endpoint_url", "webhook_events"],
+      claim_required_fields: ["name", "agent_url"],
+      claim_optional_fields: ["description", "endpoint_url", "webhook_events"],
       credential_delivery: "claim_response",
     },
     authentication: {

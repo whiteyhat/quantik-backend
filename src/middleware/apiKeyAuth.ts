@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { getUserIdAsync } from "./auth";
 
 // ── API Key Authentication Middleware ──────────────────────────────────────
 // Authenticates BYO agents via `Authorization: Bearer qk_live_...` header.
@@ -133,34 +135,47 @@ export function requireEitherAuth(req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  // Path 2: Clerk auth — try to get userId from Clerk
-  const clerkAuth = (req as unknown as { auth?: { userId?: string } }).auth;
-  const userId = clerkAuth?.userId;
-  if (!userId) {
-    res.status(401).json({ success: false, error: "Authentication required (API key or session)", code: "UNAUTHORIZED" });
-    return;
-  }
+  getUserIdAsync(req)
+    .then(async (userId) => {
+      if (!userId) {
+        res.status(401).json({ success: false, error: "Authentication required (API key or session)", code: "UNAUTHORIZED" });
+        return;
+      }
 
-  // Look up the user's agent to populate a context compatible with apiKeyAgent
-  const db = getDb();
-  const agent = db.prepare(
-    "SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1"
-  ).get(userId) as { id: string } | undefined;
+      let agent: { id: string } | undefined;
+      if (isPgEnabled()) {
+        agent = await pgQueryOne<{ id: string }>(
+          "SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated' LIMIT 1",
+          [userId]
+        ) ?? undefined;
+      } else {
+        const db = getDb();
+        agent = db.prepare(
+          "SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1"
+        ).get(userId) as { id: string } | undefined;
+      }
 
-  if (!agent) {
-    res.status(404).json({ success: false, error: "No agent found for this user", code: "NOT_FOUND" });
-    return;
-  }
+      if (!agent) {
+        res.status(404).json({ success: false, error: "No agent found for this user", code: "NOT_FOUND" });
+        return;
+      }
 
-  // Attach a synthetic ApiKeyContext so downstream code works uniformly
-  req.apiKeyAgent = {
-    agentId: agent.id,
-    userId,
-    scopes: ["read", "trade", "analysis", "config"],
-    rateLimitTier: "standard",
-  };
+      req.apiKeyAgent = {
+        agentId: agent.id,
+        userId,
+        scopes: ["read", "trade", "analysis", "config"],
+        rateLimitTier: "standard",
+      };
 
-  next();
+      next();
+    })
+    .catch((err) => {
+      res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : "Authentication lookup failed",
+        code: "AUTH_LOOKUP_FAILED",
+      });
+    });
 }
 
 // Helper to generate a new API key

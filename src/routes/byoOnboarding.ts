@@ -6,6 +6,7 @@ import { getBaseUrl } from "../utils/baseUrl";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { generateApiKey } from "../middleware/apiKeyAuth";
 import { getPgPool, isPgEnabled, pgQueryOne } from "../db/postgres";
+import { decrypt, encrypt } from "../infra/encryption";
 import { generateWalletCredentials } from "../wallet/generate";
 import { normalizeClaimedByoIdentity, validateExternalHttpsUrl } from "./byoIdentity";
 
@@ -32,6 +33,8 @@ interface ByoSessionRecord {
   agent_url: string | null;
   endpoint_url: string | null;
   webhook_events: string | null;
+  encrypted_wallet_bundle: string | null;
+  wallet_downloaded_at: number | null;
   last_error: string | null;
   created_at: number;
   updated_at: number;
@@ -52,6 +55,7 @@ interface AgentSummary {
 
 interface ProvisionedByoAgent {
   agent: AgentSummary;
+  walletEscrowCiphertext: string;
   credentials: {
     api_key: string;
     api_base_url: string;
@@ -64,6 +68,28 @@ interface ProvisionedByoAgent {
     webhook_secret: string;
   };
 }
+
+interface WalletEscrowBundle {
+  address: string;
+  privateKey: string;
+  seedPhrase: string;
+}
+
+type SessionUpdateFields = Pick<ByoSessionRecord,
+  "status" |
+  "claimed_at" |
+  "agent_id" |
+  "identity_name" |
+  "identity_description" |
+  "identity_avatar" |
+  "agent_url" |
+  "endpoint_url" |
+  "webhook_events" |
+  "encrypted_wallet_bundle" |
+  "wallet_downloaded_at" |
+  "last_error" |
+  "updated_at"
+>;
 
 function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
@@ -131,6 +157,12 @@ function optionalExternalUrl(value: unknown, fieldName: "endpoint_url" | "agent_
   return { ok: true, normalizedUrl: validated.normalizedUrl };
 }
 
+function requiredExternalUrl(value: unknown, fieldName: "endpoint_url" | "agent_url"):
+  | { ok: true; normalizedUrl: string }
+  | { ok: false; error: string } {
+  return validateExternalHttpsUrl(value, fieldName);
+}
+
 function normalizeSessionExpiry(record: ByoSessionRecord): ByoSessionRecord {
   if (record.status === "pending_claim" && record.expires_at <= Date.now()) {
     return { ...record, status: "expired", updated_at: Date.now() };
@@ -140,6 +172,27 @@ function normalizeSessionExpiry(record: ByoSessionRecord): ByoSessionRecord {
 
 function serializeEvents(events: string[]): string {
   return JSON.stringify(events);
+}
+
+function serializeWalletBundle(bundle: WalletEscrowBundle): string {
+  return encrypt(JSON.stringify(bundle));
+}
+
+function deserializeWalletBundle(encryptedBundle: string): WalletEscrowBundle {
+  const raw = JSON.parse(decrypt(encryptedBundle)) as Partial<WalletEscrowBundle>;
+  if (
+    typeof raw.address !== "string" ||
+    typeof raw.privateKey !== "string" ||
+    typeof raw.seedPhrase !== "string"
+  ) {
+    throw new Error("Invalid wallet escrow payload");
+  }
+
+  return {
+    address: raw.address,
+    privateKey: raw.privateKey,
+    seedPhrase: raw.seedPhrase,
+  };
 }
 
 function buildClaimUrl(req: Request, token: string): string {
@@ -176,8 +229,8 @@ function writeSqliteSession(record: ByoSessionRecord): void {
     INSERT INTO byo_onboarding_sessions (
       id, user_id, status, token_hash, expires_at, claimed_at, agent_id,
       identity_name, identity_description, identity_avatar, agent_url, endpoint_url,
-      webhook_events, last_error, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      webhook_events, encrypted_wallet_bundle, wallet_downloaded_at, last_error, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.id,
     record.user_id,
@@ -192,6 +245,8 @@ function writeSqliteSession(record: ByoSessionRecord): void {
     record.agent_url,
     record.endpoint_url,
     record.webhook_events,
+    record.encrypted_wallet_bundle,
+    record.wallet_downloaded_at,
     record.last_error,
     record.created_at,
     record.updated_at,
@@ -204,8 +259,8 @@ async function writePgSession(record: ByoSessionRecord): Promise<void> {
     INSERT INTO byo_onboarding_sessions (
       id, user_id, status, token_hash, expires_at, claimed_at, agent_id,
       identity_name, identity_description, identity_avatar, agent_url, endpoint_url,
-      webhook_events, last_error, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      webhook_events, encrypted_wallet_bundle, wallet_downloaded_at, last_error, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
   `, [
     record.id,
     record.user_id,
@@ -220,6 +275,8 @@ async function writePgSession(record: ByoSessionRecord): Promise<void> {
     record.agent_url,
     record.endpoint_url,
     record.webhook_events,
+    record.encrypted_wallet_bundle,
+    record.wallet_downloaded_at,
     record.last_error,
     record.created_at,
     record.updated_at,
@@ -228,10 +285,7 @@ async function writePgSession(record: ByoSessionRecord): Promise<void> {
 
 function updateSqliteSession(
   id: string,
-  updates: Partial<Pick<ByoSessionRecord,
-    "status" | "claimed_at" | "agent_id" | "identity_name" | "identity_description" |
-    "identity_avatar" | "agent_url" | "endpoint_url" | "webhook_events" | "last_error" | "updated_at"
-  >>
+  updates: Partial<SessionUpdateFields>
 ): void {
   const db = getDb();
   const fields = Object.keys(updates);
@@ -243,10 +297,7 @@ function updateSqliteSession(
 
 async function updatePgSession(
   id: string,
-  updates: Partial<Pick<ByoSessionRecord,
-    "status" | "claimed_at" | "agent_id" | "identity_name" | "identity_description" |
-    "identity_avatar" | "agent_url" | "endpoint_url" | "webhook_events" | "last_error" | "updated_at"
-  >>
+  updates: Partial<SessionUpdateFields>
 ): Promise<void> {
   if (!isPgEnabled()) return;
   const fields = Object.keys(updates);
@@ -522,7 +573,7 @@ export async function provisionByoAgent(
     name: string;
     avatar: string;
     description: string | null;
-    agentUrl: string | null;
+    agentUrl: string;
     endpointUrl: string | null;
     webhookEvents: string[];
   }
@@ -534,6 +585,11 @@ export async function provisionByoAgent(
   const { fullKey, keyHash, keyPrefix } = generateApiKey();
   const webhookSecret = crypto.randomBytes(32).toString("hex");
   const wallet = await generateWalletCredentials();
+  const walletEscrowCiphertext = serializeWalletBundle({
+    address: wallet.address,
+    privateKey: wallet.privateKey,
+    seedPhrase: wallet.seedPhrase,
+  });
 
   insertSqliteProvision({
     userId: input.userId,
@@ -589,6 +645,7 @@ export async function provisionByoAgent(
       api_key_prefix: keyPrefix,
       connection_status: "pending",
     },
+    walletEscrowCiphertext,
     credentials: {
       api_key: fullKey,
       api_base_url: `${getBaseUrl(req)}/api/v1/tools`,
@@ -629,6 +686,35 @@ async function updatePgByoConfig(args: {
     SET endpoint_url = $1, agent_url = $2, webhook_events = $3, updated_at = $4
     WHERE id = $5 AND agent_type = 'byo'
   `, [args.endpointUrl, args.agentUrl, serializeEvents(args.webhookEvents), Date.now(), args.agentId]);
+}
+
+async function syncSessionConfigForAgent(args: {
+  agentId: string;
+  endpointUrl: string | null;
+  agentUrl: string | null;
+  webhookEvents: string[];
+}): Promise<void> {
+  const updates = {
+    endpoint_url: args.endpointUrl,
+    agent_url: args.agentUrl,
+    webhook_events: serializeEvents(args.webhookEvents),
+    updated_at: Date.now(),
+  };
+
+  const db = getDb();
+  db.prepare(`
+    UPDATE byo_onboarding_sessions
+    SET endpoint_url = ?, agent_url = ?, webhook_events = ?, updated_at = ?
+    WHERE agent_id = ?
+  `).run(args.endpointUrl, args.agentUrl, serializeEvents(args.webhookEvents), updates.updated_at, args.agentId);
+
+  if (isPgEnabled()) {
+    await getPgPool().query(`
+      UPDATE byo_onboarding_sessions
+      SET endpoint_url = $1, agent_url = $2, webhook_events = $3, updated_at = $4
+      WHERE agent_id = $5
+    `, [args.endpointUrl, args.agentUrl, updates.webhook_events, updates.updated_at, args.agentId]);
+  }
 }
 
 async function ensureOwnerOwnsByoAgent(agentId: string, userId: string): Promise<boolean> {
@@ -674,6 +760,8 @@ router.post("/agents/byo/onboarding", async (req: Request, res: Response) => {
     agent_url: null,
     endpoint_url: null,
     webhook_events: serializeEvents(DEFAULT_WEBHOOK_EVENTS),
+    encrypted_wallet_bundle: null,
+    wallet_downloaded_at: null,
     last_error: null,
     created_at: now,
     updated_at: now,
@@ -711,14 +799,16 @@ router.get("/agents/byo/onboarding/:sessionId", async (req: Request, res: Respon
     identity: session.identity_name ? {
       name: session.identity_name,
       description: session.identity_description,
-      avatar: session.identity_avatar ?? "🤖",
+      avatar: session.identity_avatar ?? agent?.avatar_emoji ?? "🦞",
     } : null,
-    agent_url: session.agent_url,
-    endpoint_url: session.endpoint_url,
-    webhook_events: parseWebhookEvents(session.webhook_events),
+    agent_url: agent?.agent_url ?? session.agent_url,
+    endpoint_url: agent?.endpoint_url ?? session.endpoint_url,
+    webhook_events: agent?.webhook_events ?? parseWebhookEvents(session.webhook_events),
     api_key_prefix: agent?.api_key_prefix ?? null,
     wallet_address: agent?.wallet_address ?? null,
     connection_status: agent?.connection_status ?? null,
+    wallet_download_ready: Boolean(session.encrypted_wallet_bundle),
+    wallet_downloaded_at: session.wallet_downloaded_at,
     last_error: session.last_error,
   });
 });
@@ -743,9 +833,9 @@ router.get("/agents/byo/claim/:claimToken", async (req: Request, res: Response) 
     expires_at: session.expires_at,
     submit_url: claimUrl,
     method: "POST",
-    required_fields: ["name"],
-    optional_fields: ["description", "emoji", "agent_url", "endpoint_url", "webhook_events"],
-    instructions: "POST your identity payload to this same URL. Quantik will return your API credentials in the response.",
+    required_fields: ["name", "agent_url"],
+    optional_fields: ["description", "endpoint_url", "webhook_events"],
+    instructions: "POST your identity payload to this same URL. Include your public agent URL. Quantik will return your runtime credentials in the response, and the owner will finalize webhook delivery in the dashboard before activation.",
     runtime_urls: {
       skill_manifest_url: `${getBaseUrl(req)}/api/skill.md`,
       skill_json_url: `${getBaseUrl(req)}/api/skill.json`,
@@ -790,7 +880,7 @@ router.post("/agents/byo/claim/:claimToken", async (req: Request, res: Response)
     return;
   }
 
-  const agentUrl = optionalExternalUrl((req.body as { agent_url?: unknown }).agent_url, "agent_url");
+  const agentUrl = requiredExternalUrl((req.body as { agent_url?: unknown }).agent_url, "agent_url");
   if (!agentUrl.ok) {
     res.status(400).json({ error: agentUrl.error });
     return;
@@ -830,6 +920,8 @@ router.post("/agents/byo/claim/:claimToken", async (req: Request, res: Response)
       agent_url: provisioned.agent.agent_url,
       endpoint_url: provisioned.agent.endpoint_url,
       webhook_events: serializeEvents(provisioned.agent.webhook_events),
+      encrypted_wallet_bundle: provisioned.walletEscrowCiphertext,
+      wallet_downloaded_at: null,
       last_error: null,
       updated_at: claimedAt,
     };
@@ -851,6 +943,54 @@ router.post("/agents/byo/claim/:claimToken", async (req: Request, res: Response)
   }
 });
 
+router.post("/agents/byo/onboarding/:sessionId/wallet-download", async (req: Request, res: Response) => {
+  const userId = await getUserIdOrReject(req, res);
+  if (!userId) return;
+  const sessionId = Array.isArray(req.params.sessionId) ? req.params.sessionId[0] : req.params.sessionId;
+
+  const session = await loadSessionById(userId, sessionId);
+  if (!session) {
+    res.status(404).json({ error: "Onboarding session not found" });
+    return;
+  }
+
+  if (session.status !== "claimed") {
+    res.status(409).json({ error: "Wallet backup is not available until the OpenClaw claim is complete" });
+    return;
+  }
+
+  if (session.wallet_downloaded_at) {
+    res.status(410).json({ error: "Wallet backup has already been downloaded" });
+    return;
+  }
+
+  if (!session.encrypted_wallet_bundle) {
+    res.status(410).json({ error: "Wallet backup is no longer available" });
+    return;
+  }
+
+  try {
+    const wallet = deserializeWalletBundle(session.encrypted_wallet_bundle);
+    const downloadedAt = Date.now();
+    const updates = {
+      encrypted_wallet_bundle: null,
+      wallet_downloaded_at: downloadedAt,
+      updated_at: downloadedAt,
+    };
+    updateSqliteSession(session.id, updates);
+    await updatePgSession(session.id, updates);
+
+    res.json({
+      address: wallet.address,
+      privateKey: wallet.privateKey,
+      seedPhrase: wallet.seedPhrase,
+    });
+  } catch (err) {
+    console.error("[byoOnboarding] wallet download error:", err);
+    res.status(500).json({ error: "Wallet backup is unavailable" });
+  }
+});
+
 router.patch("/agents/:id/byo-config", async (req: Request, res: Response) => {
   const userId = await getUserIdOrReject(req, res);
   if (!userId) return;
@@ -861,35 +1001,68 @@ router.patch("/agents/:id/byo-config", async (req: Request, res: Response) => {
     return;
   }
 
-  const endpointUrl = optionalExternalUrl((req.body as { endpoint_url?: unknown }).endpoint_url, "endpoint_url");
-  if (!endpointUrl.ok) {
-    res.status(400).json({ error: endpointUrl.error });
+  const currentAgent = await buildAgentSummary(agentId);
+  if (!currentAgent) {
+    res.status(404).json({ error: "BYO agent not found" });
     return;
   }
 
-  const agentUrl = optionalExternalUrl((req.body as { agent_url?: unknown }).agent_url, "agent_url");
-  if (!agentUrl.ok) {
-    res.status(400).json({ error: agentUrl.error });
-    return;
+  const requestBody = req.body as {
+    endpoint_url?: unknown;
+    agent_url?: unknown;
+    webhook_events?: unknown;
+  };
+  const hasEndpointUrl = Object.prototype.hasOwnProperty.call(requestBody, "endpoint_url");
+  const hasAgentUrl = Object.prototype.hasOwnProperty.call(requestBody, "agent_url");
+  const hasWebhookEvents = Object.prototype.hasOwnProperty.call(requestBody, "webhook_events");
+
+  let nextEndpointUrl = currentAgent.endpoint_url;
+  if (hasEndpointUrl) {
+    const endpointUrl = optionalExternalUrl(requestBody.endpoint_url, "endpoint_url");
+    if (!endpointUrl.ok) {
+      res.status(400).json({ error: endpointUrl.error });
+      return;
+    }
+    nextEndpointUrl = endpointUrl.normalizedUrl;
   }
 
-  const webhookEvents = normalizeWebhookEvents((req.body as { webhook_events?: unknown }).webhook_events);
-  if (!webhookEvents.ok) {
-    res.status(400).json({ error: webhookEvents.error });
-    return;
+  let nextAgentUrl = currentAgent.agent_url;
+  if (hasAgentUrl) {
+    const agentUrl = requiredExternalUrl(requestBody.agent_url, "agent_url");
+    if (!agentUrl.ok) {
+      res.status(400).json({ error: agentUrl.error });
+      return;
+    }
+    nextAgentUrl = agentUrl.normalizedUrl;
+  }
+
+  let nextWebhookEvents = currentAgent.webhook_events;
+  if (hasWebhookEvents) {
+    const webhookEvents = normalizeWebhookEvents(requestBody.webhook_events);
+    if (!webhookEvents.ok) {
+      res.status(400).json({ error: webhookEvents.error });
+      return;
+    }
+    nextWebhookEvents = webhookEvents.events;
   }
 
   await updateSqliteByoConfig({
     agentId,
-    endpointUrl: endpointUrl.normalizedUrl,
-    agentUrl: agentUrl.normalizedUrl,
-    webhookEvents: webhookEvents.events,
+    endpointUrl: nextEndpointUrl,
+    agentUrl: nextAgentUrl,
+    webhookEvents: nextWebhookEvents,
   });
   await updatePgByoConfig({
     agentId,
-    endpointUrl: endpointUrl.normalizedUrl,
-    agentUrl: agentUrl.normalizedUrl,
-    webhookEvents: webhookEvents.events,
+    endpointUrl: nextEndpointUrl,
+    agentUrl: nextAgentUrl,
+    webhookEvents: nextWebhookEvents,
+  });
+  await syncSessionConfigForAgent({
+    agentId,
+    endpointUrl: nextEndpointUrl,
+    agentUrl: nextAgentUrl,
+    webhookEvents: nextWebhookEvents,
   });
 
   const agent = await buildAgentSummary(agentId);

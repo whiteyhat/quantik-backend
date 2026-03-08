@@ -164,12 +164,19 @@ export async function migratePg(): Promise<void> {
       agent_url TEXT,
       endpoint_url TEXT,
       webhook_events TEXT DEFAULT '["*"]',
+      encrypted_wallet_bundle TEXT,
+      wallet_downloaded_at BIGINT,
       last_error TEXT,
       created_at BIGINT NOT NULL,
       updated_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_user ON byo_onboarding_sessions(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
+  `);
+
+  await db.query(`
+    ALTER TABLE byo_onboarding_sessions ADD COLUMN IF NOT EXISTS encrypted_wallet_bundle TEXT;
+    ALTER TABLE byo_onboarding_sessions ADD COLUMN IF NOT EXISTS wallet_downloaded_at BIGINT;
   `);
 
   // ── Trading tables (with user_id for multi-tenancy) ─────────────────────────

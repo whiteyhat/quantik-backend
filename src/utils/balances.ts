@@ -5,6 +5,15 @@ const POLYGON_RPC_URLS = ["https://polygon.drpc.org", "https://polygon-bor-rpc.p
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 
+export type UsdcBalanceStatus = "live" | "rpc_unavailable" | "no_address";
+
+export interface UsdcBalanceSnapshot {
+  balance: number;
+  status: UsdcBalanceStatus;
+  rpcUrl: string | null;
+  error: string | null;
+}
+
 async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[]): Promise<string> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
   const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(8000) });
@@ -14,8 +23,24 @@ async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[])
 }
 
 export async function getUsdcBalance(address: string = WALLET_ADDRESS): Promise<number> {
+  const snapshot = await getUsdcBalanceSnapshot(address);
+  return snapshot.balance;
+}
+
+export async function getUsdcBalanceSnapshot(address: string | null | undefined = WALLET_ADDRESS): Promise<UsdcBalanceSnapshot> {
+  if (!address) {
+    return {
+      balance: 0,
+      status: "no_address",
+      rpcUrl: null,
+      error: "No wallet address available",
+    };
+  }
+
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
+  let lastError: string | null = null;
+
   for (const rpcUrl of POLYGON_RPC_URLS) {
     try {
       const [uBH, uNH] = await Promise.all([
@@ -23,10 +48,24 @@ export async function getUsdcBalance(address: string = WALLET_ADDRESS): Promise<
         polygonRpcCall(rpcUrl, "eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]),
       ]);
       const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-      return Number(safeBigInt(uBH) + safeBigInt(uNH)) / 1e6;
-    } catch { continue; }
+      return {
+        balance: Number(safeBigInt(uBH) + safeBigInt(uNH)) / 1e6,
+        status: "live",
+        rpcUrl,
+        error: null,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      continue;
+    }
   }
-  return 0;
+
+  return {
+    balance: 0,
+    status: "rpc_unavailable",
+    rpcUrl: null,
+    error: lastError ?? "All Polygon RPC requests failed",
+  };
 }
 
 export async function getClobBalance(): Promise<number> {

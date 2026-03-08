@@ -1,15 +1,52 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/schema";
+import { getUserIdAsync } from "../middleware/auth";
+import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { generateWalletCredentials } from "../wallet/generate";
+import { getUsdcBalanceSnapshot } from "../utils/balances";
 
 const router = Router();
+
+async function getRequiredUserId(req: Request, res: Response): Promise<string | null> {
+  const userId = await getUserIdAsync(req);
+  if (!userId) {
+    res.status(401).json({ error: "Authentication required" });
+    return null;
+  }
+  return userId;
+}
+
+async function loadWalletAddressForUser(userId: string): Promise<string | null> {
+  if (isPgEnabled()) {
+    const user = await pgQueryOne<{ agent_id: string | null }>(
+      "SELECT agent_id FROM users WHERE id = $1",
+      [userId]
+    );
+    if (!user?.agent_id) return null;
+
+    const agent = await pgQueryOne<{ wallet_address: string | null }>(
+      "SELECT wallet_address FROM agents WHERE id = $1",
+      [user.agent_id]
+    );
+    return agent?.wallet_address ?? null;
+  }
+
+  const db = getDb();
+  const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
+  if (!user?.agent_id) return null;
+
+  const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string | null } | undefined;
+  return agent?.wallet_address ?? null;
+}
 
 // ── POST /api/wallet/generate — Create a new EVM wallet via WDK ──────────────
 // Stateless: generates wallet, returns credentials, stores NOTHING.
 // The private key and seed phrase are returned once and never persisted.
 
-router.post("/generate", async (_req: Request, res: Response) => {
+router.post("/generate", async (req: Request, res: Response) => {
   try {
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
     res.json(await generateWalletCredentials());
   } catch (err) {
     console.error("[wallet:generate] error:", err instanceof Error ? err.message : err);
@@ -54,8 +91,39 @@ router.get("/positions", async (_req, res) => {
   }
 });
 
-router.get("/balance", async (_req, res) => {
-  res.json({ balance: 0 }); // Placeholder
+router.get("/balance", async (req, res) => {
+  try {
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
+
+    const address = await loadWalletAddressForUser(userId);
+    if (!address) {
+      res.json({
+        balance: 0,
+        address: null,
+        status: "no_wallet",
+        liveBalanceAvailable: false,
+        message: "No wallet assigned to this agent yet.",
+      });
+      return;
+    }
+
+    const snapshot = await getUsdcBalanceSnapshot(address);
+    res.json({
+      balance: snapshot.balance,
+      address,
+      status: snapshot.status === "live" ? "live" : "unavailable",
+      liveBalanceAvailable: snapshot.status === "live",
+      message: snapshot.status === "live"
+        ? (snapshot.balance > 0
+            ? "Live on-chain USDC balance available."
+            : "Wallet created but no on-chain USDC balance detected yet.")
+        : "Unable to read the on-chain USDC balance right now.",
+    });
+  } catch (err) {
+    console.error("[wallet:balance] error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 export default router;

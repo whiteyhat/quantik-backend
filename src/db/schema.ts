@@ -611,6 +611,8 @@ function migrate(db: Database.Database): void {
       agent_url TEXT,
       endpoint_url TEXT,
       webhook_events TEXT DEFAULT '["*"]',
+      encrypted_wallet_bundle TEXT,
+      wallet_downloaded_at INTEGER,
       last_error TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -618,6 +620,8 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_user ON byo_onboarding_sessions(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
   `);
+  try { db.exec("ALTER TABLE byo_onboarding_sessions ADD COLUMN encrypted_wallet_bundle TEXT"); } catch {}
+  try { db.exec("ALTER TABLE byo_onboarding_sessions ADD COLUMN wallet_downloaded_at INTEGER"); } catch {}
 
   // ── Chat History (persistent across sessions) ──────────────────────────
   db.exec(`

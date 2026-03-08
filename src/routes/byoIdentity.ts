@@ -147,7 +147,8 @@ export function normalizeClaimedByoIdentity(body: {
     ok: true,
     identity: {
       name,
-      avatar: sanitizeEmoji(body.emoji) ?? sanitizeEmoji(body.avatar) ?? "🤖",
+      // OpenClaw imports always render as lobster agents in Quantik.
+      avatar: "🦞",
       description: sanitizeDescription(body.description),
     },
   };

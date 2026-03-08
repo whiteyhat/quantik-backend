@@ -1,10 +1,11 @@
 import { Router, Request } from "express";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { AttributionEngine } from "../monitoring/attribution";
 import { DriftDetection } from "../monitoring/drift";
 import { ModelCalibration } from "../monitoring/calibration";
-import { getUserId } from "../middleware/auth";
-import { getUsdcBalance } from "../utils/balances";
+import { getUserIdAsync } from "../middleware/auth";
+import { getUsdcBalanceSnapshot } from "../utils/balances";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -75,18 +76,34 @@ router.get("/summary", async (req: Request, res) => {
     // Look up agent wallet address via authenticated user
     let address = "";
     let onChainUsdc = 0;
-    const userId = getUserId(req);
+    const userId = await getUserIdAsync(req);
     if (userId) {
-      const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
-      if (user?.agent_id) {
-        const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string } | undefined;
-        address = agent?.wallet_address ?? "";
+      if (isPgEnabled()) {
+        const user = await pgQueryOne<{ agent_id: string | null }>(
+          "SELECT agent_id FROM users WHERE id = $1",
+          [userId]
+        );
+        if (user?.agent_id) {
+          const agent = await pgQueryOne<{ wallet_address: string | null }>(
+            "SELECT wallet_address FROM agents WHERE id = $1",
+            [user.agent_id]
+          );
+          address = agent?.wallet_address ?? "";
+        }
+      } else {
+        const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
+        if (user?.agent_id) {
+          const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string } | undefined;
+          address = agent?.wallet_address ?? "";
+        }
       }
     }
 
-    // On-chain USDC balance (best-effort, non-blocking)
-    if (address) {
-      try { onChainUsdc = await getUsdcBalance(address); } catch { /* silent */ }
+    const balanceSnapshot = address
+      ? await getUsdcBalanceSnapshot(address)
+      : { balance: 0, status: "no_address" as const, rpcUrl: null, error: "No wallet address available" };
+    if (balanceSnapshot.status === "live") {
+      onChainUsdc = balanceSnapshot.balance;
     }
 
     // All-time trade count
@@ -105,10 +122,27 @@ router.get("/summary", async (req: Request, res) => {
     // Deployed capital (sum of open position sizes)
     const deployedCapital = openExecs.reduce((sum, e) => sum + (e.amount ?? 0), 0);
 
-    // Total portfolio value: on-chain USDC if available, otherwise estimate from deployed + P&L
-    const totalValue = onChainUsdc > 0 ? onChainUsdc : Math.max(deployedCapital + cumulativePnl, 0) || 50000;
-    const pnlPct = totalValue > 0 ? cumulativePnl / totalValue : 0;
-    const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0;
+    const trackedPortfolioValue = balanceSnapshot.status === "live"
+      ? Math.max(onChainUsdc + deployedCapital + unrealizedToday, 0)
+      : null;
+    const balanceStatus =
+      !address ? "no_wallet" :
+      balanceSnapshot.status !== "live" ? "unavailable" :
+      trackedPortfolioValue && trackedPortfolioValue > 0 ? "live" :
+      "unfunded";
+    const balanceMessage =
+      balanceStatus === "no_wallet"
+        ? "No wallet assigned to this agent yet."
+        : balanceStatus === "unavailable"
+          ? "Unable to read the on-chain USDC balance right now."
+          : balanceStatus === "unfunded"
+            ? "Wallet created but no on-chain USDC balance or tracked open positions detected yet."
+            : deployedCapital > 0
+              ? "Live on-chain USDC balance plus tracked open exposure."
+              : "Live on-chain USDC balance available.";
+    const totalValue = trackedPortfolioValue;
+    const pnlPct = totalValue && totalValue > 0 ? cumulativePnl / totalValue : null;
+    const pnlTodayPct = totalValue && totalValue > 0 ? pnlToday / totalValue : null;
     const winRate = total > 0 ? (wins ?? 0) / total : 0;
 
     // Circuit breaker status
@@ -124,7 +158,7 @@ router.get("/summary", async (req: Request, res) => {
     `).get() as { drawdown_limit_pct: number; kelly_fraction_multiplier: number } | undefined;
 
     const kellyMultiplier = gcb?.kelly_fraction_multiplier ?? 0.25;
-    const kellyUtilization = totalValue > 0 && kellyMultiplier > 0
+    const kellyUtilization = totalValue !== null && totalValue > 0 && kellyMultiplier > 0
       ? deployedCapital / (totalValue * kellyMultiplier)
       : 0;
 
@@ -144,6 +178,9 @@ router.get("/summary", async (req: Request, res) => {
       kellyUtilization,
       drawdown: cbRow?.drawdown_pct ?? 0,
       drawdownLimit: gcb?.drawdown_limit_pct ?? 0.15,
+      balanceStatus,
+      balanceMessage,
+      liveBalanceAvailable: balanceSnapshot.status === "live",
       // Existing performance fields
       realizedToday,
       unrealizedToday,

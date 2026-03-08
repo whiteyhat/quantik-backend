@@ -5,8 +5,6 @@ import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
 import { requireEitherAuth } from "../middleware/apiKeyAuth";
-import { normalizeLegacyByoIdentity, resolveByoIdentity, validateExternalHttpsUrl } from "./byoIdentity";
-import { provisionByoAgent } from "./byoOnboarding";
 
 const router = Router();
 
@@ -144,6 +142,112 @@ function generateAgentCode(): string {
 
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
+interface OwnedAgentRecord {
+  id: string;
+  user_id: string;
+  agent_type: string;
+  status: string;
+  last_heartbeat: number | null;
+  connection_status: string | null;
+}
+
+async function getRequiredUserId(req: Request, res: Response): Promise<string | null> {
+  const userId = await getUserIdAsync(req);
+  if (!userId) {
+    res.status(401).json({ error: "Authentication required" });
+    return null;
+  }
+  return userId;
+}
+
+async function hasExistingAgentForUser(userId: string): Promise<boolean> {
+  if (isPgEnabled()) {
+    const existing = await pgQuery(
+      `SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated' LIMIT 1`,
+      [userId]
+    );
+    return existing.length > 0;
+  }
+
+  const db = getDb();
+  const existing = db.prepare(
+    `SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1`
+  ).get(userId);
+  return Boolean(existing);
+}
+
+async function loadOwnedAgent(agentId: string, userId: string): Promise<OwnedAgentRecord | null> {
+  if (isPgEnabled()) {
+    return await pgQueryOne<OwnedAgentRecord>(
+      `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status
+       FROM agents WHERE id = $1 AND user_id = $2`,
+      [agentId, userId]
+    );
+  }
+
+  const db = getDb();
+  const agent = db.prepare(
+    `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status
+     FROM agents WHERE id = ? AND user_id = ?`
+  ).get(agentId, userId) as OwnedAgentRecord | undefined;
+  return agent ?? null;
+}
+
+function updateSqliteAgentFields(agentId: string, fields: Record<string, unknown>): void {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) return;
+
+  const db = getDb();
+  const assignments = entries.map(([field]) => `${field} = ?`).join(", ");
+  db.prepare(`UPDATE agents SET ${assignments} WHERE id = ?`).run(
+    ...entries.map(([, value]) => value),
+    agentId
+  );
+}
+
+async function updatePgAgentFields(agentId: string, fields: Record<string, unknown>): Promise<void> {
+  if (!isPgEnabled()) return;
+
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) return;
+
+  const assignments = entries.map(([field], idx) => `${field} = $${idx + 1}`).join(", ");
+  await pgExec(
+    `UPDATE agents SET ${assignments} WHERE id = $${entries.length + 1}`,
+    [...entries.map(([, value]) => value), agentId]
+  );
+}
+
+async function syncAgentFields(agentId: string, fields: Record<string, unknown>): Promise<void> {
+  if (isPgEnabled()) {
+    await updatePgAgentFields(agentId, fields);
+  }
+  updateSqliteAgentFields(agentId, fields);
+}
+
+async function loadActiveApiKey(agentId: string): Promise<{ id: string; last_used_at: number | null } | null> {
+  if (isPgEnabled()) {
+    return await pgQueryOne<{ id: string; last_used_at: number | null }>(
+      `SELECT id, last_used_at
+       FROM api_keys
+       WHERE agent_id = $1 AND revoked_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [agentId]
+    );
+  }
+
+  const db = getDb();
+  const apiKey = db.prepare(
+    `SELECT id, last_used_at
+     FROM api_keys
+     WHERE agent_id = ? AND revoked_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1`
+  ).get(agentId) as { id: string; last_used_at: number | null } | undefined;
+  return apiKey ?? null;
+}
+
 // ── Derive risk config from agent factory attributes ──────────
 
 function deriveRiskConfig(attrs: {
@@ -212,6 +316,8 @@ async function applyDerivedRiskConfigPg(
 
 router.post("/agents", async (req: Request, res: Response) => {
   const body = req.body as AgentCreateBody;
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
 
   if (!body.name || typeof body.name !== "string" || !body.name.trim()) {
     res.status(400).json({ error: "name is required" });
@@ -223,42 +329,19 @@ router.post("/agents", async (req: Request, res: Response) => {
     return;
   }
 
-  // ── Hard limit: 1 agent per user ──────────────────────────────
   try {
-    if (isPgEnabled()) {
-      const userId = await getUserIdAsync(req);
-      if (userId) {
-        const existing = await pgQuery(
-          `SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated' LIMIT 1`,
-          [userId]
-        );
-        if (existing.length > 0) {
-          res.status(409).json({
-            error: "AGENT_LIMIT_REACHED",
-            message: "You already have an agent. Delete your current agent before creating a new one.",
-          });
-          return;
-        }
-      }
-    } else {
-      const userId = getUserId(req);
-      if (userId) {
-        const db = getDb();
-        const existing = db.prepare(
-          `SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1`
-        ).get(userId);
-        if (existing) {
-          res.status(409).json({
-            error: "AGENT_LIMIT_REACHED",
-            message: "You already have an agent. Delete your current agent before creating a new one.",
-          });
-          return;
-        }
-      }
+    const existing = await hasExistingAgentForUser(userId);
+    if (existing) {
+      res.status(409).json({
+        error: "AGENT_LIMIT_REACHED",
+        message: "You already have an agent. Delete your current agent before creating a new one.",
+      });
+      return;
     }
   } catch (err) {
     console.error("[agents] limit check error:", err);
-    // fail open — let creation proceed if check fails
+    res.status(500).json({ error: "Failed to verify existing agent status" });
+    return;
   }
 
   const id = uuidv4();
@@ -290,7 +373,6 @@ router.post("/agents", async (req: Request, res: Response) => {
 
   try {
     if (isPgEnabled()) {
-      const userId = await getUserIdAsync(req);
       await pgExec(`
         INSERT INTO agents (
           id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
@@ -308,7 +390,6 @@ router.post("/agents", async (req: Request, res: Response) => {
       const derivedRisk = deriveRiskConfig(body);
       await applyDerivedRiskConfigPg(derivedRisk);
     } else {
-      const userId = getUserId(req);
       const db = getDb();
       db.prepare(`
         INSERT INTO agents (
@@ -357,160 +438,35 @@ router.post("/agents", async (req: Request, res: Response) => {
   }
 });
 
-// ── POST /api/v1/agents/byo — Create BYO agent ──────────────
+// ── POST /api/v1/agents/byo — Legacy path removed in favor of onboarding ────
 
-interface ByoCreateBody {
-  name?: string;
-  avatar?: string;
-  description?: string;
-  endpoint_url?: string;
-  agent_url?: string;
-  webhook_events?: string[];
-}
-
-router.post("/agents/byo", async (req: Request, res: Response) => {
-  const body = req.body as ByoCreateBody;
-  const endpointInput = typeof body.endpoint_url === "string" ? body.endpoint_url.trim() : "";
-  const agentInput = typeof body.agent_url === "string" ? body.agent_url.trim() : "";
-
-  let endpointUrl: string | null = null;
-  if (endpointInput) {
-    const endpointValidation = validateExternalHttpsUrl(endpointInput, "endpoint_url");
-    if (!endpointValidation.ok) {
-      res.status(400).json({ error: endpointValidation.error });
-      return;
-    }
-    endpointUrl = endpointValidation.normalizedUrl;
-  }
-
-  let agentUrl: string | null = null;
-  if (agentInput) {
-    const agentValidation = validateExternalHttpsUrl(agentInput, "agent_url");
-    if (!agentValidation.ok) {
-      res.status(400).json({ error: agentValidation.error });
-      return;
-    }
-    agentUrl = agentValidation.normalizedUrl;
-  }
-
-  let identitySource: "remote" | "random_fallback" | "manual_legacy" = "manual_legacy";
-  let identityWarning: string | null = null;
-  let resolvedName: string;
-  let resolvedAvatar: string;
-  let resolvedDescription: string | null;
-
-  if (agentUrl) {
-    const resolved = await resolveByoIdentity(agentUrl);
-    resolvedName = resolved.name;
-    resolvedAvatar = resolved.avatar;
-    resolvedDescription = resolved.description;
-    identitySource = resolved.identity_source;
-    if (resolved.identity_source === "random_fallback") {
-      identityWarning = "Could not fetch identity from external agent. A random identity was assigned.";
-    }
-  } else {
-    // Legacy compatibility path
-    if (typeof body.name === "string" && body.name.length > 100) {
-      res.status(400).json({ error: "name must be 100 characters or less" });
-      return;
-    }
-    if (typeof body.description === "string" && body.description.length > 500) {
-      res.status(400).json({ error: "description must be 500 characters or less" });
-      return;
-    }
-
-    const normalized = normalizeLegacyByoIdentity(body);
-    if (!normalized.ok) {
-      res.status(400).json({ error: normalized.error });
-      return;
-    }
-    resolvedName = normalized.identity.name;
-    resolvedAvatar = normalized.identity.avatar;
-    resolvedDescription = normalized.identity.description;
-  }
-
-  // 1-agent-per-user limit (same as regular create)
-  try {
-    const userId = isPgEnabled() ? await getUserIdAsync(req) : getUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Authentication required" });
-      return;
-    }
-
-    const db = getDb();
-    const existing = db.prepare(
-      `SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1`
-    ).get(userId);
-
-    if (existing) {
-      res.status(409).json({
-        error: "AGENT_LIMIT_REACHED",
-        message: "You already have an agent. Delete your current agent before creating a new one.",
-      });
-      return;
-    }
-
-    const provisioned = await provisionByoAgent(req, {
-      userId,
-      name: resolvedName,
-      avatar: resolvedAvatar,
-      description: resolvedDescription,
-      agentUrl,
-      endpointUrl,
-      webhookEvents: body.webhook_events ?? ["*"],
-    });
-
-    res.status(201).json({
-      id: provisioned.agent.id,
-      status: "inactive",
-      agent_type: "byo",
-      name: provisioned.agent.name,
-      avatar_emoji: provisioned.agent.avatar_emoji,
-      description: provisioned.agent.description,
-      endpoint_url: provisioned.agent.endpoint_url,
-      agent_url: provisioned.agent.agent_url,
-      webhook_events: provisioned.agent.webhook_events,
-      identity_source: identitySource,
-      identity_warning: identityWarning,
-      connection_status: "pending",
-      wallet_address: provisioned.agent.wallet_address,
-      api_key: provisioned.credentials.api_key,
-      api_key_prefix: provisioned.agent.api_key_prefix,
-      webhook_secret: provisioned.credentials.webhook_secret,
-      created_at: Date.now(),
-      updated_at: Date.now(),
-      deployed_at: null,
-      warning: "Save this API key and webhook secret now. They will never be shown again.",
-    });
-  } catch (err) {
-    console.error("[agents] byo create error:", err);
-    res.status(500).json({ error: "Failed to create BYO agent" });
-  }
+router.post("/agents/byo", (_req: Request, res: Response) => {
+  res.status(410).json({
+    error: "BYO_LEGACY_DEPRECATED",
+    message: "Use /api/v1/agents/byo/onboarding and complete the claim flow instead.",
+  });
 });
 
 // ── POST /api/v1/agents/:id/health-check — Verify connection ─
 
-router.post("/agents/:id/health-check", (req: Request, res: Response) => {
-  const userId = getUserId(req);
-  if (!userId) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
+router.post("/agents/:id/health-check", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
-  const db = getDb();
-  const agent = db.prepare(
-    `SELECT id, agent_type, connection_status, last_heartbeat FROM agents WHERE id = ? AND user_id = ?`
-  ).get(req.params.id, userId) as { id: string; agent_type: string; connection_status: string; last_heartbeat: number | null } | undefined;
+  const agent = await loadOwnedAgent(agentId, userId);
 
   if (!agent) {
     res.status(404).json({ error: "Agent not found" });
     return;
   }
 
-  // Check if there's an active API key
-  const apiKey = db.prepare(
-    `SELECT id, last_used_at FROM api_keys WHERE agent_id = ? AND revoked_at IS NULL LIMIT 1`
-  ).get(agent.id) as { id: string; last_used_at: number | null } | undefined;
+  if (agent.agent_type !== "byo") {
+    res.status(400).json({ error: "Health check is only available for BYO agents" });
+    return;
+  }
+
+  const apiKey = await loadActiveApiKey(agent.id);
 
   const now = Date.now();
   let status: string;
@@ -525,7 +481,7 @@ router.post("/agents/:id/health-check", (req: Request, res: Response) => {
     status = "pending";
   }
 
-  db.prepare("UPDATE agents SET connection_status = ?, updated_at = ? WHERE id = ?").run(status, now, agent.id);
+  await syncAgentFields(agent.id, { connection_status: status, updated_at: now });
 
   res.json({
     ok: true,
@@ -699,9 +655,12 @@ router.patch("/agents/:id", (req: Request, res: Response) => {
 
 // ── POST /api/v1/agents/:id/deploy — Activate agent ─────────
 
-router.post("/agents/:id/deploy", (req: Request, res: Response) => {
-  const db = getDb();
-  const agent = db.prepare(`SELECT id, status FROM agents WHERE id = ?`).get(req.params.id) as { id: string; status: string } | undefined;
+router.post("/agents/:id/deploy", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+
+  const agent = await loadOwnedAgent(agentId, userId);
 
   if (!agent) {
     res.status(404).json({ error: "Agent not found" });
@@ -709,40 +668,49 @@ router.post("/agents/:id/deploy", (req: Request, res: Response) => {
   }
 
   const now = Date.now();
-  db.prepare(`UPDATE agents SET status = 'active', deployed_at = ?, updated_at = ? WHERE id = ?`)
-    .run(now, now, req.params.id);
+  await syncAgentFields(agentId, {
+    status: "active",
+    deployed_at: now,
+    updated_at: now,
+  });
 
   res.json({ ok: true, status: "active", deployed_at: now });
 });
 
 // ── POST /api/v1/agents/:id/pause — Pause agent ─────────────
 
-router.post("/agents/:id/pause", (req: Request, res: Response) => {
-  const db = getDb();
-  const now = Date.now();
-  const result = db.prepare(`UPDATE agents SET status = 'paused', updated_at = ? WHERE id = ?`)
-    .run(now, req.params.id);
+router.post("/agents/:id/pause", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
-  if (result.changes === 0) {
+  const agent = await loadOwnedAgent(agentId, userId);
+  if (!agent) {
     res.status(404).json({ error: "Agent not found" });
     return;
   }
+
+  const now = Date.now();
+  await syncAgentFields(agentId, { status: "paused", updated_at: now });
 
   res.json({ ok: true, status: "paused" });
 });
 
 // ── POST /api/v1/agents/:id/terminate — Terminate agent ─────
 
-router.post("/agents/:id/terminate", (req: Request, res: Response) => {
-  const db = getDb();
-  const now = Date.now();
-  const result = db.prepare(`UPDATE agents SET status = 'terminated', updated_at = ? WHERE id = ?`)
-    .run(now, req.params.id);
+router.post("/agents/:id/terminate", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
-  if (result.changes === 0) {
+  const agent = await loadOwnedAgent(agentId, userId);
+  if (!agent) {
     res.status(404).json({ error: "Agent not found" });
     return;
   }
+
+  const now = Date.now();
+  await syncAgentFields(agentId, { status: "terminated", updated_at: now });
 
   res.json({ ok: true, status: "terminated" });
 });
@@ -949,6 +917,13 @@ router.delete("/agents/:id", async (req: Request, res: Response) => {
       await pgExec(`DELETE FROM api_keys WHERE agent_id = $1`, [req.params.id]);
       await pgExec(`DELETE FROM agents WHERE id = $1 AND user_id = $2`, [req.params.id, userId]);
       await pgExec(`UPDATE users SET agent_id = NULL WHERE id = $1`, [userId]);
+
+      const db = getDb();
+      db.prepare(`DELETE FROM webhook_delivery_log WHERE agent_id = ?`).run(req.params.id);
+      db.prepare(`DELETE FROM byo_request_log WHERE agent_id = ?`).run(req.params.id);
+      db.prepare(`DELETE FROM api_keys WHERE agent_id = ?`).run(req.params.id);
+      db.prepare(`DELETE FROM agents WHERE id = ?`).run(req.params.id);
+      db.prepare(`UPDATE users SET agent_id = NULL WHERE id = ?`).run(userId);
     } else {
       const userId = getUserId(req);
       if (!userId) {
