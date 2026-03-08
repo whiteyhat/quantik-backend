@@ -407,6 +407,8 @@ function migrate(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS executions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT,
+      agent_id TEXT,
       slug TEXT NOT NULL,
       side TEXT NOT NULL,
       amount REAL NOT NULL,
@@ -418,13 +420,37 @@ function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC);
   `);
+
+  try { db.exec("ALTER TABLE executions ADD COLUMN user_id TEXT"); } catch {}
+  try { db.exec("ALTER TABLE executions ADD COLUMN agent_id TEXT"); } catch {}
 
   // Dedup executions + unique index per slug per day
   try {
     db.exec(`DELETE FROM executions WHERE rowid NOT IN (SELECT MIN(rowid) FROM executions GROUP BY slug, DATE(executed_at/1000, 'unixepoch'))`);
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_executions_slug_day ON executions (slug, DATE(executed_at/1000, 'unixepoch'))`);
   } catch (e) { console.log("[schema] executions index:", e); }
+
+  try {
+    db.exec(`
+      UPDATE executions
+      SET user_id = COALESCE(user_id, (
+            SELECT users.id
+            FROM users
+            JOIN agents ON agents.id = users.agent_id
+            LIMIT 1
+          )),
+          agent_id = COALESCE(agent_id, (
+            SELECT agents.id
+            FROM agents
+            JOIN users ON users.agent_id = agents.id
+            LIMIT 1
+          ))
+      WHERE user_id IS NULL OR agent_id IS NULL
+    `);
+  } catch {}
 
   // Add execution columns to scanner_results if missing
   try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_status TEXT DEFAULT NULL"); } catch {}
@@ -542,6 +568,8 @@ function migrate(db: Database.Database): void {
   try { db.exec("ALTER TABLE agents ADD COLUMN description TEXT"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN webhook_secret TEXT"); } catch {}
   try { db.exec("ALTER TABLE agents ADD COLUMN webhook_events TEXT DEFAULT '[\"*\"]'"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN autopilot_enabled INTEGER NOT NULL DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN autopilot_updated_at INTEGER"); } catch {}
 
   // ── API Keys (BYO agent authentication) ──────────────────────────
   db.exec(`

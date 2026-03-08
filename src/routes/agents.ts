@@ -5,6 +5,8 @@ import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
 import { requireEitherAuth } from "../middleware/apiKeyAuth";
+import { getWalletFundingSnapshot } from "../utils/balances";
+import { computeHealthScore } from "../monitoring/healthScore";
 
 const router = Router();
 
@@ -151,6 +153,25 @@ interface OwnedAgentRecord {
   connection_status: string | null;
 }
 
+interface OwnedAgentContext extends OwnedAgentRecord {
+  name: string;
+  wallet_address: string | null;
+  endpoint_url: string | null;
+  webhook_secret: string | null;
+  autopilot_enabled: number | boolean | null;
+  autopilot_updated_at: number | null;
+}
+
+interface UsageStats {
+  total_requests_24h: number;
+  requests_last_hour: number;
+  error_count_24h: number;
+  error_rate_24h: string;
+  by_tool: { tool: string; requests: number; avg_latency_ms: number | null; errors: number }[];
+  daily_breakdown: { day: string; count: number; errors: number }[];
+  recent_errors: { tool_name: string; status_code: number; error: string | null; created_at: number }[];
+}
+
 async function getRequiredUserId(req: Request, res: Response): Promise<string | null> {
   const userId = await getUserIdAsync(req);
   if (!userId) {
@@ -191,6 +212,150 @@ async function loadOwnedAgent(agentId: string, userId: string): Promise<OwnedAge
      FROM agents WHERE id = ? AND user_id = ?`
   ).get(agentId, userId) as OwnedAgentRecord | undefined;
   return agent ?? null;
+}
+
+async function loadOwnedAgentContext(agentId: string, userId: string): Promise<OwnedAgentContext | null> {
+  if (isPgEnabled()) {
+    return await pgQueryOne<OwnedAgentContext>(
+      `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
+              name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at
+       FROM agents WHERE id = $1 AND user_id = $2`,
+      [agentId, userId]
+    );
+  }
+
+  const db = getDb();
+  const agent = db.prepare(
+    `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
+            name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at
+     FROM agents WHERE id = ? AND user_id = ?`
+  ).get(agentId, userId) as OwnedAgentContext | undefined;
+  return agent ?? null;
+}
+
+function normalizeAutopilotEnabled(value: number | boolean | null | undefined): boolean {
+  return value === true || value === 1;
+}
+
+async function loadUsageStats(agentId: string): Promise<UsageStats> {
+  const now = Date.now();
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+
+  if (isPgEnabled()) {
+    const total24h = await pgQueryOne<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM byo_request_log WHERE agent_id = $1 AND created_at >= $2",
+      [agentId, oneDayAgo]
+    );
+    const byTool = await pgQuery<{
+      tool_name: string;
+      count: number;
+      avg_latency: number | null;
+      errors: number;
+    }>(
+      `SELECT tool_name,
+              COUNT(*)::int AS count,
+              AVG(latency_ms) AS avg_latency,
+              COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0)::int AS errors
+       FROM byo_request_log
+       WHERE agent_id = $1 AND created_at >= $2
+       GROUP BY tool_name
+       ORDER BY count DESC`,
+      [agentId, oneDayAgo]
+    );
+    const errors24h = await pgQueryOne<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM byo_request_log WHERE agent_id = $1 AND created_at >= $2 AND status_code >= 400",
+      [agentId, oneDayAgo]
+    );
+    const lastHour = await pgQueryOne<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM byo_request_log WHERE agent_id = $1 AND created_at >= $2",
+      [agentId, oneHourAgo]
+    );
+    const dailyBreakdown = await pgQuery<{ day: string; count: number; errors: number }>(
+      `SELECT TO_CHAR(TO_TIMESTAMP(created_at / 1000.0), 'YYYY-MM-DD') AS day,
+              COUNT(*)::int AS count,
+              COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0)::int AS errors
+       FROM byo_request_log
+       WHERE agent_id = $1 AND created_at >= $2
+       GROUP BY day
+       ORDER BY day ASC`,
+      [agentId, sevenDaysAgo]
+    );
+    const recentErrors = await pgQuery<{
+      tool_name: string;
+      status_code: number;
+      error: string | null;
+      created_at: number;
+    }>(
+      `SELECT tool_name, status_code, error, created_at
+       FROM byo_request_log
+       WHERE agent_id = $1 AND status_code >= 400
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [agentId]
+    );
+
+    const total = total24h?.count ?? 0;
+    const errors = errors24h?.count ?? 0;
+    return {
+      total_requests_24h: total,
+      requests_last_hour: lastHour?.count ?? 0,
+      error_count_24h: errors,
+      error_rate_24h: total > 0 ? `${((errors / total) * 100).toFixed(1)}%` : "0%",
+      by_tool: byTool.map((entry) => ({
+        tool: entry.tool_name,
+        requests: entry.count,
+        avg_latency_ms: entry.avg_latency == null ? null : Math.round(entry.avg_latency),
+        errors: entry.errors,
+      })),
+      daily_breakdown: dailyBreakdown,
+      recent_errors: recentErrors,
+    };
+  }
+
+  const db = getDb();
+  const total24h = db.prepare(
+    "SELECT COUNT(*) as count FROM byo_request_log WHERE agent_id = ? AND created_at >= ?"
+  ).get(agentId, oneDayAgo) as { count: number };
+  const byTool = db.prepare(
+    `SELECT tool_name, COUNT(*) as count, AVG(latency_ms) as avg_latency,
+            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
+     FROM byo_request_log WHERE agent_id = ? AND created_at >= ?
+     GROUP BY tool_name ORDER BY count DESC`
+  ).all(agentId, oneDayAgo) as { tool_name: string; count: number; avg_latency: number | null; errors: number }[];
+  const errors24h = db.prepare(
+    "SELECT COUNT(*) as count FROM byo_request_log WHERE agent_id = ? AND created_at >= ? AND status_code >= 400"
+  ).get(agentId, oneDayAgo) as { count: number };
+  const lastHour = db.prepare(
+    "SELECT COUNT(*) as count FROM byo_request_log WHERE agent_id = ? AND created_at >= ?"
+  ).get(agentId, oneHourAgo) as { count: number };
+  const dailyBreakdown = db.prepare(
+    `SELECT DATE(created_at / 1000, 'unixepoch') as day, COUNT(*) as count,
+            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as errors
+     FROM byo_request_log WHERE agent_id = ? AND created_at >= ?
+     GROUP BY day ORDER BY day ASC`
+  ).all(agentId, sevenDaysAgo) as { day: string; count: number; errors: number }[];
+  const recentErrors = db.prepare(
+    `SELECT tool_name, status_code, error, created_at
+     FROM byo_request_log WHERE agent_id = ? AND status_code >= 400
+     ORDER BY created_at DESC LIMIT 10`
+  ).all(agentId) as { tool_name: string; status_code: number; error: string | null; created_at: number }[];
+
+  return {
+    total_requests_24h: total24h.count,
+    requests_last_hour: lastHour.count,
+    error_count_24h: errors24h.count,
+    error_rate_24h: total24h.count > 0 ? `${((errors24h.count / total24h.count) * 100).toFixed(1)}%` : "0%",
+    by_tool: byTool.map((entry) => ({
+      tool: entry.tool_name,
+      requests: entry.count,
+      avg_latency_ms: entry.avg_latency == null ? null : Math.round(entry.avg_latency),
+      errors: entry.errors,
+    })),
+    daily_breakdown: dailyBreakdown,
+    recent_errors: recentErrors,
+  };
 }
 
 function updateSqliteAgentFields(agentId: string, fields: Record<string, unknown>): void {
@@ -499,7 +664,8 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     personality, decision_style, trading_instinct, time_patience, profit_dream,
     money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
     wallet_address, created_at, updated_at, deployed_at,
-    agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events`;
+    agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events,
+    autopilot_enabled, autopilot_updated_at`;
 
   if (isPgEnabled()) {
     const userId = await getUserIdAsync(req);
@@ -526,6 +692,10 @@ router.get("/agent/me", async (req: Request, res: Response) => {
         }
       }
     }
+
+    (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
+      (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
+    );
 
     res.json(agent);
   } else {
@@ -555,6 +725,10 @@ router.get("/agent/me", async (req: Request, res: Response) => {
       }
     }
 
+    (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
+      (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
+    );
+
     res.json(agent);
   }
 });
@@ -568,13 +742,15 @@ router.get("/agents", (_req: Request, res: Response) => {
            personality, decision_style, trading_instinct, time_patience, profit_dream,
            money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
            wallet_address, created_at, updated_at, deployed_at, agent_type, endpoint_url, agent_url,
-           connection_status, last_heartbeat, description, webhook_events
+           connection_status, last_heartbeat, description, webhook_events,
+           autopilot_enabled, autopilot_updated_at
     FROM agents ORDER BY created_at DESC
   `).all();
 
   res.json({
     agents: (agents as Array<Record<string, unknown>>).map((agent) => ({
       ...agent,
+      autopilot_enabled: normalizeAutopilotEnabled(agent.autopilot_enabled as number | boolean | null | undefined),
       webhook_events: typeof agent.webhook_events === "string"
         ? (() => {
             try {
@@ -677,6 +853,56 @@ router.post("/agents/:id/deploy", async (req: Request, res: Response) => {
   res.json({ ok: true, status: "active", deployed_at: now });
 });
 
+// ── PATCH /api/v1/agents/:id/autopilot — Persist autopilot state ──
+
+router.patch("/agents/:id/autopilot", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const body = req.body as { enabled?: unknown };
+  if (typeof body.enabled !== "boolean") {
+    res.status(400).json({ error: "enabled must be a boolean" });
+    return;
+  }
+
+  const now = Date.now();
+  if (body.enabled) {
+    const funding = await getWalletFundingSnapshot(agent.wallet_address);
+    if (!funding.ready) {
+      res.status(409).json({
+        error: "AUTOPILOT_FUNDING_REQUIRED",
+        message: funding.fundingMessage,
+        wallet_address: funding.address,
+        pol: funding.pol,
+        on_chain_usdc: funding.onChainUsdc,
+        funding_status: funding.fundingStatus,
+        funding_message: funding.fundingMessage,
+      });
+      return;
+    }
+  }
+
+  await syncAgentFields(agentId, {
+    autopilot_enabled: body.enabled ? 1 : 0,
+    autopilot_updated_at: now,
+    updated_at: now,
+  });
+
+  res.json({
+    ok: true,
+    agent_id: agentId,
+    autopilot_enabled: body.enabled,
+    autopilot_updated_at: now,
+  });
+});
+
 // ── POST /api/v1/agents/:id/pause — Pause agent ─────────────
 
 router.post("/agents/:id/pause", async (req: Request, res: Response) => {
@@ -717,28 +943,15 @@ router.post("/agents/:id/terminate", async (req: Request, res: Response) => {
 
 // ── GET /api/v1/agents/:id/health-score — Agent health score ──
 
-router.get("/agents/:id/health-score", requireEitherAuth, (req: Request, res: Response) => {
-  const agentId = req.apiKeyAgent!.agentId;
-
-  // If accessed via API key, agent can only view their own score
-  // If accessed via Clerk, verify the requested agent belongs to the user
-  if (req.params.id !== agentId) {
-    const db = getDb();
-    const agent = db.prepare(
-      "SELECT id FROM agents WHERE id = ? AND user_id = ? AND agent_type = 'byo'"
-    ).get(req.params.id, req.apiKeyAgent!.userId) as { id: string } | undefined;
-    if (!agent) {
-      res.status(404).json({ error: "BYO agent not found" });
-      return;
-    }
+router.get("/agents/:id/health-score", requireEitherAuth, async (req: Request, res: Response) => {
+  const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const owner = await loadOwnedAgent(targetId, req.apiKeyAgent!.userId);
+  if (!owner || owner.agent_type !== "byo") {
+    res.status(404).json({ error: "BYO agent not found" });
+    return;
   }
 
-  const targetAgentId = req.params.id;
-
-  // Lazy import to avoid loading healthScore module unless needed
-  const { computeHealthScore } = require("../monitoring/healthScore");
-  const score = computeHealthScore(targetAgentId);
-
+  const score = await computeHealthScore(targetId);
   if (!score) {
     res.status(500).json({ error: "Failed to compute health score" });
     return;
@@ -747,25 +960,46 @@ router.get("/agents/:id/health-score", requireEitherAuth, (req: Request, res: Re
   res.json({ success: true, data: score });
 });
 
+// ── GET /api/v1/agents/:id/usage — Owner-facing BYO usage stats ──
+
+router.get("/agents/:id/usage", requireEitherAuth, async (req: Request, res: Response) => {
+  const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const owner = await loadOwnedAgent(targetId, req.apiKeyAgent!.userId);
+  if (!owner || owner.agent_type !== "byo") {
+    res.status(404).json({ error: "BYO agent not found" });
+    return;
+  }
+
+  const usage = await loadUsageStats(targetId);
+  res.json({ success: true, data: usage });
+});
+
 // ── GET /api/v1/agents/:id/webhook-log — Webhook delivery log ─
 
-router.get("/agents/:id/webhook-log", requireEitherAuth, (req: Request, res: Response) => {
-  const db = getDb();
-  const agentId = req.apiKeyAgent!.agentId;
-  const targetId = req.params.id;
-
-  // Verify ownership if accessing a different agent
-  if (targetId !== agentId) {
-    const agent = db.prepare(
-      "SELECT id FROM agents WHERE id = ? AND user_id = ? AND agent_type = 'byo'"
-    ).get(targetId, req.apiKeyAgent!.userId) as { id: string } | undefined;
-    if (!agent) {
-      res.status(404).json({ error: "BYO agent not found" });
-      return;
-    }
+router.get("/agents/:id/webhook-log", requireEitherAuth, async (req: Request, res: Response) => {
+  const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const owner = await loadOwnedAgent(targetId, req.apiKeyAgent!.userId);
+  if (!owner || owner.agent_type !== "byo") {
+    res.status(404).json({ error: "BYO agent not found" });
+    return;
   }
 
   const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
+
+  if (isPgEnabled()) {
+    const entries = await pgQuery(
+      `SELECT event, url, status_code, latency_ms, attempt, error, created_at
+       FROM webhook_delivery_log
+       WHERE agent_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [targetId, limit]
+    );
+    res.json({ success: true, data: entries });
+    return;
+  }
+
+  const db = getDb();
   const entries = db.prepare(
     `SELECT event, url, status_code, latency_ms, attempt, error, created_at
      FROM webhook_delivery_log WHERE agent_id = ?
@@ -778,25 +1012,10 @@ router.get("/agents/:id/webhook-log", requireEitherAuth, (req: Request, res: Res
 // ── POST /api/v1/agents/:id/webhook-test — Dry-run webhook ───
 
 router.post("/agents/:id/webhook-test", requireEitherAuth, async (req: Request, res: Response) => {
-  const db = getDb();
-  const targetId = req.params.id;
+  const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(targetId, req.apiKeyAgent!.userId);
 
-  // Verify ownership if accessing a different agent
-  if (targetId !== req.apiKeyAgent!.agentId) {
-    const check = db.prepare(
-      "SELECT id FROM agents WHERE id = ? AND user_id = ? AND agent_type = 'byo'"
-    ).get(targetId, req.apiKeyAgent!.userId) as { id: string } | undefined;
-    if (!check) {
-      res.status(404).json({ error: "BYO agent not found" });
-      return;
-    }
-  }
-
-  const agent = db.prepare(
-    "SELECT id, endpoint_url, webhook_secret FROM agents WHERE id = ? AND agent_type = 'byo'"
-  ).get(targetId) as { id: string; endpoint_url: string | null; webhook_secret: string | null } | undefined;
-
-  if (!agent) {
+  if (!agent || agent.agent_type !== "byo") {
     res.status(404).json({ error: "BYO agent not found" });
     return;
   }
@@ -806,7 +1025,6 @@ router.post("/agents/:id/webhook-test", requireEitherAuth, async (req: Request, 
     return;
   }
 
-  // Send a test event
   const testPayload = JSON.stringify({
     event: "webhook:test",
     data: { message: "This is a test webhook from Quantik", timestamp: Date.now() },
@@ -859,24 +1077,36 @@ router.post("/agents/:id/webhook-test", requireEitherAuth, async (req: Request, 
 
 // ── GET /api/v1/agents/:id/activity — Recent API activity log ─
 
-router.get("/agents/:id/activity", requireEitherAuth, (req: Request, res: Response) => {
-  const db = getDb();
-  const targetId = req.params.id;
-
-  // Verify ownership if accessing a different agent
-  if (targetId !== req.apiKeyAgent!.agentId) {
-    const agent = db.prepare(
-      "SELECT id FROM agents WHERE id = ? AND user_id = ?"
-    ).get(targetId, req.apiKeyAgent!.userId) as { id: string } | undefined;
-    if (!agent) {
-      res.status(404).json({ error: "Agent not found" });
-      return;
-    }
+router.get("/agents/:id/activity", requireEitherAuth, async (req: Request, res: Response) => {
+  const targetId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const owner = await loadOwnedAgent(targetId, req.apiKeyAgent!.userId);
+  if (!owner) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
   }
 
   const limit = Math.min(parseInt(req.query.limit as string, 10) || 50, 100);
   const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);
 
+  if (isPgEnabled()) {
+    const entries = await pgQuery(
+      `SELECT tool_name, method, status_code, latency_ms, created_at
+       FROM byo_request_log
+       WHERE agent_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [targetId, limit, offset]
+    );
+    const total = await pgQueryOne<{ count: number }>(
+      "SELECT COUNT(*)::int AS count FROM byo_request_log WHERE agent_id = $1",
+      [targetId]
+    );
+    const count = total?.count ?? 0;
+    res.json({ success: true, data: entries, total: count, hasMore: offset + limit < count });
+    return;
+  }
+
+  const db = getDb();
   const entries = db.prepare(
     `SELECT tool_name, method, status_code, latency_ms, created_at
      FROM byo_request_log WHERE agent_id = ?

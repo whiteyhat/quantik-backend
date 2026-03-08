@@ -7,6 +7,9 @@ import { runAura } from "../aura/index";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 import { getSettings } from "../db/queries";
+import { loadSingleAutopilotExecutionContext } from "../utils/linkedAgent";
+import { insertExecutionRecord } from "../utils/executions";
+import { getWalletFundingSnapshot } from "../utils/balances";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -636,6 +639,28 @@ export class MarketScanner {
     const maxBet = parseFloat(process.env.MAX_BET_USDC ?? "10");
     const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "50", 10);
     const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");
+    const executionContext = await loadSingleAutopilotExecutionContext();
+
+    if (!executionContext) {
+      console.log(`[autoExecute] No single linked owner/agent context resolved — skipping ${result.slug}`);
+      return;
+    }
+
+    if (!executionContext.autopilotEnabled) {
+      console.log(`[autoExecute] Autopilot disabled for ${executionContext.agentId} — skipping ${result.slug}`);
+      return;
+    }
+
+    if (executionContext.status !== "active") {
+      console.log(`[autoExecute] Agent ${executionContext.agentId} is ${executionContext.status} — skipping ${result.slug}`);
+      return;
+    }
+
+    const funding = await getWalletFundingSnapshot(executionContext.walletAddress);
+    if (!funding.ready) {
+      console.log(`[autoExecute] Funding check blocked ${result.slug}: ${funding.fundingMessage}`);
+      return;
+    }
 
     // Circuit breaker reads — fail closed on DB errors
     let tradesRow: { cnt: number };
@@ -645,10 +670,16 @@ export class MarketScanner {
     const todayTs = today.getTime();
 
     try {
-      tradesRow = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
-      pnlRow = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
+      tradesRow = db.prepare(
+        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
+      ).get(executionContext.agentId, todayTs) as { cnt: number };
+      pnlRow = db.prepare(
+        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
+      ).get(executionContext.agentId, todayTs) as { total: number };
       const sixHAgo = Date.now() - 2 * 60 * 60 * 1000; // 2hr rate limit (was 6hr)
-      recent = db.prepare("SELECT id FROM executions WHERE slug = ? AND executed_at >= ?").get(result.slug, sixHAgo);
+      recent = db.prepare(
+        "SELECT id FROM executions WHERE agent_id = ? AND slug = ? AND executed_at >= ?"
+      ).get(executionContext.agentId, result.slug, sixHAgo);
     } catch (e) {
       console.error("[autoExecute] Circuit breaker DB read failed — fail closed:", e);
       return;
@@ -697,9 +728,15 @@ export class MarketScanner {
           const fluxData = await fluxCheck.json() as Record<string, unknown>;
           if (fluxData?.soft_veto === true) {
             console.log(`[autoExecute] FLUX soft_veto triggered for ${result.slug} — insufficient liquidity, skipping CLOB`);
-            db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'skipped_flux', NULL, NULL)").run(
-              result.slug, clobSide, amount, Date.now()
-            );
+            await insertExecutionRecord({
+              userId: executionContext.userId,
+              agentId: executionContext.agentId,
+              slug: result.slug,
+              side: clobSide,
+              amount,
+              executedAt: Date.now(),
+              status: "skipped_flux",
+            });
             return;
           }
           console.log(`[autoExecute] Flux OK for ${result.slug} — liquidity sufficient`);
@@ -714,12 +751,23 @@ export class MarketScanner {
     if (paperMode) {
       // Paper mode — log only
       const entryPrice = Math.max(0.01, Math.min(0.99, result.probability || 0.5));
-      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, fill_price) VALUES (?, ?, ?, ?, 'paper', ?)").run(
-        result.slug, clobSide, amount, Date.now(), entryPrice
-      );
+      await insertExecutionRecord({
+        userId: executionContext.userId,
+        agentId: executionContext.agentId,
+        slug: result.slug,
+        side: clobSide,
+        amount,
+        executedAt: Date.now(),
+        status: "paper",
+        fillPrice: entryPrice,
+      });
       console.log(`[autoExecute] PAPER trade: ${result.slug} ${clobSide} $${amount.toFixed(2)}`);
-      const pnlRowP = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
-      const tradeRowP = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+      const pnlRowP = db.prepare(
+        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
+      ).get(executionContext.agentId, todayTs) as { total: number };
+      const tradeRowP = db.prepare(
+        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
+      ).get(executionContext.agentId, todayTs) as { cnt: number };
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
       await sendSignalAlert({
         id: result.slug,
@@ -745,8 +793,8 @@ export class MarketScanner {
 
     // Pre-execution dedup: reject if this slug was already successfully traded today
     const alreadyTraded = db.prepare(
-      "SELECT id FROM executions WHERE slug = ? AND executed_at >= ? AND status IN ('placed','paper')"
-    ).get(result.slug, todayTs);
+      "SELECT id FROM executions WHERE agent_id = ? AND slug = ? AND executed_at >= ? AND status IN ('placed','paper')"
+    ).get(executionContext.agentId, result.slug, todayTs);
     if (alreadyTraded) {
       console.log(`[autoExecute] Slug ${result.slug} already traded today — skipping (dedup)`);
       return;
@@ -796,13 +844,25 @@ export class MarketScanner {
       const actualFillPrice = isBetYes
         ? Math.max(0.01, Math.min(0.99, yesMarketPrice))       // YES token price
         : Math.max(0.01, Math.min(0.99, 1 - yesMarketPrice));  // NO token price
-      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status, order_id, fill_price) VALUES (?, ?, ?, ?, 'placed', ?, ?)").run(
-        result.slug, clobSide, amount, Date.now(), orderId, actualFillPrice
-      );
+      await insertExecutionRecord({
+        userId: executionContext.userId,
+        agentId: executionContext.agentId,
+        slug: result.slug,
+        side: clobSide,
+        amount,
+        executedAt: Date.now(),
+        status: "placed",
+        orderId,
+        fillPrice: actualFillPrice,
+      });
       console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${clobSide} $${amount.toFixed(2)} orderId=${orderId}`);
 
-      const pnlRow2 = db.prepare("SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE executed_at >= ?").get(todayTs) as { total: number };
-      const tradeRow2 = db.prepare("SELECT COUNT(*) as cnt FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayTs) as { cnt: number };
+      const pnlRow2 = db.prepare(
+        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
+      ).get(executionContext.agentId, todayTs) as { total: number };
+      const tradeRow2 = db.prepare(
+        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
+      ).get(executionContext.agentId, todayTs) as { cnt: number };
 
       const { sendSignalAlert } = await import("../alerts/telegramAlert");
       await sendSignalAlert({
@@ -825,9 +885,15 @@ export class MarketScanner {
         tradesToday: tradeRow2.cnt,
       } as any);
     } catch (err) {
-      db.prepare("INSERT INTO executions (slug, side, amount, executed_at, status) VALUES (?, ?, ?, ?, 'failed')").run(
-        result.slug, clobSide, amount, Date.now()
-      );
+      await insertExecutionRecord({
+        userId: executionContext.userId,
+        agentId: executionContext.agentId,
+        slug: result.slug,
+        side: clobSide,
+        amount,
+        executedAt: Date.now(),
+        status: "failed",
+      });
       console.error(`[autoExecute] LIVE trade FAILED for ${result.slug}:`, err);
       // Still send FYI alert so Carlos knows a signal fired (even though execution failed)
       try {

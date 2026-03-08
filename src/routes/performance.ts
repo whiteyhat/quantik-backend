@@ -5,7 +5,8 @@ import { AttributionEngine } from "../monitoring/attribution";
 import { DriftDetection } from "../monitoring/drift";
 import { ModelCalibration } from "../monitoring/calibration";
 import { getUserIdAsync } from "../middleware/auth";
-import { getUsdcBalanceSnapshot } from "../utils/balances";
+import { getWalletFundingSnapshot } from "../utils/balances";
+import { loadLinkedAgentForUser } from "../utils/linkedAgent";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -16,15 +17,31 @@ router.get("/summary", async (req: Request, res) => {
   try {
     const db = getDb();
     const todayStart = new Date().setUTCHours(0, 0, 0, 0);
+    const userId = await getUserIdAsync(req);
+    const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+    const scopedWhere = (condition?: string) => {
+      const scope = linkedAgent ? "agent_id = ?" : "";
+      if (scope && condition) return `WHERE ${scope} AND ${condition}`;
+      if (scope) return `WHERE ${scope}`;
+      if (condition) return `WHERE ${condition}`;
+      return "";
+    };
+    const scopedParams = (...params: unknown[]) => linkedAgent ? [linkedAgent.agentId, ...params] : params;
 
     // 1. Trades today
-    const { tradesToday } = db.prepare("SELECT COUNT(*) AS tradesToday FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayStart) as any;
+    const { tradesToday } = db.prepare(
+      `SELECT COUNT(*) AS tradesToday FROM executions ${scopedWhere("executed_at >= ? AND status != 'failed'")}`
+    ).get(...scopedParams(todayStart)) as any;
 
     // 2. P&L Stats
-    const { realizedToday } = db.prepare("SELECT COALESCE(SUM(pnl), 0) AS realizedToday FROM executions WHERE executed_at >= ? AND status != 'failed' AND pnl IS NOT NULL").get(todayStart) as any;
+    const { realizedToday } = db.prepare(
+      `SELECT COALESCE(SUM(pnl), 0) AS realizedToday FROM executions ${scopedWhere("executed_at >= ? AND status != 'failed' AND pnl IS NOT NULL")}`
+    ).get(...scopedParams(todayStart)) as any;
     
     // Unrealized calc
-    const openExecs = db.prepare("SELECT slug, side, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL").all() as any[];
+    const openExecs = db.prepare(
+      `SELECT slug, side, amount, fill_price FROM executions ${scopedWhere("status IN ('placed', 'paper') AND pnl IS NULL")}`
+    ).all(...scopedParams()) as any[];
     const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
     const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
     
@@ -40,17 +57,25 @@ router.get("/summary", async (req: Request, res) => {
     const attribution = attributionEngine.getAttributionBySignal();
     const alphaDecay = attributionEngine.getAlphaDecayStatus();
     
-    const { total, wins } = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins FROM executions WHERE status != 'failed' AND pnl IS NOT NULL").get() as any;
+    const { total, wins } = db.prepare(
+      `SELECT COUNT(*) AS total, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins FROM executions ${scopedWhere("status != 'failed' AND pnl IS NOT NULL")}`
+    ).get(...scopedParams()) as any;
 
     // 4. RICH DATA: Best/Worst trades, cumulative volume
-    const bestTrade = db.prepare("SELECT slug, pnl FROM executions WHERE pnl IS NOT NULL ORDER BY pnl DESC LIMIT 1").get() as any;
-    const worstTrade = db.prepare("SELECT slug, pnl FROM executions WHERE pnl IS NOT NULL ORDER BY pnl ASC LIMIT 1").get() as any;
-    const { totalVolume } = db.prepare("SELECT COALESCE(SUM(amount), 0) as totalVolume FROM executions WHERE status != 'failed'").get() as any;
+    const bestTrade = db.prepare(
+      `SELECT slug, pnl FROM executions ${scopedWhere("pnl IS NOT NULL")} ORDER BY pnl DESC LIMIT 1`
+    ).get(...scopedParams()) as any;
+    const worstTrade = db.prepare(
+      `SELECT slug, pnl FROM executions ${scopedWhere("pnl IS NOT NULL")} ORDER BY pnl ASC LIMIT 1`
+    ).get(...scopedParams()) as any;
+    const { totalVolume } = db.prepare(
+      `SELECT COALESCE(SUM(amount), 0) as totalVolume FROM executions ${scopedWhere("status != 'failed'")}`
+    ).get(...scopedParams()) as any;
     
     // Recent trades (fallback for Execution Log)
     const recentTradeRows = db.prepare(
-      "SELECT id, slug, side, amount, status, executed_at FROM executions WHERE status != 'failed' ORDER BY executed_at DESC LIMIT 20"
-    ).all() as any[];
+      `SELECT id, slug, side, amount, status, executed_at FROM executions ${scopedWhere("status != 'failed'")} ORDER BY executed_at DESC LIMIT 20`
+    ).all(...scopedParams()) as any[];
     const recentTrades = recentTradeRows.map(e => ({
       id: e.id,
       slug: e.slug,
@@ -61,7 +86,9 @@ router.get("/summary", async (req: Request, res) => {
     }));
 
     // Win streak
-    const lastTrades = db.prepare("SELECT pnl FROM executions WHERE pnl IS NOT NULL ORDER BY executed_at DESC LIMIT 20").all() as any[];
+    const lastTrades = db.prepare(
+      `SELECT pnl FROM executions ${scopedWhere("pnl IS NOT NULL")} ORDER BY executed_at DESC LIMIT 20`
+    ).all(...scopedParams()) as any[];
     let currentStreak = 0;
     if (lastTrades.length > 0) {
       const first = lastTrades[0].pnl > 0;
@@ -73,48 +100,20 @@ router.get("/summary", async (req: Request, res) => {
     }
 
     // ── WalletBalance fields for manage-agent page ────────────────
-    // Look up agent wallet address via authenticated user
-    let address = "";
-    let onChainUsdc = 0;
-    const userId = await getUserIdAsync(req);
-    if (userId) {
-      if (isPgEnabled()) {
-        const user = await pgQueryOne<{ agent_id: string | null }>(
-          "SELECT agent_id FROM users WHERE id = $1",
-          [userId]
-        );
-        if (user?.agent_id) {
-          const agent = await pgQueryOne<{ wallet_address: string | null }>(
-            "SELECT wallet_address FROM agents WHERE id = $1",
-            [user.agent_id]
-          );
-          address = agent?.wallet_address ?? "";
-        }
-      } else {
-        const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
-        if (user?.agent_id) {
-          const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string } | undefined;
-          address = agent?.wallet_address ?? "";
-        }
-      }
-    }
-
-    const balanceSnapshot = address
-      ? await getUsdcBalanceSnapshot(address)
-      : { balance: 0, status: "no_address" as const, rpcUrl: null, error: "No wallet address available" };
-    if (balanceSnapshot.status === "live") {
-      onChainUsdc = balanceSnapshot.balance;
-    }
+    const address = linkedAgent?.walletAddress ?? "";
+    const funding = await getWalletFundingSnapshot(address || null);
+    const onChainUsdc = funding.onChainUsdc;
+    const pol = funding.pol;
 
     // All-time trade count
     const { totalTradesAll } = db.prepare(
-      "SELECT COUNT(*) AS totalTradesAll FROM executions WHERE status != 'failed'"
-    ).get() as any;
+      `SELECT COUNT(*) AS totalTradesAll FROM executions ${scopedWhere("status != 'failed'")}`
+    ).get(...scopedParams()) as any;
 
     // Cumulative realized P&L
     const { totalRealizedPnl } = db.prepare(
-      "SELECT COALESCE(SUM(pnl), 0) AS totalRealizedPnl FROM executions WHERE pnl IS NOT NULL"
-    ).get() as any;
+      `SELECT COALESCE(SUM(pnl), 0) AS totalRealizedPnl FROM executions ${scopedWhere("pnl IS NOT NULL")}`
+    ).get(...scopedParams()) as any;
 
     const pnlToday = realizedToday + unrealizedToday;
     const cumulativePnl = totalRealizedPnl + unrealizedToday;
@@ -122,12 +121,12 @@ router.get("/summary", async (req: Request, res) => {
     // Deployed capital (sum of open position sizes)
     const deployedCapital = openExecs.reduce((sum, e) => sum + (e.amount ?? 0), 0);
 
-    const trackedPortfolioValue = balanceSnapshot.status === "live"
+    const trackedPortfolioValue = funding.usdcStatus === "live"
       ? Math.max(onChainUsdc + deployedCapital + unrealizedToday, 0)
       : null;
     const balanceStatus =
       !address ? "no_wallet" :
-      balanceSnapshot.status !== "live" ? "unavailable" :
+      funding.usdcStatus !== "live" ? "unavailable" :
       trackedPortfolioValue && trackedPortfolioValue > 0 ? "live" :
       "unfunded";
     const balanceMessage =
@@ -167,6 +166,9 @@ router.get("/summary", async (req: Request, res) => {
       address,
       usdc: onChainUsdc,
       onChainUsdc,
+      onChainUsdcFormatted: onChainUsdc.toFixed(2),
+      pol,
+      polFormatted: pol.toFixed(4),
       totalValue,
       pnl: cumulativePnl,
       pnlPct,
@@ -180,7 +182,11 @@ router.get("/summary", async (req: Request, res) => {
       drawdownLimit: gcb?.drawdown_limit_pct ?? 0.15,
       balanceStatus,
       balanceMessage,
-      liveBalanceAvailable: balanceSnapshot.status === "live",
+      fundingStatus: funding.fundingStatus,
+      fundingMessage: funding.fundingMessage,
+      funding_status: funding.fundingStatus,
+      funding_message: funding.fundingMessage,
+      liveBalanceAvailable: funding.usdcStatus === "live",
       // Existing performance fields
       realizedToday,
       unrealizedToday,
@@ -211,10 +217,14 @@ router.get("/attribution", (_req, res) => {
 });
 
 // Trade history (moved from /api/portfolio/attribution)
-router.get("/trades", (_req, res) => {
+router.get("/trades", async (req, res) => {
   try {
     const db = getDb();
-    const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
+    const userId = await getUserIdAsync(req);
+    const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+    const executions = linkedAgent
+      ? db.prepare("SELECT * FROM executions WHERE agent_id = ? ORDER BY executed_at DESC LIMIT 500").all(linkedAgent.agentId)
+      : db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
 
     const priceRows2 = db.prepare(
       `SELECT s.slug, s.probability FROM scanner_results s

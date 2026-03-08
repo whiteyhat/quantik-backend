@@ -106,6 +106,8 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS webhook_events TEXT DEFAULT '["*"]';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_enabled INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_updated_at BIGINT;
 
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
@@ -554,6 +556,7 @@ export async function migratePg(): Promise<void> {
     CREATE TABLE IF NOT EXISTS executions (
       id SERIAL PRIMARY KEY,
       user_id UUID,
+      agent_id UUID,
       slug TEXT NOT NULL,
       side TEXT NOT NULL,
       amount REAL NOT NULL,
@@ -566,6 +569,7 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC);
 
     -- Versions / Changelog
     CREATE TABLE IF NOT EXISTS versions (
@@ -576,6 +580,15 @@ export async function migratePg(): Promise<void> {
       fixes TEXT NOT NULL DEFAULT '[]',
       highlight TEXT
     );
+  `);
+
+  await db.query(`
+    ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID;
+
+    UPDATE executions
+    SET agent_id = users.agent_id
+    FROM users
+    WHERE executions.user_id = users.id AND executions.agent_id IS NULL
   `);
 
   console.log("[postgres] Migration complete — all tables ready");

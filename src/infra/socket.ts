@@ -19,6 +19,8 @@ let io: Server | null = null;
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
+  "https://quantik.fun",
+  "https://www.quantik.fun",
   process.env.FRONTEND_URL,
 ].filter(Boolean) as string[];
 
@@ -27,7 +29,7 @@ export function initSocketIO(httpServer: HttpServer): Server {
     cors: {
       origin: (origin, cb) => {
         if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true);
-        if (origin.endsWith(".vercel.app")) return cb(null, true);
+        if (origin.endsWith(".vercel.app") || origin.endsWith(".quantik.fun")) return cb(null, true);
         cb(new Error("Not allowed by CORS"));
       },
       credentials: true,

@@ -14,6 +14,7 @@
 
 import crypto from "crypto";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgExec } from "../db/postgres";
 import { getIO } from "./socket";
 
 // ── Circuit Breaker State ────────────────────────────────────────────────────
@@ -101,11 +102,19 @@ function logDelivery(
   error?: string,
 ): void {
   try {
+    const createdAt = Date.now();
     const db = getDb();
     db.prepare(
       `INSERT INTO webhook_delivery_log (agent_id, event, url, status_code, latency_ms, attempt, error, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(agentId, event, url, statusCode, latencyMs, attempt, error ?? null, Date.now());
+    ).run(agentId, event, url, statusCode, latencyMs, attempt, error ?? null, createdAt);
+    if (isPgEnabled()) {
+      void pgExec(
+        `INSERT INTO webhook_delivery_log (agent_id, event, url, status_code, latency_ms, attempt, error, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [agentId, event, url, statusCode, latencyMs, attempt, error ?? null, createdAt]
+      ).catch(() => {});
+    }
   } catch {
     // Fire-and-forget — never block the delivery
   }

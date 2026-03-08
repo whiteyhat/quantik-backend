@@ -5,7 +5,9 @@ import { getDb } from "../db/schema";
 import { v4 as uuid } from "uuid";
 import { tradeRateLimit } from "../infra/rateLimit";
 import { emitTradeExecuted } from "../infra/socket";
-import { getUserId } from "../middleware/auth";
+import { getUserId, getUserIdAsync } from "../middleware/auth";
+import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import { insertExecutionRecord } from "../utils/executions";
 
 const router = Router();
 
@@ -13,10 +15,14 @@ const router = Router();
 router.use(tradeRateLimit);
 
 // ── GET /api/trade ────────────────────────────────────────────
-router.get("/", (req: Request, res: Response) => {
+router.get("/", async (req: Request, res: Response) => {
   try {
     const db = getDb();
-    const executions = db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
+    const userId = await getUserIdAsync(req);
+    const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+    const executions = linkedAgent
+      ? db.prepare("SELECT * FROM executions WHERE agent_id = ? ORDER BY executed_at DESC LIMIT 500").all(linkedAgent.agentId)
+      : db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
     
     const priceRows = db.prepare(
       `SELECT s.slug, s.probability FROM scanner_results s
@@ -62,6 +68,9 @@ router.get("/", (req: Request, res: Response) => {
 
 // ── POST /api/trade/execute ───────────────────────────────────
 router.post("/execute", async (req: Request, res: Response) => {
+  const userId = await getUserIdAsync(req);
+  const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+
   try {
     const { tokenId, side, price, size } = req.body as Record<string, unknown>;
 
@@ -93,6 +102,18 @@ router.post("/execute", async (req: Request, res: Response) => {
         created_at: Date.now(),
         settled_at: null,
         pnl: null,
+      });
+
+      await insertExecutionRecord({
+        userId,
+        agentId: linkedAgent?.agentId ?? null,
+        slug: typeof req.body["marketSlug"] === "string" ? String(req.body["marketSlug"]) : String(tokenId),
+        side: String(side),
+        amount: Number(size),
+        executedAt: Date.now(),
+        status: "paper",
+        orderId: paperId,
+        fillPrice: Number(price),
       });
 
       const paperResult = {
@@ -163,6 +184,18 @@ router.post("/execute", async (req: Request, res: Response) => {
           : null,
     });
 
+    await insertExecutionRecord({
+      userId,
+      agentId: linkedAgent?.agentId ?? null,
+      slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : String(tokenId),
+      side: String(side),
+      amount: Number(size),
+      executedAt: Date.now(),
+      status: "placed",
+      orderId,
+      fillPrice: Number(price),
+    });
+
     emitTradeExecuted(getUserId(req), {
       orderId: orderId ?? "",
       slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : "",
@@ -176,6 +209,26 @@ router.post("/execute", async (req: Request, res: Response) => {
 
     res.json(rawData);
   } catch (err: unknown) {
+    if (req.body && typeof req.body === "object") {
+      const body = req.body as Record<string, unknown>;
+      const tokenId = body["tokenId"];
+      const side = body["side"];
+      const size = body["size"];
+      if (tokenId != null && side != null && size != null) {
+        try {
+          await insertExecutionRecord({
+            userId,
+            agentId: linkedAgent?.agentId ?? null,
+            slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : String(tokenId),
+            side: String(side),
+            amount: Number(size),
+            executedAt: Date.now(),
+            status: "failed",
+            fillPrice: typeof body["price"] === "number" ? body["price"] : Number(body["price"] ?? 0),
+          });
+        } catch {}
+      }
+    }
     handleCliError(res, err);
   }
 });

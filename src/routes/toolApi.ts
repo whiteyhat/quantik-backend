@@ -3,6 +3,7 @@ import { requireApiKey, requireScope } from "../middleware/apiKeyAuth";
 import { executeTool, setByoAgentContext } from "../agents/tools";
 import { rateLimit } from "../infra/rateLimit";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgExec } from "../db/postgres";
 
 const router = Router();
 
@@ -38,6 +39,13 @@ function logRequest(
       `INSERT INTO byo_request_log (agent_id, user_id, tool_name, method, status_code, latency_ms, error, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(agentId, userId, toolName, method, statusCode, latencyMs, error ?? null, Date.now());
+    if (isPgEnabled()) {
+      void pgExec(
+        `INSERT INTO byo_request_log (agent_id, user_id, tool_name, method, status_code, latency_ms, error, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [agentId, userId, toolName, method, statusCode, latencyMs, error ?? null, Date.now()]
+      ).catch(() => {});
+    }
   } catch {
     // Fire-and-forget — never block the response
   }

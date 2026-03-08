@@ -6,6 +6,7 @@ import { getSettings } from "../db/queries";
 
 const router = Router();
 const scanner = new MarketScanner();
+const SCANNER_INTERVAL_MS = 5 * 60 * 1000;
 
 // ── POST /api/scanner/run ──────────────────────────────────────
 router.post("/run", async (_req: Request, res: Response) => {
@@ -38,6 +39,7 @@ router.get("/status", (_req: Request, res: Response) => {
     tradesToday: tradesToday || 0,
     circuitBreakerTriggered: cb.triggered,
     paperMode: !!settings.paper_mode,
+    scanIntervalMs: SCANNER_INTERVAL_MS,
   });
 });
 

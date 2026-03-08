@@ -11,6 +11,7 @@ const pgQueryMock = jest.fn();
 const pgQueryOneMock = jest.fn();
 const pgExecMock = jest.fn();
 const generateWalletMock = jest.fn();
+const getWalletFundingSnapshotMock = jest.fn();
 
 jest.mock("../src/middleware/auth", () => ({
   getUserId: jest.fn(() => currentUserId),
@@ -30,6 +31,10 @@ jest.mock("../src/db/postgres", () => ({
 
 jest.mock("../src/wallet/generate", () => ({
   generateWalletCredentials: (...args: unknown[]) => generateWalletMock(...args),
+}));
+
+jest.mock("../src/utils/balances", () => ({
+  getWalletFundingSnapshot: (...args: unknown[]) => getWalletFundingSnapshotMock(...args),
 }));
 
 const VALID_WALLET = {
@@ -100,6 +105,85 @@ function seedUser(getDb: typeof import("../src/db/schema").getDb, userId: string
   return db;
 }
 
+function seedAgent(
+  getDb: typeof import("../src/db/schema").getDb,
+  userId: string,
+  overrides: Partial<{
+    id: string;
+    agent_code: string;
+    status: string;
+    name: string;
+    avatar_emoji: string;
+    wallet_address: string | null;
+    agent_type: string;
+    endpoint_url: string | null;
+    agent_url: string | null;
+    connection_status: string | null;
+    last_heartbeat: number | null;
+    description: string | null;
+    webhook_secret: string | null;
+    webhook_events: string[];
+    autopilot_enabled: number;
+    autopilot_updated_at: number | null;
+  }> = {}
+) {
+  const db = getDb();
+  const now = Date.now();
+  const record = {
+    id: overrides.id ?? `agent-${Math.random().toString(16).slice(2, 10)}`,
+    agent_code: overrides.agent_code ?? `Q-AGENT-${Math.floor(Math.random() * 900 + 100)}`,
+    status: overrides.status ?? "inactive",
+    name: overrides.name ?? "Managed Agent",
+    avatar_emoji: overrides.avatar_emoji ?? "🦞",
+    personality: "balanced",
+    decision_style: "analyst",
+    trading_instinct: "value_hunter",
+    time_patience: "swing",
+    profit_dream: "wealth_builder",
+    money_approach: "smart_scaling",
+    protection_mindset: "flexible",
+    leverage_vibe: "none",
+    market_sense: "fixed_rules",
+    asset_love: "crypto",
+    system_prompt: "Test system prompt",
+    wallet_address: overrides.wallet_address ?? VALID_WALLET.address,
+    user_id: userId,
+    agent_type: overrides.agent_type ?? "created",
+    endpoint_url: overrides.endpoint_url ?? null,
+    agent_url: overrides.agent_url ?? null,
+    connection_status: overrides.connection_status ?? "pending",
+    last_heartbeat: overrides.last_heartbeat ?? null,
+    description: overrides.description ?? null,
+    webhook_secret: overrides.webhook_secret ?? null,
+    webhook_events: JSON.stringify(overrides.webhook_events ?? ["*"]),
+    autopilot_enabled: overrides.autopilot_enabled ?? 0,
+    autopilot_updated_at: overrides.autopilot_updated_at ?? null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  db.prepare(`
+    INSERT INTO agents (
+      id, agent_code, status, name, avatar_emoji,
+      personality, decision_style, trading_instinct, time_patience, profit_dream,
+      money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
+      system_prompt, wallet_address, user_id, agent_type, endpoint_url, agent_url,
+      connection_status, last_heartbeat, description, webhook_secret, webhook_events,
+      autopilot_enabled, autopilot_updated_at, created_at, updated_at
+    ) VALUES (
+      @id, @agent_code, @status, @name, @avatar_emoji,
+      @personality, @decision_style, @trading_instinct, @time_patience, @profit_dream,
+      @money_approach, @protection_mindset, @leverage_vibe, @market_sense, @asset_love,
+      @system_prompt, @wallet_address, @user_id, @agent_type, @endpoint_url, @agent_url,
+      @connection_status, @last_heartbeat, @description, @webhook_secret, @webhook_events,
+      @autopilot_enabled, @autopilot_updated_at, @created_at, @updated_at
+    )
+  `).run(record);
+
+  db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(record.id, userId);
+  return { db, agentId: record.id };
+}
+
 beforeEach(() => {
   currentUserId = "user-test";
   pgEnabled = false;
@@ -108,7 +192,18 @@ beforeEach(() => {
   pgQueryOneMock.mockReset();
   pgExecMock.mockReset();
   generateWalletMock.mockReset();
+  getWalletFundingSnapshotMock.mockReset();
   generateWalletMock.mockResolvedValue(VALID_WALLET);
+  getWalletFundingSnapshotMock.mockResolvedValue({
+    address: VALID_WALLET.address,
+    onChainUsdc: 25,
+    pol: 1.25,
+    usdcStatus: "live",
+    polStatus: "live",
+    fundingStatus: "ready",
+    fundingMessage: "Wallet has both POL and USDC.e required for autonomous trading.",
+    ready: true,
+  });
 });
 
 describe("agent factory routes", () => {
@@ -369,6 +464,190 @@ describe("agent factory routes", () => {
       expect(claimRes.status).toBe(400);
       const claimBody = await claimRes.json() as { error: string };
       expect(claimBody.error).toBe("agent_url is required");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test("autopilot enable blocks underfunded wallets and persists enable/disable state for owners", async () => {
+    const { server, baseUrl, getDb } = await startTestServer();
+
+    try {
+      seedUser(getDb, currentUserId!);
+      const { db, agentId: createdAgentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-created-autopilot",
+        agent_type: "created",
+        avatar_emoji: "🦊",
+      });
+      const { agentId: byoAgentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-byo-autopilot",
+        agent_type: "byo",
+        avatar_emoji: "🦞",
+        agent_url: "https://openclaw.example/agents/lobster",
+        endpoint_url: "https://openclaw.example/webhook",
+      });
+
+      getWalletFundingSnapshotMock.mockResolvedValueOnce({
+        address: VALID_WALLET.address,
+        onChainUsdc: 0,
+        pol: 0,
+        usdcStatus: "live",
+        polStatus: "live",
+        fundingStatus: "funding_required",
+        fundingMessage: "Deposit POL for Polygon fees and USDC.e for Polymarket trades before enabling autopilot.",
+        ready: false,
+      });
+
+      const blockedRes = await fetch(`${baseUrl}/api/v1/agents/${createdAgentId}/autopilot`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+
+      expect(blockedRes.status).toBe(409);
+      const blockedBody = await blockedRes.json() as {
+        error: string;
+        wallet_address: string;
+        pol: number;
+        on_chain_usdc: number;
+      };
+      expect(blockedBody.error).toBe("AUTOPILOT_FUNDING_REQUIRED");
+      expect(blockedBody.wallet_address).toBe(VALID_WALLET.address);
+      expect(blockedBody.pol).toBe(0);
+      expect(blockedBody.on_chain_usdc).toBe(0);
+
+      const blockedRow = db.prepare("SELECT autopilot_enabled FROM agents WHERE id = ?").get(createdAgentId) as {
+        autopilot_enabled: number;
+      };
+      expect(blockedRow.autopilot_enabled).toBe(0);
+
+      const enableCreatedRes = await fetch(`${baseUrl}/api/v1/agents/${createdAgentId}/autopilot`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(enableCreatedRes.status).toBe(200);
+      const enableCreatedBody = await enableCreatedRes.json() as {
+        autopilot_enabled: boolean;
+        autopilot_updated_at: number;
+      };
+      expect(enableCreatedBody.autopilot_enabled).toBe(true);
+      expect(enableCreatedBody.autopilot_updated_at).toBeGreaterThan(0);
+
+      const createdRow = db.prepare(
+        "SELECT autopilot_enabled, autopilot_updated_at FROM agents WHERE id = ?"
+      ).get(createdAgentId) as { autopilot_enabled: number; autopilot_updated_at: number | null };
+      expect(createdRow.autopilot_enabled).toBe(1);
+      expect(createdRow.autopilot_updated_at).not.toBeNull();
+
+      const disableCreatedRes = await fetch(`${baseUrl}/api/v1/agents/${createdAgentId}/autopilot`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      });
+      expect(disableCreatedRes.status).toBe(200);
+
+      const disabledRow = db.prepare("SELECT autopilot_enabled FROM agents WHERE id = ?").get(createdAgentId) as {
+        autopilot_enabled: number;
+      };
+      expect(disabledRow.autopilot_enabled).toBe(0);
+
+      const enableByoRes = await fetch(`${baseUrl}/api/v1/agents/${byoAgentId}/autopilot`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      expect(enableByoRes.status).toBe(200);
+      const byoRow = db.prepare("SELECT autopilot_enabled FROM agents WHERE id = ?").get(byoAgentId) as {
+        autopilot_enabled: number;
+      };
+      expect(byoRow.autopilot_enabled).toBe(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test("owner BYO usage endpoint aggregates session-scoped API usage", async () => {
+    const { server, baseUrl, getDb } = await startTestServer();
+
+    try {
+      const db = seedUser(getDb, currentUserId!);
+      const { agentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-byo-usage",
+        agent_type: "byo",
+        avatar_emoji: "🦞",
+      });
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO byo_request_log (
+          agent_id, user_id, tool_name, method, status_code, latency_ms, error, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(agentId, currentUserId, "get_markets", "GET", 200, 120, null, now - 5_000);
+      db.prepare(`
+        INSERT INTO byo_request_log (
+          agent_id, user_id, tool_name, method, status_code, latency_ms, error, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(agentId, currentUserId, "get_markets", "GET", 502, 350, "upstream timeout", now - 4_000);
+
+      const res = await fetch(`${baseUrl}/api/v1/agents/${agentId}/usage`);
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        success: boolean;
+        data: {
+          total_requests_24h: number;
+          requests_last_hour: number;
+          error_count_24h: number;
+          error_rate_24h: string;
+          by_tool: { tool: string; requests: number; avg_latency_ms: number | null; errors: number }[];
+          recent_errors: { error: string | null }[];
+        };
+      };
+      expect(body.success).toBe(true);
+      expect(body.data.total_requests_24h).toBe(2);
+      expect(body.data.requests_last_hour).toBe(2);
+      expect(body.data.error_count_24h).toBe(1);
+      expect(body.data.error_rate_24h).toBe("50.0%");
+      expect(body.data.by_tool).toEqual([
+        { tool: "get_markets", requests: 2, avg_latency_ms: 235, errors: 1 },
+      ]);
+      expect(body.data.recent_errors[0]?.error).toBe("upstream timeout");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test("fresh BYO agents report insufficient health telemetry instead of a fake healthy score", async () => {
+    const { server, baseUrl, getDb } = await startTestServer();
+
+    try {
+      seedUser(getDb, currentUserId!);
+      const { agentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-byo-health",
+        agent_type: "byo",
+        avatar_emoji: "🦞",
+        connection_status: "connected",
+      });
+
+      const res = await fetch(`${baseUrl}/api/v1/agents/${agentId}/health-score`);
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        success: boolean;
+        data: {
+          status: string;
+          score: number | null;
+          grade: string | null;
+          request_samples_24h: number;
+          heartbeat_samples_24h: number;
+        };
+      };
+      expect(body.success).toBe(true);
+      expect(body.data.status).toBe("insufficient_data");
+      expect(body.data.score).toBeNull();
+      expect(body.data.grade).toBeNull();
+      expect(body.data.request_samples_24h).toBe(0);
+      expect(body.data.heartbeat_samples_24h).toBe(0);
     } finally {
       await closeServer(server);
     }
