@@ -60,6 +60,9 @@ const app = express();
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://mission.adflix.now",
   process.env.FRONTEND_URL,
 ].filter(Boolean) as string[];
 
@@ -67,7 +70,7 @@ app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true);
     // Allow any vercel.app subdomain
-    if (origin.endsWith(".vercel.app")) return cb(null, true);
+    if (origin.endsWith(".vercel.app") || origin.endsWith(".adflix.now")) return cb(null, true);
     cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
