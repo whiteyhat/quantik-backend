@@ -69,7 +69,7 @@ router.get("/positions", async (_req, res) => {
         entryPrice: entry,
         currentPrice: current,
         pnl: pnl,
-        pnlPct: entry > 0 ? (pnl / e.amount) * 100 : 0
+        pnlPct: entry > 0 ? pnl / e.amount : 0
       };
     });
 

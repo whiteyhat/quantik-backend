@@ -44,6 +44,10 @@ import versionsRouter from "./routes/versions";
 import agentHealthRouter from "./routes/agentHealth";
 import agentsRouter from "./routes/agents";
 import agentChatRouter from "./routes/agentChat";
+import apiKeysRouter from "./routes/apiKeys";
+import skillRouter from "./routes/skill";
+import toolApiRouter from "./routes/toolApi";
+import { apiKeyAuth } from "./middleware/apiKeyAuth";
 import { ensureCircuitBreakerTable } from "./risk";
 import alertsRouter from "./routes/alerts";
 import { initScheduler } from "./infra/scheduler";
@@ -75,11 +79,14 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 
 // Clerk auth — attaches auth info to all requests (does NOT block unauthenticated)
 app.use(clerkAuth);
 app.use(ensureUser);
+
+// API key auth — attaches BYO agent context when Bearer qk_live_... is present
+app.use(apiKeyAuth);
 
 // Redis-backed rate limiting (no-op when REDIS_URL is not set)
 app.use(apiRateLimit);
@@ -133,6 +140,9 @@ app.use("/api/versions", versionsRouter);
 app.use("/api/agents", agentHealthRouter);
 app.use("/api/v1", agentsRouter);
 app.use("/api/v1", agentChatRouter);
+app.use("/api/v1", apiKeysRouter);
+app.use("/api/v1/tools", toolApiRouter);
+app.use("/api", skillRouter);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {

@@ -101,6 +101,100 @@ export const TOOL_DECLARATIONS: GeminiFunctionDeclaration[] = [
       required: [],
     },
   },
+  {
+    name: "get_pipeline_history",
+    description: "Get recent pipeline run history with all agent outputs. Use to review past analyses and decisions.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Number of recent runs to return (default 5, max 20)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_agent_status",
+    description: "Get the calling agent's own status, wallet address, configuration, and connection info.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "heartbeat",
+    description: "Send a heartbeat to maintain 'connected' status. Call every ~5 minutes.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "close_position",
+    description: "Close/exit an open position on a prediction market. Computes P&L and marks the position as closed. Use when the agent wants to exit a trade.",
+    parameters: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Market slug of the position to close" },
+      },
+      required: ["slug"],
+    },
+  },
+  {
+    name: "get_market_price",
+    description: "Get the current market price for a specific prediction market on Polymarket. Returns YES/NO prices, volume, and liquidity.",
+    parameters: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Market slug (e.g. 'will-bitcoin-hit-100k')" },
+      },
+      required: ["slug"],
+    },
+  },
+  {
+    name: "get_risk_config",
+    description: "Get the current risk configuration: drawdown limit, max position size, kelly multiplier, and agent VaR thresholds.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "update_risk_config",
+    description: "Update risk configuration parameters. Only provided fields are updated.",
+    parameters: {
+      type: "object",
+      properties: {
+        max_position_size: { type: "number", description: "Max position size as fraction (0.01 to 1.0)" },
+        drawdown_limit: { type: "number", description: "Max drawdown limit as fraction (0.01 to 1.0)" },
+        kelly_multiplier: { type: "number", description: "Kelly fraction multiplier (0.01 to 1.0)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "trigger_scanner",
+    description: "Trigger the orchestrator market scanner to find new trading opportunities. Returns scan results with candidates found.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "get_pipeline_output",
+    description: "Get the full output from all 7 agents in a specific pipeline run. Returns detailed analysis from each agent (AURA, FLUX, CLAUSE, ORACLE, EDGE, LUCIFER, SIGMA).",
+    parameters: {
+      type: "object",
+      properties: {
+        run_id: { type: "string", description: "Pipeline run ID (UUID)" },
+      },
+      required: ["run_id"],
+    },
+  },
+  {
+    name: "update_webhook_config",
+    description: "Update the agent's webhook configuration: endpoint URL and/or event subscriptions.",
+    parameters: {
+      type: "object",
+      properties: {
+        endpoint_url: { type: "string", description: "HTTPS webhook endpoint URL" },
+        webhook_events: { type: "string", description: "JSON array of event types to subscribe to, e.g. '[\"trade:executed\",\"agent:alert\"]'. Use '[\"*\"]' for all events." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_health_score",
+    description: "Get the agent's own health score (0-100) with grade and component breakdown (uptime, error rate, latency, connection).",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
 ];
 
 // ── Tool Executors ───────────────────────────────────────────────────────────
@@ -355,6 +449,385 @@ function executeGetScannerSignals(args: { alerts_only?: string }): unknown {
   return { signals, count: signals.length };
 }
 
+function executeGetPipelineHistory(args: { limit?: number }): unknown {
+  const db = getDb();
+  const limit = Math.min(Math.max(1, args.limit ?? 5), 20);
+
+  const runs = db.prepare(
+    "SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state FROM pipeline_runs ORDER BY created_at DESC LIMIT ?"
+  ).all(limit) as any[];
+
+  return {
+    runs: runs.map((r: any) => ({
+      id: r.id,
+      market_slug: r.market_slug,
+      market_question: r.market_question,
+      decision: r.decision,
+      confidence: r.confidence,
+      signal_state: r.signal_state,
+      created_at: r.created_at,
+      completed_at: r.completed_at,
+    })),
+    count: runs.length,
+  };
+}
+
+// Context for BYO agent — set by toolApi router before calling executeTool
+let _byoAgentId: string | null = null;
+export function setByoAgentContext(agentId: string | null): void {
+  _byoAgentId = agentId;
+}
+
+function executeGetAgentStatus(): unknown {
+  if (!_byoAgentId) return { error: "Agent context not available" };
+
+  const db = getDb();
+  const agent = db.prepare(
+    `SELECT id, agent_code, status, name, avatar_emoji, agent_type, description,
+            wallet_address, connection_status, last_heartbeat, created_at, updated_at, deployed_at
+     FROM agents WHERE id = ?`
+  ).get(_byoAgentId) as any;
+
+  if (!agent) return { error: "Agent not found" };
+
+  return {
+    id: agent.id,
+    agent_code: agent.agent_code,
+    status: agent.status,
+    name: agent.name,
+    avatar_emoji: agent.avatar_emoji,
+    agent_type: agent.agent_type,
+    description: agent.description,
+    wallet_address: agent.wallet_address,
+    connection_status: agent.connection_status,
+    last_heartbeat: agent.last_heartbeat,
+    created_at: agent.created_at,
+    deployed_at: agent.deployed_at,
+  };
+}
+
+function executeHeartbeat(): unknown {
+  if (!_byoAgentId) return { error: "Agent context not available" };
+
+  const now = Date.now();
+  const db = getDb();
+  db.prepare(
+    "UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?"
+  ).run(now, _byoAgentId);
+
+  return { status: "ok", server_time: now, your_status: "connected" };
+}
+
+// ── New Tool Executors (Phase 7 — Full Autonomy) ────────────────────────────
+
+function executeClosePosition(args: { slug: string }): unknown {
+  if (!_byoAgentId) return { error: "Agent context not available" };
+
+  const db = getDb();
+
+  // Find the open execution for this slug belonging to this agent
+  const execution = db.prepare(
+    `SELECT id, slug, side, amount, fill_price, status FROM executions
+     WHERE slug = ? AND agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
+     ORDER BY executed_at DESC LIMIT 1`
+  ).get(args.slug, _byoAgentId) as {
+    id: string; slug: string; side: string; amount: number; fill_price: number | null; status: string;
+  } | undefined;
+
+  if (!execution) {
+    return { error: `No open position found for slug: ${args.slug}` };
+  }
+
+  // Get current price for P&L calculation
+  const priceRow = db.prepare(
+    `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
+  ).get(args.slug) as { probability: number } | undefined;
+
+  const entryPrice = execution.fill_price ?? 0.5;
+  const currentPrice = priceRow?.probability ?? entryPrice;
+  const shares = entryPrice > 0 ? execution.amount / entryPrice : 0;
+  const pnl = execution.side === "buy"
+    ? (currentPrice - entryPrice) * shares
+    : (entryPrice - currentPrice) * shares;
+
+  const now = Date.now();
+  db.prepare(
+    "UPDATE executions SET status = 'closed', pnl = ?, closed_at = ?, updated_at = ? WHERE id = ?"
+  ).run(Math.round(pnl * 100) / 100, now, now, execution.id);
+
+  return {
+    slug: args.slug,
+    direction: execution.side === "buy" ? "YES" : "NO",
+    size: execution.amount,
+    entry_price: entryPrice,
+    exit_price: currentPrice,
+    pnl: Math.round(pnl * 100) / 100,
+    status: "closed",
+  };
+}
+
+async function executeGetMarketPrice(args: { slug: string }): Promise<unknown> {
+  try {
+    const res = await fetch(
+      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(args.slug)}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) },
+    );
+
+    if (!res.ok) return { error: `Polymarket API returned ${res.status}`, slug: args.slug };
+
+    const raw = await res.json() as any[];
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return { error: `Market not found: ${args.slug}`, slug: args.slug };
+    }
+
+    const m = raw[0];
+    let outcomePrices: number[] = [];
+    try {
+      const parsed = JSON.parse(m.outcomePrices ?? "[]");
+      if (Array.isArray(parsed)) outcomePrices = parsed.map((p: unknown) => parseFloat(String(p)) || 0);
+    } catch { /* ignore */ }
+
+    return {
+      slug: m.slug ?? args.slug,
+      question: m.question ?? "",
+      yesPrice: outcomePrices[1] ?? 0,
+      noPrice: outcomePrices[0] ?? 0,
+      volume24hr: m.volume24hr ?? 0,
+      liquidity: m.liquidity ?? 0,
+      lastUpdated: m.updatedAt ?? null,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Failed to fetch market price", slug: args.slug };
+  }
+}
+
+function executeGetRiskConfig(): unknown {
+  const db = getDb();
+
+  const cb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+     FROM global_circuit_breakers gcb
+     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+     WHERE rc.is_active = 1 LIMIT 1`
+  ).get();
+
+  const thresholds = db.prepare<[], { agent_name: string; var_threshold: number; auto_exec_enabled: number }>(
+    `SELECT at.agent_name, at.var_threshold, at.auto_exec_enabled
+     FROM agent_thresholds at
+     JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+     WHERE rc.is_active = 1`
+  ).all();
+
+  const rawMaxPos = cb?.max_position_size_pct ?? 0.1;
+  const maxPositionSize = rawMaxPos > 1 ? rawMaxPos / 100 : rawMaxPos;
+
+  return {
+    drawdown_limit: cb?.drawdown_limit_pct ?? 0.15,
+    max_position_size: maxPositionSize,
+    kelly_multiplier: cb?.kelly_fraction_multiplier ?? 0.25,
+    agent_thresholds: thresholds.map(t => ({
+      agent_name: t.agent_name,
+      var_threshold: t.var_threshold,
+      auto_exec_enabled: t.auto_exec_enabled === 1,
+    })),
+  };
+}
+
+function executeUpdateRiskConfig(args: { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }): unknown {
+  const db = getDb();
+
+  // Get active risk config
+  const config = db.prepare<[], { id: string }>(
+    "SELECT id FROM risk_configurations WHERE is_active = 1 LIMIT 1"
+  ).get();
+
+  if (!config) return { error: "No active risk configuration found" };
+
+  const cb = db.prepare<[string], { id: string; drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+    "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = ? LIMIT 1"
+  ).get(config.id);
+
+  if (!cb) return { error: "No circuit breaker config found" };
+
+  const updates: string[] = [];
+  const values: (number | string)[] = [];
+
+  if (args.max_position_size != null) {
+    if (args.max_position_size < 0.01 || args.max_position_size > 1.0) {
+      return { error: "max_position_size must be between 0.01 and 1.0" };
+    }
+    updates.push("max_position_size_pct = ?");
+    values.push(args.max_position_size);
+  }
+  if (args.drawdown_limit != null) {
+    if (args.drawdown_limit < 0.01 || args.drawdown_limit > 1.0) {
+      return { error: "drawdown_limit must be between 0.01 and 1.0" };
+    }
+    updates.push("drawdown_limit_pct = ?");
+    values.push(args.drawdown_limit);
+  }
+  if (args.kelly_multiplier != null) {
+    if (args.kelly_multiplier < 0.01 || args.kelly_multiplier > 1.0) {
+      return { error: "kelly_multiplier must be between 0.01 and 1.0" };
+    }
+    updates.push("kelly_fraction_multiplier = ?");
+    values.push(args.kelly_multiplier);
+  }
+
+  if (updates.length === 0) return { error: "No fields to update" };
+
+  values.push(cb.id);
+  db.prepare(`UPDATE global_circuit_breakers SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+  // Return updated config
+  return executeGetRiskConfig();
+}
+
+async function executeTriggerScanner(): Promise<unknown> {
+  const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
+  try {
+    const res = await fetch(`${BACKEND_HOST}/api/orchestrator/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+      return { triggered: false, error: body.error ?? `Scanner returned ${res.status}` };
+    }
+
+    const data = await res.json() as Record<string, unknown>;
+    return {
+      triggered: true,
+      markets_scanned: data.marketsScanned ?? 0,
+      candidates_found: data.candidatesFound ?? 0,
+    };
+  } catch (err) {
+    return { triggered: false, error: err instanceof Error ? err.message : "Scanner trigger failed" };
+  }
+}
+
+function executeGetPipelineOutput(args: { run_id: string }): unknown {
+  const db = getDb();
+
+  const run = db.prepare(
+    `SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state
+     FROM pipeline_runs WHERE id = ?`
+  ).get(args.run_id) as any;
+
+  if (!run) return { error: `Pipeline run not found: ${args.run_id}` };
+
+  // Fetch each agent's output for this run
+  const aura = db.prepare("SELECT * FROM aura_results WHERE pipeline_run_id = ?").get(args.run_id);
+  const flux = db.prepare("SELECT * FROM flux_results WHERE pipeline_run_id = ?").get(args.run_id);
+  const clause = db.prepare("SELECT * FROM clause_results WHERE pipeline_run_id = ?").get(args.run_id);
+  const oracle = db.prepare("SELECT * FROM oracle_results WHERE pipeline_run_id = ?").get(args.run_id);
+  const edge = db.prepare("SELECT * FROM edge_results WHERE pipeline_run_id = ?").get(args.run_id);
+  const research = db.prepare("SELECT * FROM research_notes WHERE pipeline_run_id = ?").get(args.run_id);
+
+  return {
+    run_id: run.id,
+    market_slug: run.market_slug,
+    market_question: run.market_question,
+    decision: run.decision,
+    confidence: run.confidence,
+    signal_state: run.signal_state,
+    created_at: run.created_at,
+    completed_at: run.completed_at,
+    agents: {
+      aura: aura ?? null,
+      flux: flux ?? null,
+      clause: clause ?? null,
+      oracle: oracle ?? null,
+      edge: edge ?? null,
+      research: research ?? null,
+    },
+  };
+}
+
+function executeUpdateWebhookConfig(args: { endpoint_url?: string; webhook_events?: string }): unknown {
+  if (!_byoAgentId) return { error: "Agent context not available" };
+
+  const db = getDb();
+  const updates: string[] = [];
+  const values: (string | null)[] = [];
+
+  if (args.endpoint_url !== undefined) {
+    if (args.endpoint_url === "" || args.endpoint_url === null) {
+      // Allow clearing the URL
+      updates.push("endpoint_url = ?");
+      values.push(null);
+    } else {
+      // SSRF validation (same rules as agent creation)
+      if (args.endpoint_url.length > 500) return { error: "endpoint_url must be 500 characters or less" };
+      try {
+        const parsed = new URL(args.endpoint_url);
+        if (parsed.protocol !== "https:") return { error: "endpoint_url must use HTTPS" };
+        const host = parsed.hostname;
+        if (
+          host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" ||
+          host.startsWith("10.") || host.startsWith("192.168.") ||
+          /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+          host === "[::1]" || host.endsWith(".local") || host.endsWith(".internal")
+        ) {
+          return { error: "endpoint_url must not point to a private/internal address" };
+        }
+      } catch {
+        return { error: "endpoint_url is not a valid URL" };
+      }
+      updates.push("endpoint_url = ?");
+      values.push(args.endpoint_url);
+    }
+  }
+
+  if (args.webhook_events !== undefined) {
+    try {
+      const events = JSON.parse(args.webhook_events);
+      if (!Array.isArray(events) || !events.every((e: unknown) => typeof e === "string")) {
+        return { error: "webhook_events must be a JSON array of strings" };
+      }
+      updates.push("webhook_events = ?");
+      values.push(JSON.stringify(events));
+    } catch {
+      return { error: "webhook_events must be valid JSON" };
+    }
+  }
+
+  if (updates.length === 0) return { error: "No fields to update" };
+
+  updates.push("updated_at = ?");
+  values.push(String(Date.now()));
+  values.push(_byoAgentId);
+
+  db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+  // Return updated config
+  const agent = db.prepare(
+    "SELECT endpoint_url, webhook_events FROM agents WHERE id = ?"
+  ).get(_byoAgentId) as { endpoint_url: string | null; webhook_events: string | null };
+
+  let parsedEvents: string[] = ["*"];
+  try { parsedEvents = JSON.parse(agent.webhook_events ?? '["*"]'); } catch { /* ignore */ }
+
+  return {
+    endpoint_url: agent.endpoint_url,
+    webhook_events: parsedEvents,
+    updated: true,
+  };
+}
+
+function executeGetHealthScore(): unknown {
+  if (!_byoAgentId) return { error: "Agent context not available" };
+
+  // Lazy import to avoid loading healthScore module unless needed
+  const { computeHealthScore } = require("../monitoring/healthScore");
+  const score = computeHealthScore(_byoAgentId);
+
+  if (!score) return { error: "Failed to compute health score" };
+  return score;
+}
+
 // ── Tool Executor Dispatch ───────────────────────────────────────────────────
 
 export async function executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
@@ -373,6 +846,28 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       return { name, data: executePlaceTrade(args as { slug: string; direction: string; size: number }) };
     case "get_scanner_signals":
       return { name, data: executeGetScannerSignals(args as { alerts_only?: string }) };
+    case "get_pipeline_history":
+      return { name, data: executeGetPipelineHistory(args as { limit?: number }) };
+    case "get_agent_status":
+      return { name, data: executeGetAgentStatus() };
+    case "heartbeat":
+      return { name, data: executeHeartbeat() };
+    case "close_position":
+      return { name, data: executeClosePosition(args as { slug: string }) };
+    case "get_market_price":
+      return { name, data: await executeGetMarketPrice(args as { slug: string }) };
+    case "get_risk_config":
+      return { name, data: executeGetRiskConfig() };
+    case "update_risk_config":
+      return { name, data: executeUpdateRiskConfig(args as { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }) };
+    case "trigger_scanner":
+      return { name, data: await executeTriggerScanner() };
+    case "get_pipeline_output":
+      return { name, data: executeGetPipelineOutput(args as { run_id: string }) };
+    case "update_webhook_config":
+      return { name, data: executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }) };
+    case "get_health_score":
+      return { name, data: executeGetHealthScore() };
     default:
       return { name, data: { error: `Unknown tool: ${name}` } };
   }

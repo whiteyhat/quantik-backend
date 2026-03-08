@@ -13,6 +13,8 @@ export const QUEUE_NAMES = {
   PNL_SETTLER: "pnl-settler",  // PnL settlement (30min cycle)
   ALERT_POLLER: "alert-poller",// Telegram alert poller (60s cycle)
   RESOLUTION: "resolution",    // Resolution monitor (5min cycle)
+  POSITION_UPDATE: "position-update", // Live position P&L emitter (30s cycle)
+  BYO_HEALTH: "byo-health",           // BYO agent heartbeat monitor (60s cycle)
 } as const;
 
 type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

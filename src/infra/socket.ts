@@ -4,13 +4,15 @@
 //   - trade:executed — when a trade is placed
 //   - agent:alert — proactive agent insights
 //   - autopilot:status — scanner/autopilot state changes
-//   - position:updated — position P&L changes
+//   - position:update — position P&L changes
 //
 // Each authenticated user joins a private room `user:{userId}`.
 // Falls back gracefully — if no clients are connected, emit is a no-op.
 
 import { Server as HttpServer } from "http";
 import { Server, Socket } from "socket.io";
+import crypto from "crypto";
+import { getDb } from "../db/schema";
 
 let io: Server | null = null;
 
@@ -37,8 +39,37 @@ export function initSocketIO(httpServer: HttpServer): Server {
 
   io.on("connection", (socket: Socket) => {
     const userId = socket.handshake.auth?.userId as string | undefined;
+    const apiKey = socket.handshake.auth?.apiKey as string | undefined;
 
-    if (userId) {
+    // BYO agent auth via API key
+    if (apiKey?.startsWith("qk_live_")) {
+      const keyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+      const db = getDb();
+      const row = db.prepare(`
+        SELECT ak.agent_id, ak.user_id, ak.revoked_at, a.status AS agent_status
+        FROM api_keys ak JOIN agents a ON a.id = ak.agent_id
+        WHERE ak.key_hash = ?
+      `).get(keyHash) as { agent_id: string; user_id: string; revoked_at: number | null; agent_status: string } | undefined;
+
+      if (!row || row.revoked_at || row.agent_status === "terminated") {
+        console.log(`[socket.io] BYO agent rejected — invalid key (${socket.id})`);
+        socket.emit("error", { code: "UNAUTHORIZED", message: "Invalid or revoked API key" });
+        socket.disconnect(true);
+        return;
+      }
+
+      // Join the owner's room so BYO agents receive the same events as the dashboard
+      socket.join(`user:${row.user_id}`);
+      socket.join(`agent:${row.agent_id}`);
+      socket.data.agentId = row.agent_id;
+      socket.data.userId = row.user_id;
+      socket.data.isByo = true;
+      console.log(`[socket.io] BYO agent ${row.agent_id} connected (${socket.id})`);
+
+      // Update heartbeat on connect
+      db.prepare("UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?")
+        .run(Date.now(), row.agent_id);
+    } else if (userId) {
       socket.join(`user:${userId}`);
       console.log(`[socket.io] User ${userId} connected (${socket.id})`);
     } else {
@@ -46,7 +77,9 @@ export function initSocketIO(httpServer: HttpServer): Server {
     }
 
     socket.on("disconnect", (reason) => {
-      if (userId) {
+      if (socket.data.isByo) {
+        console.log(`[socket.io] BYO agent ${socket.data.agentId} disconnected: ${reason}`);
+      } else if (userId) {
         console.log(`[socket.io] User ${userId} disconnected: ${reason}`);
       }
     });
@@ -98,14 +131,17 @@ export interface PositionUpdateEvent {
   timestamp: number;
 }
 
-/** Emit to a specific user's room */
+/** Emit to a specific user's room (+ bridge to BYO webhooks) */
 export function emitToUser(userId: string, event: string, data: unknown): void {
   io?.to(`user:${userId}`).emit(event, data);
+  // Lazy import to avoid circular dependency at module load time
+  import("./eventBridge").then(m => m.bridgeEmit(event, data, userId)).catch(() => {});
 }
 
-/** Emit to all connected clients */
+/** Emit to all connected clients (+ bridge to BYO webhooks) */
 export function emitToAll(event: string, data: unknown): void {
   io?.emit(event, data);
+  import("./eventBridge").then(m => m.bridgeEmit(event, data)).catch(() => {});
 }
 
 /** Emit a trade execution event */
@@ -134,8 +170,8 @@ export function emitAutopilotStatus(status: AutopilotStatusEvent): void {
 /** Emit position update */
 export function emitPositionUpdate(userId: string | null, update: PositionUpdateEvent): void {
   if (userId) {
-    emitToUser(userId, "position:updated", update);
+    emitToUser(userId, "position:update", update);
   } else {
-    emitToAll("position:updated", update);
+    emitToAll("position:update", update);
   }
 }

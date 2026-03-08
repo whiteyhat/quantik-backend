@@ -533,6 +533,67 @@ function migrate(db: Database.Database): void {
   // Migration: add user_id to agents table
   try { db.exec("ALTER TABLE agents ADD COLUMN user_id TEXT"); } catch {}
 
+  // Migration: BYO agent columns
+  try { db.exec("ALTER TABLE agents ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'created'"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN endpoint_url TEXT"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN connection_status TEXT DEFAULT 'pending'"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN last_heartbeat INTEGER"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN description TEXT"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN webhook_secret TEXT"); } catch {}
+  try { db.exec("ALTER TABLE agents ADD COLUMN webhook_events TEXT DEFAULT '[\"*\"]'"); } catch {}
+
+  // ── API Keys (BYO agent authentication) ──────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      key_hash TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT '["read","trade","analysis"]',
+      rate_limit_tier TEXT NOT NULL DEFAULT 'standard',
+      created_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      last_used_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_id);
+  `);
+
+  // ── BYO Request Log (audit trail for API key usage) ────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS byo_request_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      method TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      latency_ms INTEGER NOT NULL,
+      error TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_byo_log_agent_time ON byo_request_log(agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_byo_log_time ON byo_request_log(created_at DESC);
+  `);
+
+  // ── Webhook Delivery Log (audit trail for webhook events) ──────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_delivery_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      url TEXT NOT NULL,
+      status_code INTEGER,
+      latency_ms INTEGER,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      error TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_log_agent_time ON webhook_delivery_log(agent_id, created_at DESC);
+  `);
+
   // ── Chat History (persistent across sessions) ──────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS chat_sessions (

@@ -1,15 +1,17 @@
-import { Router } from "express";
+import { Router, Request } from "express";
 import { getDb } from "../db/schema";
 import { AttributionEngine } from "../monitoring/attribution";
 import { DriftDetection } from "../monitoring/drift";
 import { ModelCalibration } from "../monitoring/calibration";
+import { getUserId } from "../middleware/auth";
+import { getUsdcBalance } from "../utils/balances";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
 const driftDetection = new DriftDetection();
 const modelCalibration = new ModelCalibration();
 
-router.get("/summary", async (_req, res) => {
+router.get("/summary", async (req: Request, res) => {
   try {
     const db = getDb();
     const todayStart = new Date().setUTCHours(0, 0, 0, 0);
@@ -69,12 +71,83 @@ router.get("/summary", async (_req, res) => {
       if (!first) currentStreak = -currentStreak;
     }
 
+    // ── WalletBalance fields for manage-agent page ────────────────
+    // Look up agent wallet address via authenticated user
+    let address = "";
+    let onChainUsdc = 0;
+    const userId = getUserId(req);
+    if (userId) {
+      const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
+      if (user?.agent_id) {
+        const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string } | undefined;
+        address = agent?.wallet_address ?? "";
+      }
+    }
+
+    // On-chain USDC balance (best-effort, non-blocking)
+    if (address) {
+      try { onChainUsdc = await getUsdcBalance(address); } catch { /* silent */ }
+    }
+
+    // All-time trade count
+    const { totalTradesAll } = db.prepare(
+      "SELECT COUNT(*) AS totalTradesAll FROM executions WHERE status != 'failed'"
+    ).get() as any;
+
+    // Cumulative realized P&L
+    const { totalRealizedPnl } = db.prepare(
+      "SELECT COALESCE(SUM(pnl), 0) AS totalRealizedPnl FROM executions WHERE pnl IS NOT NULL"
+    ).get() as any;
+
+    const pnlToday = realizedToday + unrealizedToday;
+    const cumulativePnl = totalRealizedPnl + unrealizedToday;
+
+    // Deployed capital (sum of open position sizes)
+    const deployedCapital = openExecs.reduce((sum, e) => sum + (e.amount ?? 0), 0);
+
+    // Total portfolio value: on-chain USDC if available, otherwise estimate from deployed + P&L
+    const totalValue = onChainUsdc > 0 ? onChainUsdc : Math.max(deployedCapital + cumulativePnl, 0) || 50000;
+    const pnlPct = totalValue > 0 ? cumulativePnl / totalValue : 0;
+    const pnlTodayPct = totalValue > 0 ? pnlToday / totalValue : 0;
+    const winRate = total > 0 ? (wins ?? 0) / total : 0;
+
+    // Circuit breaker status
+    const cbRow = db.prepare("SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1").get() as { state: string; drawdown_pct: number } | undefined;
+    const circuitBreakerStatus = cbRow?.state ?? "ARMED";
+
+    // Risk config for drawdownLimit and kelly
+    const gcb = db.prepare(`
+      SELECT drawdown_limit_pct, kelly_fraction_multiplier
+      FROM global_circuit_breakers gcb
+      JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+      WHERE rc.is_active = 1 LIMIT 1
+    `).get() as { drawdown_limit_pct: number; kelly_fraction_multiplier: number } | undefined;
+
+    const kellyMultiplier = gcb?.kelly_fraction_multiplier ?? 0.25;
+    const kellyUtilization = totalValue > 0 && kellyMultiplier > 0
+      ? deployedCapital / (totalValue * kellyMultiplier)
+      : 0;
+
     res.json({
-      pnlToday: realizedToday + unrealizedToday,
+      // WalletBalance fields (used by frontend api.getBalance())
+      address,
+      usdc: onChainUsdc,
+      onChainUsdc,
+      totalValue,
+      pnl: cumulativePnl,
+      pnlPct,
+      winRate,
+      totalTrades: totalTradesAll ?? 0,
+      pnlToday,
+      pnlTodayPct,
+      circuitBreakerStatus,
+      kellyUtilization,
+      drawdown: cbRow?.drawdown_pct ?? 0,
+      drawdownLimit: gcb?.drawdown_limit_pct ?? 0.15,
+      // Existing performance fields
       realizedToday,
       unrealizedToday,
       tradesToday: tradesToday ?? 0,
-      winRate: total > 0 ? (wins ?? 0) / total : 0,
       openPositions: openExecs.length,
       recentTrades,
       attribution,

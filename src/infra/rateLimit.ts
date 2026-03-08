@@ -51,9 +51,13 @@ export function rateLimit(config: RateLimitConfig) {
       res.setHeader("X-RateLimit-Reset", Math.ceil((now + config.windowMs) / 1000));
 
       if (count >= config.max) {
+        const retryAfter = Math.ceil(config.windowMs / 1000);
+        res.setHeader("Retry-After", retryAfter);
         res.status(429).json({
+          success: false,
           error: "Too many requests",
-          retryAfter: Math.ceil(config.windowMs / 1000),
+          code: "RATE_LIMITED",
+          retryAfter,
         });
         return;
       }

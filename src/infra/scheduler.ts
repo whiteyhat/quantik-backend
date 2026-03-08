@@ -3,6 +3,50 @@ import { scheduleRepeatable, QUEUE_NAMES } from "./queues";
 import { MarketScanner } from "../scanner/marketScanner";
 import { AlertPoller, ensureAlertColumns } from "../alerts/telegramAlert";
 import { ResolutionMonitor } from "../monitoring/resolution";
+import { checkByoHealth } from "../monitoring/byoHealth";
+import { getDb } from "../db/schema";
+import { emitPositionUpdate } from "./socket";
+
+// ── Position Update Emitter ───────────────────────────────────────────────────
+// Periodically computes current P&L for open positions and emits Socket.IO
+// events so the manage-agent page receives live position updates.
+
+async function emitPositionUpdates(): Promise<void> {
+  try {
+    const db = getDb();
+    const positions = db.prepare(
+      "SELECT slug, side, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
+    ).all() as { slug: string; side: string; amount: number; fill_price: number | null }[];
+
+    if (positions.length === 0) return;
+
+    const priceRows = db.prepare(
+      `SELECT s.slug, s.probability FROM scanner_results s
+       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
+       ON s.slug = t.slug AND s.scanned_at = t.latest`
+    ).all() as { slug: string; probability: number }[];
+    const priceMap = new Map(priceRows.map(r => [r.slug, r.probability]));
+
+    const now = Date.now();
+    for (const pos of positions) {
+      const current = priceMap.get(pos.slug) ?? pos.fill_price ?? 0.5;
+      const entry = pos.fill_price ?? 0.5;
+      const shares = entry > 0 ? pos.amount / entry : 0;
+      const pnl = pos.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      const pnlPct = pos.amount > 0 ? pnl / pos.amount : 0;
+
+      emitPositionUpdate(null, {
+        slug: pos.slug,
+        currentPrice: current,
+        pnl,
+        pnlPct,
+        timestamp: now,
+      });
+    }
+  } catch (err) {
+    console.error("[scheduler:position-update] error:", err);
+  }
+}
 
 // ── BullMQ Scheduler Bootstrap ────────────────────────────────────────────────
 // Replaces all setInterval-based scheduling with BullMQ repeatable jobs.
@@ -72,6 +116,22 @@ export async function startBullMQScheduler(): Promise<void> {
     processor: async () => { await resolutionMonitor.checkResolutions(); },
     immediate: true,
   });
+
+  // Position update emitter (30s) — live P&L push via Socket.IO
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.POSITION_UPDATE,
+    intervalMs: 30 * 1000,
+    processor: emitPositionUpdates,
+    immediate: false,
+  });
+
+  // BYO agent health monitor (60s) — heartbeat staleness + offline alerts
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.BYO_HEALTH,
+    intervalMs: 60 * 1000,
+    processor: checkByoHealth,
+    immediate: false,
+  });
 }
 
 // ── Legacy Fallback (setInterval) ─────────────────────────────────────────────
@@ -103,6 +163,16 @@ export function startLegacyScheduler(): void {
   setInterval(() => {
     resolutionMonitor.checkResolutions().catch(console.error);
   }, 5 * 60 * 1000);
+
+  // Position update emitter (30s) — live P&L push via Socket.IO
+  setInterval(() => {
+    emitPositionUpdates().catch(console.error);
+  }, 30 * 1000);
+
+  // BYO agent health monitor (60s) — heartbeat staleness + offline alerts
+  setInterval(() => {
+    checkByoHealth().catch(console.error);
+  }, 60 * 1000);
 }
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────
