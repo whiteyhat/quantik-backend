@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { requireApiKey, requireScope } from "../middleware/apiKeyAuth";
-import { executeTool, setByoAgentContext } from "../agents/tools";
+import { executeTool } from "../agents/tools";
+import { loadToolExecutionContextByAgentId } from "../agents/snapshots";
 import { rateLimit } from "../infra/rateLimit";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgExec } from "../db/postgres";
@@ -70,14 +71,12 @@ async function callTool(req: Request, res: Response, toolName: string, args: Rec
   const start = Date.now();
   const agent = req.apiKeyAgent!;
   try {
-    setByoAgentContext(agent.agentId);
-    const result = await withTimeout(executeTool(toolName, args), TOOL_TIMEOUT_MS);
-    setByoAgentContext(null);
+    const context = await loadToolExecutionContextByAgentId(agent.agentId, agent.userId);
+    const result = await withTimeout(executeTool(toolName, args, context), TOOL_TIMEOUT_MS);
     const latency = Date.now() - start;
     logRequest(agent.agentId, agent.userId, toolName, req.method, 200, latency);
     res.json({ success: true, data: result.data });
   } catch (err) {
-    setByoAgentContext(null);
     const latency = Date.now() - start;
     const isTimeout = err instanceof Error && err.message === "TOOL_TIMEOUT";
     const errMsg = isTimeout ? "Tool execution timed out" : (err instanceof Error ? err.message : "Tool execution failed");

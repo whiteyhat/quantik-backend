@@ -7,7 +7,7 @@ export interface ArbOpportunity {
 
 export function detectArbitrage(marketSlug: string, oracleResult: any): ArbOpportunity[] {
   const ops: ArbOpportunity[] = [];
-  const isExecutable = !!process.env.POLYMARKET_PRIVATE_KEY;
+  const isExecutable = false;
 
   if (oracleResult?.arb_detected) {
     ops.push({

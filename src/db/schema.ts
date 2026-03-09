@@ -21,10 +21,11 @@ function addColumn(db: Database.Database, sql: string): void {
 
 export function getDb(): Database.Database {
   if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    migrate(db);
+    const instance = new Database(DB_PATH);
+    instance.pragma("journal_mode = WAL");
+    instance.pragma("foreign_keys = ON");
+    migrate(instance);
+    db = instance;
   }
   return db;
 }
@@ -431,12 +432,14 @@ function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC);
   `);
 
   addColumn(db, "ALTER TABLE executions ADD COLUMN user_id TEXT");
   addColumn(db, "ALTER TABLE executions ADD COLUMN agent_id TEXT");
+
+  // Create indexes after ensuring columns exist (addColumn above)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
 
   // Dedup executions + unique index per slug per day
   try {

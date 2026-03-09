@@ -17,7 +17,6 @@ function getFallbackSecret(): string | null {
   const candidates = [
     process.env.CLERK_SECRET_KEY,
     process.env.CLERK_SECRET,
-    process.env.POLYMARKET_PRIVATE_KEY,
   ];
 
   for (const candidate of candidates) {

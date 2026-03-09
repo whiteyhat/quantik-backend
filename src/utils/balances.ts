@@ -1,6 +1,5 @@
 import { runCli } from "../cli";
 
-const WALLET_ADDRESS = "0x7EE996AbE9355a126F010EfF93487e84b2cE4b53";
 const POLYGON_RPC_URLS = ["https://polygon.drpc.org", "https://polygon-bor-rpc.publicnode.com"];
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
@@ -41,12 +40,12 @@ async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[])
   return json.result;
 }
 
-export async function getUsdcBalance(address: string = WALLET_ADDRESS): Promise<number> {
+export async function getUsdcBalance(address?: string | null): Promise<number> {
   const snapshot = await getUsdcBalanceSnapshot(address);
   return snapshot.balance;
 }
 
-export async function getUsdcBalanceSnapshot(address: string | null | undefined = WALLET_ADDRESS): Promise<UsdcBalanceSnapshot> {
+export async function getUsdcBalanceSnapshot(address: string | null | undefined): Promise<UsdcBalanceSnapshot> {
   if (!address) {
     return {
       balance: 0,
@@ -95,12 +94,12 @@ export async function getClobBalance(): Promise<number> {
   return 0;
 }
 
-export async function getPolBalance(address: string = WALLET_ADDRESS): Promise<number> {
+export async function getPolBalance(address?: string | null): Promise<number> {
   const snapshot = await getPolBalanceSnapshot(address);
   return snapshot.balance;
 }
 
-export async function getPolBalanceSnapshot(address: string | null | undefined = WALLET_ADDRESS): Promise<PolBalanceSnapshot> {
+export async function getPolBalanceSnapshot(address: string | null | undefined): Promise<PolBalanceSnapshot> {
   if (!address) {
     return {
       balance: 0,
@@ -131,7 +130,7 @@ export async function getPolBalanceSnapshot(address: string | null | undefined =
   };
 }
 
-export async function getWalletFundingSnapshot(address: string | null | undefined = WALLET_ADDRESS): Promise<WalletFundingSnapshot> {
+export async function getWalletFundingSnapshot(address: string | null | undefined): Promise<WalletFundingSnapshot> {
   if (!address) {
     return {
       address: null,

@@ -55,11 +55,7 @@ const PROTECTION: Record<string, string> = {
   hands_off: "Focus on take-profit targets more than stops. Use wide stops or mental stops. Let positions develop.",
 };
 
-const LEVERAGE: Record<string, string> = {
-  none: "NEVER use leverage. Trade spot only at 1x. Capital preservation through no borrowed funds.",
-  moderate: "Use 2x-5x leverage on high-conviction setups only. Always account for liquidation price in position sizing.",
-  full_throttle: "Use high leverage to maximize capital efficiency. Manage risk through position sizing and stops, not leverage limits.",
-};
+// Leverage is disabled — agents always trade spot only (1x, no borrowing/lending).
 
 const SENSE: Record<string, string> = {
   fixed_rules: "Make decisions purely on quantitative indicators and technical rules. Ignore news, social media, and narrative. Numbers only.",
@@ -97,9 +93,6 @@ ${MONEY[config.moneyApproach] ?? ""}
 ## Risk Management
 ${PROTECTION[config.protectionMindset] ?? ""}
 
-## Leverage Policy
-${LEVERAGE[config.leverageVibe] ?? ""}
-
 ## Market Analysis Approach
 ${SENSE[config.marketSense] ?? ""}
 
@@ -132,7 +125,6 @@ interface AgentCreateBody {
   profitDream: string;
   moneyApproach: string;
   protectionMindset: string;
-  leverageVibe: string;
   marketSense: string;
   assetLove: string;
 }
@@ -434,7 +426,6 @@ async function loadActiveApiKey(agentId: string): Promise<{ id: string; last_use
 function deriveRiskConfig(attrs: {
   personality?: string;
   protectionMindset?: string;
-  leverageVibe?: string;
   moneyApproach?: string;
 }): { drawdownLimit: number; maxPositionSize: number; kellyMultiplier: number } {
   // ── Drawdown limit: protection_mindset is primary driver
@@ -447,18 +438,11 @@ function deriveRiskConfig(attrs: {
 
   // ── Max position size: money_approach is primary driver
   const posMap: Record<string, number> = { fixed_safe: 0.05, smart_scaling: 0.10, aggressive: 0.20 };
-  let maxPositionSize = posMap[attrs.moneyApproach ?? "smart_scaling"] ?? 0.10;
+  const maxPositionSize = posMap[attrs.moneyApproach ?? "smart_scaling"] ?? 0.10;
 
-  // Leverage modifier
-  if (attrs.leverageVibe === "none") maxPositionSize = Math.max(0.03, maxPositionSize - 0.02);
-  if (attrs.leverageVibe === "full_throttle") maxPositionSize = Math.min(0.30, maxPositionSize + 0.05);
-
-  // ── Kelly multiplier: blended from personality + leverage
+  // ── Kelly multiplier: based on personality
   const kellyBase: Record<string, number> = { guardian: 0.15, balanced: 0.25, adventurer: 0.50 };
-  let kellyMultiplier = kellyBase[attrs.personality ?? "balanced"] ?? 0.25;
-
-  if (attrs.leverageVibe === "full_throttle") kellyMultiplier = Math.min(1.0, kellyMultiplier + 0.15);
-  if (attrs.leverageVibe === "none") kellyMultiplier = Math.max(0.05, kellyMultiplier - 0.10);
+  const kellyMultiplier = kellyBase[attrs.personality ?? "balanced"] ?? 0.25;
 
   return {
     drawdownLimit: Math.round(drawdownLimit * 1000) / 1000,
@@ -537,7 +521,7 @@ router.post("/agents", async (req: Request, res: Response) => {
     body.profitDream ?? "wealth_builder",
     body.moneyApproach ?? "smart_scaling",
     body.protectionMindset ?? "flexible",
-    body.leverageVibe ?? "moderate",
+    "none",
     body.marketSense ?? "fixed_rules",
     body.assetLove ?? "crypto",
     systemPrompt,
@@ -598,7 +582,7 @@ router.post("/agents", async (req: Request, res: Response) => {
       profit_dream: body.profitDream ?? "wealth_builder",
       money_approach: body.moneyApproach ?? "smart_scaling",
       protection_mindset: body.protectionMindset ?? "flexible",
-      leverage_vibe: body.leverageVibe ?? "moderate",
+      leverage_vibe: "none",
       market_sense: body.marketSense ?? "fixed_rules",
       asset_love: body.assetLove ?? "crypto",
       wallet_address: walletAddress,
@@ -811,7 +795,6 @@ router.patch("/agents/:id", (req: Request, res: Response) => {
     profitDream: (body.profitDream ?? existing.profit_dream) as string,
     moneyApproach: (body.moneyApproach ?? existing.money_approach) as string,
     protectionMindset: (body.protectionMindset ?? existing.protection_mindset) as string,
-    leverageVibe: (body.leverageVibe ?? existing.leverage_vibe) as string,
     marketSense: (body.marketSense ?? existing.market_sense) as string,
     assetLove: (body.assetLove ?? existing.asset_love) as string,
   };
@@ -830,7 +813,7 @@ router.patch("/agents/:id", (req: Request, res: Response) => {
   `).run(
     merged.name, merged.avatar, merged.animalType ?? null, merged.generatedImage ?? null,
     merged.personality, merged.decisionStyle, merged.tradingInstinct, merged.timePatience,
-    merged.profitDream, merged.moneyApproach, merged.protectionMindset, merged.leverageVibe,
+    merged.profitDream, merged.moneyApproach, merged.protectionMindset, "none",
     merged.marketSense, merged.assetLove, systemPrompt, now,
     req.params.id
   );

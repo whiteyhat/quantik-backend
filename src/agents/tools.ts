@@ -7,7 +7,14 @@
 // Tools are executed server-side — the LLM never gets raw DB access.
 
 import { getDb } from "../db/schema";
-import { getCircuitBreaker, getPortfolioManager, getCorrelationMonitor } from "../risk";
+import {
+  loadOpsSnapshot,
+  loadPortfolioSnapshot,
+  loadRiskSnapshot,
+  loadScannerSnapshot,
+  loadTradeHistorySnapshot,
+  type ToolExecutionContext,
+} from "./snapshots";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -199,132 +206,35 @@ export const TOOL_DECLARATIONS: GeminiFunctionDeclaration[] = [
 
 // ── Tool Executors ───────────────────────────────────────────────────────────
 
-async function executeGetPortfolio(): Promise<unknown> {
-  const db = getDb();
-  const portfolio = getPortfolioManager();
-  const totalCapital = await portfolio.getTotalCapital();
-  const deployed = portfolio.getDeployedCapital();
-  const available = await portfolio.getAvailableCapital();
-  const dailyPnl = portfolio.getDailyPnL();
-
-  const rows = db.prepare(
-    "SELECT slug, side, amount, fill_price, executed_at FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
-  ).all() as any[];
-
-  const priceRows = db.prepare(
-    `SELECT s.slug, s.probability FROM scanner_results s
-     INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) latest
-     ON s.slug = latest.slug AND s.scanned_at = latest.latest`
-  ).all() as any[];
-  const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
-
-  const positions = rows.map((e: any) => {
-    const current = currentPrices.get(e.slug) ?? e.fill_price ?? 0.5;
-    const entry = e.fill_price ?? 0.5;
-    const shares = entry > 0 ? e.amount / entry : 0;
-    const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
-    return {
-      slug: e.slug,
-      direction: e.side === "buy" ? "YES" : "NO",
-      size: e.amount,
-      entryPrice: entry,
-      currentPrice: current,
-      pnl: Math.round(pnl * 100) / 100,
-    };
-  });
-
+async function executeGetPortfolio(context: ToolExecutionContext | null): Promise<unknown> {
+  const portfolio = await loadPortfolioSnapshot(context);
   return {
-    totalCapital: Math.round(totalCapital * 100) / 100,
-    deployedCapital: Math.round(deployed * 100) / 100,
-    availableCapital: Math.round(available * 100) / 100,
-    exposurePct: totalCapital > 0 ? Math.round((deployed / totalCapital) * 10000) / 100 : 0,
-    dailyPnl: Math.round(dailyPnl * 100) / 100,
-    positionCount: positions.length,
-    positions,
+    totalCapital: portfolio.totalValue ?? 0,
+    deployedCapital: portfolio.deployedCapital,
+    availableCapital: portfolio.availableCapital,
+    exposurePct: portfolio.exposurePct,
+    dailyPnl: portfolio.dailyPnl,
+    dailyPnlPct: portfolio.dailyPnlPct,
+    positionCount: portfolio.positions.length,
+    totalPnl: portfolio.pnl,
+    totalPnlPct: portfolio.pnlPct,
+    balanceStatus: portfolio.balanceStatus,
+    balanceMessage: portfolio.balanceMessage,
+    fundingStatus: portfolio.fundingStatus,
+    fundingMessage: portfolio.fundingMessage,
+    positions: portfolio.positions,
   };
 }
 
-async function executeGetRiskStatus(): Promise<unknown> {
-  const portfolio = getPortfolioManager();
-  const correlation = getCorrelationMonitor();
-  const cb = getCircuitBreaker();
-  const cbStatus = await cb.checkAndTrip();
-  const totalCapital = await portfolio.getTotalCapital();
-  const deployed = portfolio.getDeployedCapital();
-  const dailyPnl = portfolio.getDailyPnL();
-
-  const themeExposure: Record<string, number> = {};
-  for (const [theme, exposure] of correlation.getThemeExposure()) {
-    themeExposure[theme] = exposure;
-  }
-
-  const db = getDb();
-  const gcb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
-    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
-     FROM global_circuit_breakers gcb
-     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1 LIMIT 1`
-  ).get();
-
-  return {
-    circuitBreaker: cbStatus.state,
-    totalCapital: Math.round(totalCapital * 100) / 100,
-    deployedCapital: Math.round(deployed * 100) / 100,
-    exposurePct: totalCapital > 0 ? Math.round((deployed / totalCapital) * 10000) / 100 : 0,
-    dailyPnl: Math.round(dailyPnl * 100) / 100,
-    dailyPnlPct: totalCapital > 0 ? Math.round((dailyPnl / totalCapital) * 10000) / 100 : 0,
-    themeExposure,
-    maxDrawdownPct: gcb?.drawdown_limit_pct ?? 0.15,
-    maxPositionSizePct: gcb?.max_position_size_pct ?? 0.10,
-    kellyFraction: gcb?.kelly_fraction_multiplier ?? 0.25,
-  };
+async function executeGetRiskStatus(context: ToolExecutionContext | null): Promise<unknown> {
+  return loadRiskSnapshot(context);
 }
 
-function executeGetTradeHistory(args: { limit?: number }): unknown {
-  const db = getDb();
-  const limit = Math.min(Math.max(1, args.limit ?? 10), 50);
-
-  const executions = db.prepare(
-    "SELECT * FROM executions ORDER BY executed_at DESC LIMIT ?"
-  ).all(limit) as any[];
-
-  const priceRows = db.prepare(
-    `SELECT s.slug, s.probability FROM scanner_results s
-     INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
-     ON s.slug = t.slug AND s.scanned_at = t.latest`
-  ).all() as any[];
-  const livePrice = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
-
-  const trades = executions.map((e: any) => {
-    const entry = e.fill_price ?? 0.5;
-    const current = livePrice.get(e.slug) ?? entry;
-    const shares = entry > 0 ? e.amount / entry : 0;
-    const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
-    let outcome = "OPEN";
-    if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
-    else if (e.status === "failed") outcome = "LOSS";
-
-    return {
-      slug: e.slug,
-      direction: e.side === "buy" ? "YES" : "NO",
-      size: e.amount,
-      price: entry,
-      outcome,
-      pnl: Math.round((e.pnl ?? pnl) * 100) / 100,
-      timestamp: e.executed_at,
-      mode: e.status,
-    };
-  });
-
-  const settled = trades.filter((t: any) => t.outcome !== "OPEN");
-  const wins = settled.filter((t: any) => t.outcome === "WIN").length;
-
-  return {
-    trades,
-    count: trades.length,
-    winRate: settled.length > 0 ? Math.round((wins / settled.length) * 10000) / 100 : 0,
-    totalPnl: Math.round(trades.reduce((sum: number, t: any) => sum + t.pnl, 0) * 100) / 100,
-  };
+async function executeGetTradeHistory(
+  args: { limit?: number },
+  context: ToolExecutionContext | null,
+): Promise<unknown> {
+  return loadTradeHistorySnapshot(context, args.limit ?? 10);
 }
 
 async function executeSearchMarkets(args: { query?: string; category?: string }): Promise<unknown> {
@@ -426,27 +336,10 @@ function executePlaceTrade(args: { slug: string; direction: string; size: number
 }
 
 function executeGetScannerSignals(args: { alerts_only?: string }): unknown {
-  const db = getDb();
-  const alertsOnly = args.alerts_only === "true";
-
-  let query = "SELECT * FROM scanner_results WHERE 1=1";
-  if (alertsOnly) {
-    query += " AND sigma_confidence >= 0.70 AND kelly_fraction >= 0.40";
-  }
-  query += " ORDER BY scanned_at DESC LIMIT 10";
-
-  const rows = db.prepare(query).all() as any[];
-
-  const signals = rows.map((r: any) => ({
-    slug: r.slug,
-    sigmaConfidence: r.sigma_confidence,
-    kellyFraction: r.kelly_fraction,
-    recommendation: r.recommendation,
-    probability: r.probability,
-    scannedAt: r.scanned_at,
-  }));
-
-  return { signals, count: signals.length };
+  return loadScannerSnapshot({
+    alertsOnly: args.alerts_only === "true",
+    limit: 10,
+  });
 }
 
 function executeGetPipelineHistory(args: { limit?: number }): unknown {
@@ -472,21 +365,15 @@ function executeGetPipelineHistory(args: { limit?: number }): unknown {
   };
 }
 
-// Context for BYO agent — set by toolApi router before calling executeTool
-let _byoAgentId: string | null = null;
-export function setByoAgentContext(agentId: string | null): void {
-  _byoAgentId = agentId;
-}
-
-function executeGetAgentStatus(): unknown {
-  if (!_byoAgentId) return { error: "Agent context not available" };
+function executeGetAgentStatus(context: ToolExecutionContext | null): unknown {
+  if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
   const db = getDb();
   const agent = db.prepare(
     `SELECT id, agent_code, status, name, avatar_emoji, agent_type, description,
             wallet_address, connection_status, last_heartbeat, created_at, updated_at, deployed_at
      FROM agents WHERE id = ?`
-  ).get(_byoAgentId) as any;
+  ).get(context.linkedAgentId) as any;
 
   if (!agent) return { error: "Agent not found" };
 
@@ -506,22 +393,22 @@ function executeGetAgentStatus(): unknown {
   };
 }
 
-function executeHeartbeat(): unknown {
-  if (!_byoAgentId) return { error: "Agent context not available" };
+function executeHeartbeat(context: ToolExecutionContext | null): unknown {
+  if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
   const now = Date.now();
   const db = getDb();
   db.prepare(
     "UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?"
-  ).run(now, _byoAgentId);
+  ).run(now, context.linkedAgentId);
 
   return { status: "ok", server_time: now, your_status: "connected" };
 }
 
 // ── New Tool Executors (Phase 7 — Full Autonomy) ────────────────────────────
 
-function executeClosePosition(args: { slug: string }): unknown {
-  if (!_byoAgentId) return { error: "Agent context not available" };
+function executeClosePosition(args: { slug: string }, context: ToolExecutionContext | null): unknown {
+  if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
   const db = getDb();
 
@@ -530,7 +417,7 @@ function executeClosePosition(args: { slug: string }): unknown {
     `SELECT id, slug, side, amount, fill_price, status FROM executions
      WHERE slug = ? AND agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
      ORDER BY executed_at DESC LIMIT 1`
-  ).get(args.slug, _byoAgentId) as {
+  ).get(args.slug, context.linkedAgentId) as {
     id: string; slug: string; side: string; amount: number; fill_price: number | null; status: string;
   } | undefined;
 
@@ -746,8 +633,11 @@ function executeGetPipelineOutput(args: { run_id: string }): unknown {
   };
 }
 
-function executeUpdateWebhookConfig(args: { endpoint_url?: string; webhook_events?: string }): unknown {
-  if (!_byoAgentId) return { error: "Agent context not available" };
+function executeUpdateWebhookConfig(
+  args: { endpoint_url?: string; webhook_events?: string },
+  context: ToolExecutionContext | null,
+): unknown {
+  if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
   const db = getDb();
   const updates: string[] = [];
@@ -798,14 +688,14 @@ function executeUpdateWebhookConfig(args: { endpoint_url?: string; webhook_event
 
   updates.push("updated_at = ?");
   values.push(String(Date.now()));
-  values.push(_byoAgentId);
+  values.push(context.linkedAgentId);
 
   db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
 
   // Return updated config
   const agent = db.prepare(
     "SELECT endpoint_url, webhook_events FROM agents WHERE id = ?"
-  ).get(_byoAgentId) as { endpoint_url: string | null; webhook_events: string | null };
+  ).get(context.linkedAgentId) as { endpoint_url: string | null; webhook_events: string | null };
 
   let parsedEvents: string[] = ["*"];
   try { parsedEvents = JSON.parse(agent.webhook_events ?? '["*"]'); } catch { /* ignore */ }
@@ -817,27 +707,28 @@ function executeUpdateWebhookConfig(args: { endpoint_url?: string; webhook_event
   };
 }
 
-function executeGetHealthScore(): unknown {
-  if (!_byoAgentId) return { error: "Agent context not available" };
+async function executeGetHealthScore(context: ToolExecutionContext | null): Promise<unknown> {
+  if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
-  // Lazy import to avoid loading healthScore module unless needed
-  const { computeHealthScore } = require("../monitoring/healthScore");
-  const score = computeHealthScore(_byoAgentId);
-
-  if (!score) return { error: "Failed to compute health score" };
-  return score;
+  const ops = await loadOpsSnapshot(context);
+  if (!ops.health) return { error: "Failed to compute health score" };
+  return ops.health;
 }
 
 // ── Tool Executor Dispatch ───────────────────────────────────────────────────
 
-export async function executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+export async function executeTool(
+  name: string,
+  args: Record<string, unknown>,
+  context: ToolExecutionContext | null = null,
+): Promise<ToolResult> {
   switch (name) {
     case "get_portfolio":
-      return { name, data: await executeGetPortfolio() };
+      return { name, data: await executeGetPortfolio(context) };
     case "get_risk_status":
-      return { name, data: await executeGetRiskStatus() };
+      return { name, data: await executeGetRiskStatus(context) };
     case "get_trade_history":
-      return { name, data: executeGetTradeHistory(args as { limit?: number }) };
+      return { name, data: await executeGetTradeHistory(args as { limit?: number }, context) };
     case "search_markets":
       return { name, data: await executeSearchMarkets(args as { query?: string; category?: string }) };
     case "run_analysis":
@@ -849,11 +740,11 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
     case "get_pipeline_history":
       return { name, data: executeGetPipelineHistory(args as { limit?: number }) };
     case "get_agent_status":
-      return { name, data: executeGetAgentStatus() };
+      return { name, data: executeGetAgentStatus(context) };
     case "heartbeat":
-      return { name, data: executeHeartbeat() };
+      return { name, data: executeHeartbeat(context) };
     case "close_position":
-      return { name, data: executeClosePosition(args as { slug: string }) };
+      return { name, data: executeClosePosition(args as { slug: string }, context) };
     case "get_market_price":
       return { name, data: await executeGetMarketPrice(args as { slug: string }) };
     case "get_risk_config":
@@ -865,9 +756,9 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
     case "get_pipeline_output":
       return { name, data: executeGetPipelineOutput(args as { run_id: string }) };
     case "update_webhook_config":
-      return { name, data: executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }) };
+      return { name, data: executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }, context) };
     case "get_health_score":
-      return { name, data: executeGetHealthScore() };
+      return { name, data: await executeGetHealthScore(context) };
     default:
       return { name, data: { error: `Unknown tool: ${name}` } };
   }
