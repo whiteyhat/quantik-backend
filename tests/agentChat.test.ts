@@ -359,6 +359,7 @@ describe("agent chat route", () => {
       expect(reply).not.toMatch(/I hope this helps/i);
       expect(reply).not.toMatch(/let me know/i);
       expect(reply).not.toMatch(/[—–]/);
+      expect(reply).not.toContain("...");
     } finally {
       fetchMock.mockRestore();
       await closeServer(server);

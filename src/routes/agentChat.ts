@@ -222,10 +222,93 @@ function emitContext(res: Response, context: ContextEnvelope): void {
   });
 }
 
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function ensureSentenceEnding(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+function compressSentenceToWordTarget(sentence: string, maxWords: number): string {
+  let next = sentence
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const transforms = [
+    (value: string) => value.replace(/,\s+(especially|mainly|including)\b[\s\S]*$/i, ""),
+    (value: string) => value.replace(/\s+(because|which|while|where|when|if|so that)\b[\s\S]*$/i, ""),
+    (value: string) => value.replace(/,\s*[^,]+$/, ""),
+    (value: string) => value.replace(/\s+(with|including|covering|across)\b[\s\S]*$/i, ""),
+    (value: string) => value.replace(/\s+(and|but)\s+[^.?!]+$/i, ""),
+  ];
+
+  for (const transform of transforms) {
+    if (countWords(next) <= maxWords) break;
+    const candidate = transform(next).replace(/\s+/g, " ").trim();
+    if (candidate && candidate !== next) {
+      next = candidate;
+    }
+  }
+
+  if (countWords(next) <= maxWords) {
+    return ensureSentenceEnding(next);
+  }
+
+  const words = next.split(/\s+/).filter(Boolean);
+  const limit = Math.min(maxWords, words.length);
+  let cutIndex = limit;
+  for (let index = limit; index >= Math.max(12, Math.floor(maxWords * 0.65)); index -= 1) {
+    const word = words[index - 1] ?? "";
+    if (/[,:;]$/.test(word) || /^(and|but|because|which|while|with|including|if|when)$/i.test(word)) {
+      cutIndex = Math.max(index - 1, 1);
+      break;
+    }
+  }
+
+  const candidate = words
+    .slice(0, cutIndex)
+    .join(" ")
+    .replace(/[,:;]+$/, "")
+    .trim();
+
+  return ensureSentenceEnding(candidate || words.slice(0, limit).join(" "));
+}
+
 function clampReplyWords(text: string, maxWords = MAX_REPLY_WORDS): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length <= maxWords) return text.trim();
-  return `${words.slice(0, maxWords).join(" ")}...`;
+  const normalized = text.trim().replace(/\s+/g, " ");
+  if (!normalized) return "";
+  if (countWords(normalized) <= maxWords) return ensureSentenceEnding(normalized);
+
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  if (sentences.length > 1) {
+    const selected: string[] = [];
+    let wordsUsed = 0;
+
+    for (const sentence of sentences) {
+      const sentenceWords = countWords(sentence);
+      if (selected.length === 0 && sentenceWords > maxWords) {
+        return compressSentenceToWordTarget(sentence, maxWords);
+      }
+      if (wordsUsed + sentenceWords > maxWords) break;
+      selected.push(ensureSentenceEnding(sentence));
+      wordsUsed += sentenceWords;
+    }
+
+    if (selected.length > 0) {
+      return selected.join(" ");
+    }
+  }
+
+  return compressSentenceToWordTarget(normalized, maxWords);
 }
 
 function humanizeAgentReply(rawText: string): string {
