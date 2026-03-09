@@ -33,6 +33,7 @@ import sigmaRouter from "./routes/sigma";
 import clauseRouter from "./routes/clause";
 import luciferRouter from "./routes/lucifer";
 import fluxRouter from "./routes/flux";
+import healthRouter from "./routes/health";
 import signalsRouter from "./routes/signals";
 import riskL3Router from "./routes/riskL3";
 import executionRouter from "./routes/execution";
@@ -109,12 +110,8 @@ app.get("/", (_req, res) => {
   res.json({ status: "ok", service: "quantik-backend", message: "Quantik Backend Online" });
 });
 
-// Health check
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: Date.now() });
-});
-
 // Routes
+app.use("/api/health", healthRouter);
 app.use("/api/markets", marketsRouter);
 app.use("/api/wallet", walletRouter);
 app.use("/api/pipeline", pipelineRouter);

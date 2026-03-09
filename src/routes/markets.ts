@@ -385,9 +385,29 @@ router.get("/:slug", async (req: Request, res: Response) => {
 // ── GET /api/markets/:tokenId/book ─────────────────────────────
 router.get("/:tokenId/book", async (req: Request, res: Response) => {
   const tokenId = String(req.params["tokenId"] ?? "");
+  if (!tokenId) {
+    res.status(400).json({ error: "Missing tokenId" });
+    return;
+  }
   try {
-    const data = await runCli(["clob", "book", tokenId]);
-    res.json(data);
+    const apiRes = await fetch(
+      `https://clob.polymarket.com/book?token_id=${encodeURIComponent(tokenId)}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) }
+    );
+    if (!apiRes.ok) {
+      res.status(apiRes.status).json({ error: "CLOB API error", status: apiRes.status });
+      return;
+    }
+    const data = (await apiRes.json()) as Record<string, unknown>;
+    const normalize = (levels: unknown[]) =>
+      levels.map((l: unknown) => {
+        const r = l as Record<string, unknown>;
+        return { price: parseFloat(String(r.price)) || 0, size: parseFloat(String(r.size)) || 0 };
+      });
+    res.json({
+      bids: Array.isArray(data.bids) ? normalize(data.bids) : [],
+      asks: Array.isArray(data.asks) ? normalize(data.asks) : [],
+    });
   } catch (err) {
     handleCliError(res, err);
   }

@@ -82,6 +82,22 @@ When [AGENT DATA] is present: extract the numbers, cite them naturally in plain 
 
 const sessions = new Map<string, SessionEntry>();
 
+export function getRelayHealthSnapshot() {
+  const configured = GEMINI_API_KEY.trim().length > 0;
+
+  return {
+    status: configured ? "healthy" : "degraded",
+    checkedAt: Date.now(),
+    detail: configured
+      ? `${sessions.size} active ${sessions.size === 1 ? "session" : "sessions"}`
+      : "Gemini API key missing",
+    agent: "relay",
+    llm: "gemini-flash",
+    models: [GEMINI_MODEL, GEMINI_FALLBACK],
+    activeSessions: sessions.size,
+  };
+}
+
 function getSession(sessionId: string): OllamaMessage[] {
   const entry = sessions.get(sessionId);
   if (entry && Date.now() - entry.lastAccess < SESSION_TTL_MS) {
@@ -587,12 +603,15 @@ router.post("/imagine", async (req: Request, res: Response) => {
 // ── GET /api/relay/health ──────────────────────────────────────
 
 router.get("/health", async (_req: Request, res: Response) => {
+  const snapshot = getRelayHealthSnapshot();
   res.json({
-    status: "ok",
-    agent: "relay",
-    llm: "gemini-flash",
-    models: [GEMINI_MODEL, GEMINI_FALLBACK],
-    activeSessions: sessions.size,
+    status: snapshot.status === "healthy" ? "ok" : snapshot.status,
+    checkedAt: snapshot.checkedAt,
+    detail: snapshot.detail,
+    agent: snapshot.agent,
+    llm: snapshot.llm,
+    models: snapshot.models,
+    activeSessions: snapshot.activeSessions,
   });
 });
 
