@@ -181,20 +181,36 @@ async function getRequiredUserId(req: Request, res: Response): Promise<string | 
   return userId;
 }
 
-async function hasExistingAgentForUser(userId: string): Promise<boolean> {
+async function terminateExistingAgents(userId: string): Promise<void> {
+  const now = Date.now();
+  const db = getDb();
+
+  // Find all non-terminated agents for this user
+  const sqliteAgents = db.prepare(
+    `SELECT id FROM agents WHERE user_id = ? AND status != 'terminated'`
+  ).all(userId) as { id: string }[];
+
+  for (const agent of sqliteAgents) {
+    db.prepare(`DELETE FROM webhook_delivery_log WHERE agent_id = ?`).run(agent.id);
+    db.prepare(`DELETE FROM byo_request_log WHERE agent_id = ?`).run(agent.id);
+    db.prepare(`DELETE FROM api_keys WHERE agent_id = ?`).run(agent.id);
+    db.prepare(`DELETE FROM agents WHERE id = ?`).run(agent.id);
+  }
+  db.prepare(`UPDATE users SET agent_id = NULL WHERE id = ?`).run(userId);
+
   if (isPgEnabled()) {
-    const existing = await pgQuery(
-      `SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated' LIMIT 1`,
+    const pgAgents = await pgQuery<{ id: string }>(
+      `SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated'`,
       [userId]
     );
-    return existing.length > 0;
+    for (const agent of pgAgents) {
+      await pgExec(`DELETE FROM webhook_delivery_log WHERE agent_id = $1`, [agent.id]);
+      await pgExec(`DELETE FROM byo_request_log WHERE agent_id = $1`, [agent.id]);
+      await pgExec(`DELETE FROM api_keys WHERE agent_id = $1`, [agent.id]);
+      await pgExec(`DELETE FROM agents WHERE id = $1`, [agent.id]);
+    }
+    await pgExec(`UPDATE users SET agent_id = NULL WHERE id = $1`, [userId]);
   }
-
-  const db = getDb();
-  const existing = db.prepare(
-    `SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1`
-  ).get(userId);
-  return Boolean(existing);
 }
 
 async function loadOwnedAgent(agentId: string, userId: string): Promise<OwnedAgentRecord | null> {
@@ -495,17 +511,10 @@ router.post("/agents", async (req: Request, res: Response) => {
   }
 
   try {
-    const existing = await hasExistingAgentForUser(userId);
-    if (existing) {
-      res.status(409).json({
-        error: "AGENT_LIMIT_REACHED",
-        message: "You already have an agent. Delete your current agent before creating a new one.",
-      });
-      return;
-    }
+    await terminateExistingAgents(userId);
   } catch (err) {
-    console.error("[agents] limit check error:", err);
-    res.status(500).json({ error: "Failed to verify existing agent status" });
+    console.error("[agents] auto-replace error:", err);
+    res.status(500).json({ error: "Failed to replace existing agent" });
     return;
   }
 

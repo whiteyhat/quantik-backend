@@ -8,6 +8,17 @@ const DB_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 let db: Database.Database;
 
+/** Safely add a column — logs unexpected errors instead of swallowing them */
+function addColumn(db: Database.Database, sql: string): void {
+  try {
+    db.exec(sql);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("duplicate column")) return; // already exists — OK
+    console.error(`[migration] WARN: ${sql} — ${msg}`);
+  }
+}
+
 export function getDb(): Database.Database {
   if (!db) {
     db = new Database(DB_PATH);
@@ -249,7 +260,7 @@ function migrate(db: Database.Database): void {
   `);
 
   // Migration: add is_mock column to aura_results
-  try { db.exec("ALTER TABLE aura_results ADD COLUMN is_mock INTEGER NOT NULL DEFAULT 0"); } catch {}
+  addColumn(db, "ALTER TABLE aura_results ADD COLUMN is_mock INTEGER NOT NULL DEFAULT 0");
 
   db.exec(`
     -- ── Oracle Results ──────────────────────────────────────────────
@@ -424,8 +435,8 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC);
   `);
 
-  try { db.exec("ALTER TABLE executions ADD COLUMN user_id TEXT"); } catch {}
-  try { db.exec("ALTER TABLE executions ADD COLUMN agent_id TEXT"); } catch {}
+  addColumn(db, "ALTER TABLE executions ADD COLUMN user_id TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN agent_id TEXT");
 
   // Dedup executions + unique index per slug per day
   try {
@@ -453,8 +464,8 @@ function migrate(db: Database.Database): void {
   } catch {}
 
   // Add execution columns to scanner_results if missing
-  try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_status TEXT DEFAULT NULL"); } catch {}
-  try { db.exec("ALTER TABLE scanner_results ADD COLUMN execution_id INTEGER DEFAULT NULL"); } catch {}
+  addColumn(db, "ALTER TABLE scanner_results ADD COLUMN execution_status TEXT DEFAULT NULL");
+  addColumn(db, "ALTER TABLE scanner_results ADD COLUMN execution_id INTEGER DEFAULT NULL");
 
   // Migration: fix max_position_size_pct rows seeded with legacy percent scale (5.0 = 500%)
   // Normalise any value > 1.0 to 0–1 scale.
@@ -557,19 +568,19 @@ function migrate(db: Database.Database): void {
   `);
 
   // Migration: add user_id to agents table
-  try { db.exec("ALTER TABLE agents ADD COLUMN user_id TEXT"); } catch {}
+  addColumn(db, "ALTER TABLE agents ADD COLUMN user_id TEXT");
 
   // Migration: BYO agent columns
-  try { db.exec("ALTER TABLE agents ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'created'"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN endpoint_url TEXT"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN agent_url TEXT"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN connection_status TEXT DEFAULT 'pending'"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN last_heartbeat INTEGER"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN description TEXT"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN webhook_secret TEXT"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN webhook_events TEXT DEFAULT '[\"*\"]'"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN autopilot_enabled INTEGER NOT NULL DEFAULT 0"); } catch {}
-  try { db.exec("ALTER TABLE agents ADD COLUMN autopilot_updated_at INTEGER"); } catch {}
+  addColumn(db, "ALTER TABLE agents ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'created'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN endpoint_url TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN agent_url TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN connection_status TEXT DEFAULT 'pending'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN last_heartbeat INTEGER");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN description TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN webhook_secret TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN webhook_events TEXT DEFAULT '[\"*\"]'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_enabled INTEGER NOT NULL DEFAULT 0");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_updated_at INTEGER");
 
   // ── API Keys (BYO agent authentication) ──────────────────────────
   db.exec(`
@@ -648,8 +659,8 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_user ON byo_onboarding_sessions(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
   `);
-  try { db.exec("ALTER TABLE byo_onboarding_sessions ADD COLUMN encrypted_wallet_bundle TEXT"); } catch {}
-  try { db.exec("ALTER TABLE byo_onboarding_sessions ADD COLUMN wallet_downloaded_at INTEGER"); } catch {}
+  addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN encrypted_wallet_bundle TEXT");
+  addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN wallet_downloaded_at INTEGER");
 
   // ── Chat History (persistent across sessions) ──────────────────────────
   db.exec(`

@@ -208,19 +208,35 @@ async function getUserIdOrReject(req: Request, res: Response): Promise<string | 
   return userId;
 }
 
-async function hasExistingAgent(userId: string): Promise<boolean> {
+async function terminateExistingAgents(userId: string): Promise<void> {
   const db = getDb();
-  const existingSqlite = db.prepare(
-    "SELECT id FROM agents WHERE user_id = ? AND status != 'terminated' LIMIT 1"
-  ).get(userId) as { id: string } | undefined;
-  if (existingSqlite) return true;
 
-  if (!isPgEnabled()) return false;
-  const existingPg = await pgQueryOne<{ id: string }>(
-    "SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated' LIMIT 1",
-    [userId]
-  );
-  return Boolean(existingPg);
+  const sqliteAgents = db.prepare(
+    "SELECT id FROM agents WHERE user_id = ? AND status != 'terminated'"
+  ).all(userId) as { id: string }[];
+
+  for (const agent of sqliteAgents) {
+    db.prepare("DELETE FROM webhook_delivery_log WHERE agent_id = ?").run(agent.id);
+    db.prepare("DELETE FROM byo_request_log WHERE agent_id = ?").run(agent.id);
+    db.prepare("DELETE FROM api_keys WHERE agent_id = ?").run(agent.id);
+    db.prepare("DELETE FROM agents WHERE id = ?").run(agent.id);
+  }
+  db.prepare("UPDATE users SET agent_id = NULL WHERE id = ?").run(userId);
+
+  if (isPgEnabled()) {
+    const pool = getPgPool();
+    const { rows: pgAgents } = await pool.query<{ id: string }>(
+      "SELECT id FROM agents WHERE user_id = $1 AND status != 'terminated'",
+      [userId]
+    );
+    for (const agent of pgAgents) {
+      await pool.query("DELETE FROM webhook_delivery_log WHERE agent_id = $1", [agent.id]);
+      await pool.query("DELETE FROM byo_request_log WHERE agent_id = $1", [agent.id]);
+      await pool.query("DELETE FROM api_keys WHERE agent_id = $1", [agent.id]);
+      await pool.query("DELETE FROM agents WHERE id = $1", [agent.id]);
+    }
+    await pool.query("UPDATE users SET agent_id = NULL WHERE id = $1", [userId]);
+  }
 }
 
 function writeSqliteSession(record: ByoSessionRecord): void {
@@ -736,11 +752,11 @@ router.post("/agents/byo/onboarding", async (req: Request, res: Response) => {
   const userId = await getUserIdOrReject(req, res);
   if (!userId) return;
 
-  if (await hasExistingAgent(userId)) {
-    res.status(409).json({
-      error: "AGENT_LIMIT_REACHED",
-      message: "You already have an agent. Delete your current agent before creating a new one.",
-    });
+  try {
+    await terminateExistingAgents(userId);
+  } catch (err) {
+    console.error("[byo-onboarding] auto-replace error:", err);
+    res.status(500).json({ error: "Failed to replace existing agent" });
     return;
   }
 
@@ -861,11 +877,14 @@ router.post("/agents/byo/claim/:claimToken", async (req: Request, res: Response)
     return;
   }
 
-  if (await hasExistingAgent(session.user_id)) {
+  try {
+    await terminateExistingAgents(session.user_id);
+  } catch (err) {
+    console.error("[byo-claim] auto-replace error:", err);
     const now = Date.now();
-    updateSqliteSession(session.id, { status: "failed", last_error: "Agent limit reached", updated_at: now });
-    await updatePgSession(session.id, { status: "failed", last_error: "Agent limit reached", updated_at: now });
-    res.status(409).json({ error: "AGENT_LIMIT_REACHED" });
+    updateSqliteSession(session.id, { status: "failed", last_error: "Auto-replace failed", updated_at: now });
+    await updatePgSession(session.id, { status: "failed", last_error: "Auto-replace failed", updated_at: now });
+    res.status(500).json({ error: "Failed to replace existing agent" });
     return;
   }
 
