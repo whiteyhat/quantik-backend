@@ -6,9 +6,18 @@ import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
 
 const clerkEnabled = !!(process.env.CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY);
 
+// When CLERK_JWT_KEY is set (PEM public key from Clerk Dashboard → API Keys → "Show JWT public key"),
+// JWT verification is done locally without a network call to api.clerk.com/v1/jwks.
+// This is required in production when using a custom Clerk domain (e.g. clerk.quantik.fun),
+// because the CLERK_SECRET_KEY may belong to a different Clerk instance than the one signing tokens,
+// causing a kid mismatch and 401 errors.
+const clerkMiddlewareOptions = process.env.CLERK_JWT_KEY
+  ? { jwtKey: process.env.CLERK_JWT_KEY }
+  : {};
+
 // Clerk middleware — verifies JWT and attaches auth to req (no-op when keys missing)
 export const clerkAuth = clerkEnabled
-  ? clerkMiddleware()
+  ? clerkMiddleware(clerkMiddlewareOptions)
   : (_req: Request, _res: Response, next: NextFunction) => next();
 
 // Require authentication — returns 401 if no valid session
