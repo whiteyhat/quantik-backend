@@ -109,6 +109,11 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_enabled INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_updated_at BIGINT;
 
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_private_key TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_seed_phrase TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_ready INTEGER DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_status TEXT DEFAULT 'pending_funding';
+
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,

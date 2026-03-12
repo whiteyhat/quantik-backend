@@ -585,6 +585,12 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_enabled INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_updated_at INTEGER");
 
+  // Migration: Polymarket wallet preparation (server-side encrypted key storage)
+  addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_private_key TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_seed_phrase TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN polymarket_ready INTEGER DEFAULT 0");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN polymarket_status TEXT DEFAULT 'pending_funding'");
+
   // ── API Keys (BYO agent authentication) ──────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS api_keys (

@@ -7,6 +7,10 @@ import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
 import { requireEitherAuth } from "../middleware/apiKeyAuth";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { computeHealthScore } from "../monitoring/healthScore";
+import { generateWalletCredentials } from "../wallet/generate";
+import { encrypt } from "../infra/encryption";
+import { rateLimit } from "../infra/rateLimit";
+import { verifyAndPreparePolymarket } from "../services/polymarket-prep.service";
 
 const router = Router();
 
@@ -117,7 +121,9 @@ interface AgentCreateBody {
   avatar: string;
   animalType?: string;
   generatedImage?: string | null;
-  wallet_address: string;
+  wallet_address?: string;
+  private_key?: string;
+  seed_phrase?: string;
   personality: string;
   decisionStyle: string;
   tradingInstinct: string;
@@ -489,11 +495,6 @@ router.post("/agents", async (req: Request, res: Response) => {
     return;
   }
 
-  if (!body.wallet_address || !EVM_ADDRESS_RE.test(body.wallet_address)) {
-    res.status(400).json({ error: "wallet_address must be a valid EVM address (0x + 40 hex chars)" });
-    return;
-  }
-
   try {
     await terminateExistingAgents(userId);
   } catch (err) {
@@ -502,9 +503,40 @@ router.post("/agents", async (req: Request, res: Response) => {
     return;
   }
 
+  // Wallet handling: frontend generates wallet via /api/wallet/generate,
+  // user downloads the private key, then passes address + key here.
+  // Backend encrypts the key for server-side Polymarket approvals.
+  // Fallback: if no wallet_address provided, generate server-side.
+  let walletAddress: string;
+  let encryptedPrivateKey: string;
+  let encryptedSeedPhrase: string;
+
+  if (body.wallet_address && EVM_ADDRESS_RE.test(body.wallet_address)) {
+    walletAddress = body.wallet_address;
+    // If frontend also sent the private key, encrypt+store it for automated approvals
+    encryptedPrivateKey = body.private_key ? encrypt(body.private_key) : "";
+    encryptedSeedPhrase = body.seed_phrase ? encrypt(body.seed_phrase) : "";
+    // Clear from request body immediately
+    body.private_key = undefined;
+    body.seed_phrase = undefined;
+  } else {
+    // Fallback: generate wallet server-side (no key returned to user)
+    try {
+      const wallet = await generateWalletCredentials();
+      walletAddress = wallet.address;
+      encryptedPrivateKey = encrypt(wallet.privateKey);
+      encryptedSeedPhrase = encrypt(wallet.seedPhrase);
+      wallet.privateKey = "";
+      wallet.seedPhrase = "";
+    } catch (walletErr) {
+      console.error("[agents] wallet generation error:", walletErr instanceof Error ? walletErr.message : walletErr);
+      res.status(500).json({ error: "Failed to generate wallet" });
+      return;
+    }
+  }
+
   const id = uuidv4();
   const agentCode = generateAgentCode();
-  const walletAddress = body.wallet_address;
   const now = Date.now();
   const systemPrompt = buildSystemPrompt(body, agentCode);
 
@@ -526,6 +558,8 @@ router.post("/agents", async (req: Request, res: Response) => {
     body.assetLove ?? "crypto",
     systemPrompt,
     walletAddress,
+    encryptedPrivateKey || null,
+    encryptedSeedPhrase || null,
     now, now,
   ];
 
@@ -536,9 +570,10 @@ router.post("/agents", async (req: Request, res: Response) => {
           id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
           personality, decision_style, trading_instinct, time_patience, profit_dream,
           money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
-          system_prompt, wallet_address, user_id, created_at, updated_at
-        ) VALUES ($1, $2, 'inactive', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-      `, [...agentParams.slice(0, 18), userId, ...agentParams.slice(18)]);
+          system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
+          polymarket_ready, polymarket_status, user_id, created_at, updated_at
+        ) VALUES ($1, $2, 'inactive', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 0, 'pending_funding', $21, $22, $23)
+      `, [...agentParams.slice(0, 20), userId, ...agentParams.slice(20)]);
 
       if (userId) {
         await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [id, userId]);
@@ -554,9 +589,10 @@ router.post("/agents", async (req: Request, res: Response) => {
           id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
           personality, decision_style, trading_instinct, time_patience, profit_dream,
           money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
-          system_prompt, wallet_address, user_id, created_at, updated_at
-        ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(...agentParams.slice(0, 18), userId, ...agentParams.slice(18));
+          system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
+          polymarket_ready, polymarket_status, user_id, created_at, updated_at
+        ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending_funding', ?, ?, ?)
+      `).run(...agentParams.slice(0, 20), userId, ...agentParams.slice(20));
 
       if (userId) {
         db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
@@ -586,6 +622,18 @@ router.post("/agents", async (req: Request, res: Response) => {
       market_sense: body.marketSense ?? "fixed_rules",
       asset_love: body.assetLove ?? "crypto",
       wallet_address: walletAddress,
+      polymarket_ready: false,
+      polymarket_status: "pending_funding",
+      funding_instructions: {
+        address: walletAddress,
+        network: "Polygon (Mainnet)",
+        required: {
+          pol: ">0.01 POL (gas fees)",
+          usdc: ">$1 USDC.e (trading)",
+        },
+        usdc_contract: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        note: "Fund this address, then click Verify Readiness.",
+      },
       created_at: now,
       updated_at: now,
       deployed_at: null,
@@ -593,6 +641,38 @@ router.post("/agents", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[agents] create error:", err);
     res.status(500).json({ error: "Failed to create agent" });
+  }
+});
+
+// ── POST /api/v1/agents/:id/verify-polymarket — Run Polymarket approvals ─────
+// Decrypts the agent's stored private key, checks funding, runs CLI approvals,
+// and marks the agent as Polymarket-ready. Rate-limited to 3 calls/min/user.
+
+const polymarketVerifyLimit = rateLimit({
+  windowMs: 60_000,
+  max: 3,
+  keyPrefix: "polymarket-verify",
+});
+
+router.post("/agents/:id/verify-polymarket", polymarketVerifyLimit, async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+
+  try {
+    const result = await verifyAndPreparePolymarket(agentId, userId);
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+
+    if (msg === "Agent not found") {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    console.error("[polymarket-verify] error:", msg);
+    res.status(500).json({ error: "Polymarket verification failed. Try again." });
   }
 });
 
