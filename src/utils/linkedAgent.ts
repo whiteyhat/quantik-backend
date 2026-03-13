@@ -120,7 +120,7 @@ export async function loadLinkedAgentForUser(userId: string): Promise<LinkedAgen
 
 export async function loadSingleAutopilotExecutionContext(): Promise<LinkedAgentContext | null> {
   if (isPgEnabled()) {
-    const rows = await pgQuery<{
+    const row = await pgQueryOne<{
       user_id: string;
       agent_id: string;
       status: string;
@@ -136,22 +136,23 @@ export async function loadSingleAutopilotExecutionContext(): Promise<LinkedAgent
               agents.autopilot_enabled
        FROM users
        JOIN agents ON agents.id = users.agent_id
-       WHERE agents.status != 'terminated'
-       LIMIT 2`
+       WHERE agents.status = 'active' AND agents.autopilot_enabled = 1
+       ORDER BY agents.updated_at DESC NULLS LAST
+       LIMIT 1`
     );
-    if (rows.length !== 1) return null;
+    if (!row) return null;
     return {
-      userId: rows[0].user_id,
-      agentId: rows[0].agent_id,
-      status: rows[0].status,
-      agentType: rows[0].agent_type,
-      walletAddress: rows[0].wallet_address,
-      autopilotEnabled: normalizeDbBoolean(rows[0].autopilot_enabled),
+      userId: row.user_id,
+      agentId: row.agent_id,
+      status: row.status,
+      agentType: row.agent_type,
+      walletAddress: row.wallet_address,
+      autopilotEnabled: normalizeDbBoolean(row.autopilot_enabled),
     };
   }
 
   const db = getDb();
-  const rows = db.prepare(
+  const row = db.prepare(
     `SELECT users.id AS user_id,
             agents.id AS agent_id,
             agents.status,
@@ -160,23 +161,24 @@ export async function loadSingleAutopilotExecutionContext(): Promise<LinkedAgent
             agents.autopilot_enabled
      FROM users
      JOIN agents ON agents.id = users.agent_id
-     WHERE agents.status != 'terminated'
-     LIMIT 2`
-  ).all() as Array<{
+     WHERE agents.status = 'active' AND agents.autopilot_enabled = 1
+     ORDER BY agents.updated_at DESC
+     LIMIT 1`
+  ).get() as {
     user_id: string;
     agent_id: string;
     status: string;
     agent_type: string;
     wallet_address: string | null;
     autopilot_enabled: number | boolean | null;
-  }>;
-  if (rows.length !== 1) return null;
+  } | undefined;
+  if (!row) return null;
   return {
-    userId: rows[0].user_id,
-    agentId: rows[0].agent_id,
-    status: rows[0].status,
-    agentType: rows[0].agent_type,
-    walletAddress: rows[0].wallet_address,
-    autopilotEnabled: normalizeDbBoolean(rows[0].autopilot_enabled),
+    userId: row.user_id,
+    agentId: row.agent_id,
+    status: row.status,
+    agentType: row.agent_type,
+    walletAddress: row.wallet_address,
+    autopilotEnabled: normalizeDbBoolean(row.autopilot_enabled),
   };
 }

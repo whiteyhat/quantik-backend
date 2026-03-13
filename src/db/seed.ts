@@ -64,32 +64,6 @@ const insertPipelineRun = db.prepare(`
 
 for (const run of pipelineRuns) insertPipelineRun.run(run);
 
-// ── Trades (linked to pipeline runs) ─────────────────────────────
-
-const insertTrade = db.prepare(`
-  INSERT OR REPLACE INTO trades
-    (id, order_id, market_slug, direction, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
-  VALUES (@id, @order_id, @market_slug, @direction, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id)
-`);
-
-pipelineRuns
-  .filter((r) => r.decision !== "SKIP")
-  .forEach((r, i) => {
-    insertTrade.run({
-      id: `trade-${String(i + 1).padStart(3, "0")}`,
-      order_id: `0x${Math.random().toString(16).slice(2, 18)}`,
-      market_slug: r.market_slug,
-      direction: r.decision === "BET_YES" ? "YES" : "NO",
-      size: +(5 + Math.random() * 45).toFixed(2),
-      price: +(0.3 + Math.random() * 0.4).toFixed(2),
-      net_ev: +(0.01 + Math.random() * 0.12).toFixed(4),
-      ev_grade: ["S", "A", "B+", "B"][i % 4],
-      status: i === 0 ? "pending" : "filled",
-      created_at: r.completed_at!,
-      pipeline_run_id: r.id,
-    });
-  });
-
 // ── Oracle Results ───────────────────────────────────────────────
 
 const insertOracle = db.prepare(`
@@ -330,49 +304,6 @@ for (const [i, m] of MARKETS.slice(0, 4).entries()) {
   );
 }
 
-// ── Paper Trades ─────────────────────────────────────────────────
-
-const insertPaperTrade = db.prepare(`
-  INSERT OR REPLACE INTO paper_trades (id, market_id, side, size, price, status, created_at, settled_at, pnl)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-for (const [i, m] of MARKETS.slice(0, 5).entries()) {
-  const createdAt = ago((5 - i) * 4 * hour);
-  insertPaperTrade.run(
-    `pt-${String(i + 1).padStart(3, "0")}`,
-    m.slug,
-    i % 2 === 0 ? "YES" : "NO",
-    +(10 + Math.random() * 40).toFixed(2),
-    +(0.35 + Math.random() * 0.3).toFixed(2),
-    i < 3 ? "settled" : "open",
-    createdAt,
-    i < 3 ? createdAt + day : null,
-    i < 3 ? +((Math.random() - 0.4) * 20).toFixed(2) : null
-  );
-}
-
-// ── Executions (autopilot) ───────────────────────────────────────
-
-const insertExecution = db.prepare(`
-  INSERT OR REPLACE INTO executions (id, slug, side, amount, executed_at, status, order_id, fill_price, pnl)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-for (const [i, m] of MARKETS.slice(0, 6).entries()) {
-  insertExecution.run(
-    i + 1,
-    m.slug,
-    i % 2 === 0 ? "YES" : "NO",
-    +(5 + Math.random() * 35).toFixed(2),
-    ago((6 - i) * day),
-    i < 4 ? "filled" : "pending",
-    `0x${Math.random().toString(16).slice(2, 18)}`,
-    +(0.3 + Math.random() * 0.4).toFixed(2),
-    i < 4 ? +((Math.random() - 0.35) * 25).toFixed(2) : null
-  );
-}
-
 // ── Scanner Results ──────────────────────────────────────────────
 
 const insertScanner = db.prepare(`
@@ -393,29 +324,6 @@ for (const [i, m] of MARKETS.entries()) {
     i % 3 !== 0 ? JSON.stringify({ decision: "BET_YES", confidence: 0.78 }) : null,
     i < 4 ? "filled" : null,
     i < 4 ? i + 1 : null
-  );
-}
-
-// ── Resolutions (linked to pipeline runs) ────────────────────────
-
-const insertResolution = db.prepare(`
-  INSERT OR REPLACE INTO resolutions
-    (id, pipeline_run_id, market_slug, predicted, outcome, brier_score, signal_type, resolved_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-const resolvedRuns = pipelineRuns.slice(0, 3);
-for (const [i, run] of resolvedRuns.entries()) {
-  const predicted = +(0.55 + Math.random() * 0.3).toFixed(3);
-  const outcome = Math.random() > 0.4 ? 1 : 0;
-  const brierScore = +((predicted - outcome) ** 2).toFixed(4);
-  insertResolution.run(
-    `res-${String(i + 1).padStart(3, "0")}`,
-    run.id,
-    run.market_slug,
-    predicted, outcome, brierScore,
-    "scanner",
-    ago(i * day)
   );
 }
 

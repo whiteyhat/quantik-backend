@@ -41,26 +41,22 @@
 // - Rate-limited at the route level (3/min per user)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { ethers } from "ethers";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
 import { decrypt } from "../infra/encryption";
 import { getPolBalanceSnapshot, getUsdcBalanceSnapshot } from "../utils/balances";
-import { runCli } from "../cli";
+import { emitToUser } from "../infra/socket";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 // Minimum POL required for gas to submit 6 approval transactions on Polygon.
-const MIN_POL_BALANCE = 1;
+const MIN_POL_BALANCE = 3;
 
 // Minimum USDC required to place any Polymarket order.
 // CLI approve doesn't spend USDC, but we gate on this to ensure the agent
 // can actually trade after approvals complete.
 const MIN_USDC_BALANCE = 10.0;
-
-// Timeout for CLI approve commands (ms). The `approve set` command submits
-// 6 on-chain transactions sequentially, each needing block confirmation.
-// 120s is generous but prevents hanging indefinitely.
-const CLI_APPROVE_TIMEOUT_MS = 120_000;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -236,41 +232,29 @@ function buildMissingItems(
   return items;
 }
 
-// ── Core Function ────────────────────────────────────────────────────────────
-//
-// verifyAndPreparePolymarket(agentId, userId)
-//
-// Called when the user clicks "Verify Readiness" on the manage-agent page.
-// Checks funding, runs CLI approvals if funded, and returns detailed status.
+// ── Core Functions ────────────────────────────────────────────────────────────
 
-export async function verifyAndPreparePolymarket(
+// ── checkPolymarketBalance ──────────────────────────────────────────────────
+// Fast check (~1-3s): verifies ownership and checks on-chain balances only.
+// If funded → returns status "funding_detected" so the UI can advance to step 2
+// and auto-call runPolymarketApprovals. Does NOT touch approvals.
+
+export async function checkPolymarketBalance(
   agentId: string,
   userId: string
 ): Promise<PolymarketPrepResult> {
-  // ── Step 1: Load agent and verify ownership ────────────────────────────
   const agent = await loadAgent(agentId);
 
-  if (!agent || agent.user_id !== userId) {
-    throw new Error("Agent not found");
-  }
-
-  if (!agent.wallet_address) {
-    throw new Error("Agent has no wallet address");
-  }
-
-  if (!agent.encrypted_private_key) {
-    throw new Error("Agent has no encrypted private key");
-  }
+  if (!agent || agent.user_id !== userId) throw new Error("Agent not found");
+  if (!agent.wallet_address) throw new Error("Agent has no wallet address");
 
   const address = agent.wallet_address;
 
-  // ── Step 2: Return early if already ready ──────────────────────────────
   if (agent.polymarket_ready === 1) {
     const [polSnap, usdcSnap] = await Promise.all([
       getPolBalanceSnapshot(address),
       getUsdcBalanceSnapshot(address),
     ]);
-
     return {
       status: "ready",
       polymarketReady: true,
@@ -284,26 +268,16 @@ export async function verifyAndPreparePolymarket(
     };
   }
 
-  // ── Step 3: Check on-chain balances ────────────────────────────────────
   const [polSnap, usdcSnap] = await Promise.all([
     getPolBalanceSnapshot(address),
     getUsdcBalanceSnapshot(address),
   ]);
-
   const polSufficient = polSnap.balance >= MIN_POL_BALANCE;
   const usdcSufficient = usdcSnap.balance >= MIN_USDC_BALANCE;
+  const balances = { pol: polSnap.balance, usdc: usdcSnap.balance, polSufficient, usdcSufficient };
 
-  const balances = {
-    pol: polSnap.balance,
-    usdc: usdcSnap.balance,
-    polSufficient,
-    usdcSufficient,
-  };
-
-  // ── Step 4: If not funded, return pending status ───────────────────────
   if (!polSufficient || !usdcSufficient) {
     await updatePolymarketStatus(agentId, "pending_funding", false);
-
     return {
       status: "pending_funding",
       polymarketReady: false,
@@ -313,76 +287,130 @@ export async function verifyAndPreparePolymarket(
     };
   }
 
-  // ── Step 5: Funded — run Polymarket CLI approvals ──────────────────────
-  // This is the critical section: we decrypt the private key, set it as an
-  // env var for the CLI, run the 6 approval transactions, then immediately
-  // clear everything. The key NEVER touches disk or logs.
+  await updatePolymarketStatus(agentId, "funding_detected", false);
+  return { status: "funding_detected", polymarketReady: false, address, balances };
+}
+
+// ── runPolymarketApprovals ──────────────────────────────────────────────────
+// Slow step (~60-90s): submits the 6 on-chain CLOB approval transactions.
+// Called automatically by the frontend after checkPolymarketBalance returns
+// "funding_detected". Shows the 90s progress bar on step 2.
+
+export async function runPolymarketApprovals(
+  agentId: string,
+  userId: string
+): Promise<PolymarketPrepResult> {
+  const agent = await loadAgent(agentId);
+
+  if (!agent || agent.user_id !== userId) throw new Error("Agent not found");
+  if (!agent.wallet_address) throw new Error("Agent has no wallet address");
+  if (!agent.encrypted_private_key) throw new Error("Agent has no private key — re-assign wallet credentials");
+
+  const address = agent.wallet_address;
+
+  if (agent.polymarket_ready === 1) {
+    const [polSnap, usdcSnap] = await Promise.all([
+      getPolBalanceSnapshot(address),
+      getUsdcBalanceSnapshot(address),
+    ]);
+    return {
+      status: "ready",
+      polymarketReady: true,
+      address,
+      balances: {
+        pol: polSnap.balance,
+        usdc: usdcSnap.balance,
+        polSufficient: polSnap.balance >= MIN_POL_BALANCE,
+        usdcSufficient: usdcSnap.balance >= MIN_USDC_BALANCE,
+      },
+    };
+  }
+
+  const [polSnap, usdcSnap] = await Promise.all([
+    getPolBalanceSnapshot(address),
+    getUsdcBalanceSnapshot(address),
+  ]);
+  const balances = {
+    pol: polSnap.balance,
+    usdc: usdcSnap.balance,
+    polSufficient: polSnap.balance >= MIN_POL_BALANCE,
+    usdcSufficient: usdcSnap.balance >= MIN_USDC_BALANCE,
+  };
 
   await updatePolymarketStatus(agentId, "approving", false);
 
+  // Polymarket contract addresses on Polygon mainnet (from CLI source + docs)
+  const USDC_ADDRESS       = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"; // USDC.e bridged
+  const CTF_ADDRESS        = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"; // ConditionalTokens
+  const CTF_EXCHANGE       = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+  const NEG_RISK_EXCHANGE  = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+  const NEG_RISK_ADAPTER   = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
+
+  const ERC20_APPROVE_ABI       = ["function approve(address spender, uint256 amount) returns (bool)"];
+  const ERC1155_SET_APPROVAL_ABI = ["function setApprovalForAll(address operator, bool approved)"];
+
+  const POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com";
+
+  // ethers.js v6 fetches Polygon gas prices from gasstation.polygon.technology
+  // which is unreliable. Override getFeeData to derive fees from the RPC block
+  // directly: baseFee * 2 + 30 gwei tip is standard for Polygon.
+  async function getPolygonFeeData(provider: ethers.JsonRpcProvider): Promise<ethers.FeeData> {
+    const block = await provider.getBlock("latest");
+    const baseFee = block?.baseFeePerGas ?? ethers.parseUnits("100", "gwei");
+    const maxPriorityFeePerGas = ethers.parseUnits("30", "gwei");
+    const maxFeePerGas = baseFee * 2n + maxPriorityFeePerGas;
+    return new ethers.FeeData(null, maxFeePerGas, maxPriorityFeePerGas);
+  }
+
+  const approvalSteps = [
+    { label: "USDC → CTF Exchange",      type: "erc20",   token: USDC_ADDRESS, spender: CTF_EXCHANGE },
+    { label: "CTF → CTF Exchange",       type: "erc1155", token: CTF_ADDRESS,  spender: CTF_EXCHANGE },
+    { label: "USDC → Neg Risk Exchange", type: "erc20",   token: USDC_ADDRESS, spender: NEG_RISK_EXCHANGE },
+    { label: "CTF → Neg Risk Exchange",  type: "erc1155", token: CTF_ADDRESS,  spender: NEG_RISK_EXCHANGE },
+    { label: "USDC → Neg Risk Adapter",  type: "erc20",   token: USDC_ADDRESS, spender: NEG_RISK_ADAPTER },
+    { label: "CTF → Neg Risk Adapter",   type: "erc1155", token: CTF_ADDRESS,  spender: NEG_RISK_ADAPTER },
+  ] as const;
+
   let decryptedKey: string | null = null;
-  const originalEnvKey = process.env.POLYMARKET_PRIVATE_KEY;
 
   try {
-    // Decrypt the stored private key in memory
     decryptedKey = decrypt(agent.encrypted_private_key);
 
-    // Set the env var that the Polymarket CLI reads for signing transactions.
-    // This is the only way the CLI accepts a private key — via env.
-    process.env.POLYMARKET_PRIVATE_KEY = decryptedKey;
+    const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+    // Override getFeeData to avoid Polygon gas station API timeouts
+    provider.getFeeData = () => getPolygonFeeData(provider);
+    const wallet   = new ethers.Wallet(decryptedKey, provider);
 
-    // Run `polymarket approve set` — submits all 6 approval transactions.
-    // Each tx is an ERC-20 approve(spender, maxUint256) call to the
-    // relevant Polymarket contracts on Polygon.
-    console.log(`[polymarket-prep] Running approve set for agent ${agentId}`);
+    console.log(`[polymarket-prep] Submitting ${approvalSteps.length} approvals for agent ${agentId} from ${wallet.address}`);
 
-    try {
-      await runCli(["approve", "set"]);
-    } catch (approveErr) {
-      // Log sanitized error (never include key material)
-      const msg = approveErr instanceof Error ? approveErr.message : String(approveErr);
-      console.error(`[polymarket-prep] approve set failed for agent ${agentId}: ${msg}`);
+    const approvalResults: { label: string; txHash: string; passed: boolean }[] = [];
 
-      await updatePolymarketStatus(agentId, "approval_failed", false);
+    for (const step of approvalSteps) {
+      const abi      = step.type === "erc20" ? ERC20_APPROVE_ABI : ERC1155_SET_APPROVAL_ABI;
+      const contract = new ethers.Contract(step.token, abi, wallet);
 
-      return {
-        status: "approval_failed",
-        polymarketReady: false,
-        address,
-        balances,
-        missingItems: ["Polymarket approval transactions failed — check POL balance for gas"],
-        error: "Approval transactions failed. Ensure wallet has sufficient POL for gas fees and retry.",
-      };
+      try {
+        const tx = step.type === "erc20"
+          ? await contract.approve(step.spender, ethers.MaxUint256)
+          : await contract.setApprovalForAll(step.spender, true);
+
+        console.log(`[polymarket-prep] ${step.label} tx sent: ${tx.hash}`);
+        await tx.wait(1);
+        console.log(`[polymarket-prep] ${step.label} confirmed`);
+        approvalResults.push({ label: step.label, txHash: tx.hash, passed: true });
+      } catch (txErr) {
+        const msg = txErr instanceof Error ? txErr.message : String(txErr);
+        console.error(`[polymarket-prep] ${step.label} failed: ${msg}`);
+        approvalResults.push({ label: step.label, txHash: "", passed: false });
+      }
     }
 
-    // Run `polymarket approve check <address>` — verifies all 6 approvals.
-    // Returns JSON with the status of each approval.
-    console.log(`[polymarket-prep] Running approve check for agent ${agentId}`);
+    const allPassed = approvalResults.every((r) => r.passed);
 
-    let checkResult: unknown;
-    try {
-      checkResult = await runCli(["approve", "check", address]);
-    } catch (checkErr) {
-      const msg = checkErr instanceof Error ? checkErr.message : String(checkErr);
-      console.error(`[polymarket-prep] approve check failed for agent ${agentId}: ${msg}`);
-
-      await updatePolymarketStatus(agentId, "approval_failed", false);
-
-      return {
-        status: "approval_failed",
-        polymarketReady: false,
-        address,
-        balances,
-        missingItems: ["Could not verify approval status — retry to check again"],
-        error: "Approval verification failed. Try again.",
-      };
-    }
-
-    // ── Step 6: Parse results and update status ──────────────────────────
-    const approvalResult = parseApprovalResult(checkResult);
-
-    if (approvalResult.allPassed) {
+    // ── Step 6: Update status based on results ───────────────────────────
+    if (allPassed) {
       await updatePolymarketStatus(agentId, "ready", true);
+      emitToUser(userId, "polymarket:ready", { agentId, timestamp: Date.now() });
       console.log(`[polymarket-prep] Agent ${agentId} is Polymarket-ready`);
 
       return {
@@ -390,36 +418,40 @@ export async function verifyAndPreparePolymarket(
         polymarketReady: true,
         address,
         balances,
-        approvals: approvalResult,
+        approvals: { allPassed: true, details: approvalResults },
       };
     } else {
       await updatePolymarketStatus(agentId, "approval_failed", false);
-      console.warn(`[polymarket-prep] Agent ${agentId} has incomplete approvals`);
+      const failed = approvalResults.filter((r) => !r.passed).map((r) => r.label);
+      console.warn(`[polymarket-prep] Agent ${agentId} has failed approvals: ${failed.join(", ")}`);
 
       return {
         status: "approval_failed",
         polymarketReady: false,
         address,
         balances,
-        approvals: approvalResult,
-        missingItems: buildMissingItems(polSnap.balance, usdcSnap.balance, approvalResult),
-        error: "Some Polymarket approvals are incomplete. Retry or check gas balance.",
+        approvals: { allPassed: false, details: approvalResults },
+        missingItems: failed.map((l) => `Approval failed: ${l}`),
+        error: "Some Polymarket approvals failed. Ensure wallet has sufficient POL for gas and retry.",
       };
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[polymarket-prep] approve failed for agent ${agentId}: ${msg}`);
+    await updatePolymarketStatus(agentId, "approval_failed", false);
+
+    return {
+      status: "approval_failed",
+      polymarketReady: false,
+      address,
+      balances,
+      missingItems: ["Approval process failed — check POL balance for gas"],
+      error: "Approval transactions failed. Ensure wallet has sufficient POL for gas fees and retry.",
+    };
   } finally {
     // ── CRITICAL CLEANUP ─────────────────────────────────────────────────
-    // Always restore the original env var and destroy the decrypted key,
-    // even if an unexpected error occurs above.
-
-    if (originalEnvKey !== undefined) {
-      process.env.POLYMARKET_PRIVATE_KEY = originalEnvKey;
-    } else {
-      delete process.env.POLYMARKET_PRIVATE_KEY;
-    }
-
-    // Null out the local reference. In JS/TS we can't truly zero memory
-    // (no SecureString), but nulling ensures no accidental reuse and makes
-    // the string eligible for GC immediately.
+    // Null out the decrypted key immediately. In JS we can't zero memory
+    // but this makes it eligible for GC and prevents accidental reuse.
     decryptedKey = null;
   }
 }

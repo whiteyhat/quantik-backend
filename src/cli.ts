@@ -92,20 +92,19 @@ export async function runCli(args: string[]): Promise<unknown> {
     execFile(
       POLYMARKET_BIN,
       fullArgs,
-      { maxBuffer: 10 * 1024 * 1024, timeout: 60_000 },
+      { maxBuffer: 10 * 1024 * 1024, timeout: 60_000, env: process.env },
       (error, stdout, stderr) => {
         if (error) {
           const code =
             typeof (error as NodeJS.ErrnoException).code === "number"
               ? (error as { code: number }).code
               : 1;
-          reject(
-            new CliError(
-              `polymarket ${args.join(" ")} failed: ${stderr || stdout?.trim() || error.message}`,
-              code,
-              stderr || stdout?.trim() || ""
-            )
-          );
+          // Include both stderr and stdout so no detail is lost
+          const parts = [stderr?.trim(), stdout?.trim()].filter(Boolean).join(" | stderr: ");
+          const detail = parts || error.message;
+          console.error(`[cli] polymarket ${args.join(" ")} stderr: ${stderr?.trim() || "(empty)"}`);
+          console.error(`[cli] polymarket ${args.join(" ")} stdout: ${stdout?.trim() || "(empty)"}`);
+          reject(new CliError(`polymarket ${args.join(" ")} failed: ${detail}`, code, stderr || ""));
           return;
         }
 

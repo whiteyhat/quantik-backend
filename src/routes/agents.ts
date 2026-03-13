@@ -10,7 +10,7 @@ import { computeHealthScore } from "../monitoring/healthScore";
 import { generateWalletCredentials } from "../wallet/generate";
 import { encrypt } from "../infra/encryption";
 import { rateLimit } from "../infra/rateLimit";
-import { verifyAndPreparePolymarket } from "../services/polymarket-prep.service";
+import { checkPolymarketBalance, runPolymarketApprovals } from "../services/polymarket-prep.service";
 
 const router = Router();
 
@@ -692,35 +692,45 @@ router.post("/agents/:id/wallet", async (req: Request, res: Response) => {
   res.json({ ok: true, wallet_address: walletAddress });
 });
 
-// ── POST /api/v1/agents/:id/verify-polymarket — Run Polymarket approvals ─────
-// Decrypts the agent's stored private key, checks funding, runs CLI approvals,
-// and marks the agent as Polymarket-ready. Rate-limited to 3 calls/min/user.
+// ── POST /api/v1/agents/:id/check-balance — Fast balance check (step 1) ──────
+// Checks on-chain POL + USDC balances without running approvals (~1-3s).
+// Returns "funding_detected" if funded so the UI can advance to step 2.
 
-const polymarketVerifyLimit = rateLimit({
-  windowMs: 60_000,
-  max: 3,
-  keyPrefix: "polymarket-verify",
-});
+const polymarketCheckLimit = rateLimit({ windowMs: 60_000, max: 10, keyPrefix: "polymarket-check" });
 
-router.post("/agents/:id/verify-polymarket", polymarketVerifyLimit, async (req: Request, res: Response) => {
+router.post("/agents/:id/check-balance", polymarketCheckLimit, async (req: Request, res: Response) => {
   const userId = await getRequiredUserId(req, res);
   if (!userId) return;
-
   const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-
   try {
-    const result = await verifyAndPreparePolymarket(agentId, userId);
+    const result = await checkPolymarketBalance(agentId, userId);
     res.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "Agent not found") { res.status(404).json({ error: "Agent not found" }); return; }
+    console.error("[check-balance] error:", msg);
+    res.status(500).json({ error: "Balance check failed. Try again." });
+  }
+});
 
-    if (msg === "Agent not found") {
-      res.status(404).json({ error: "Agent not found" });
-      return;
-    }
+// ── POST /api/v1/agents/:id/run-approvals — Submit 6 CLOB approvals (step 2) ─
+// Decrypts private key and submits all 6 approval txs on Polygon (~60-90s).
+// Called automatically after check-balance returns "funding_detected".
 
-    console.error("[polymarket-verify] error:", msg);
-    res.status(500).json({ error: "Polymarket verification failed. Try again." });
+const polymarketApprovalsLimit = rateLimit({ windowMs: 60_000, max: 3, keyPrefix: "polymarket-approvals" });
+
+router.post("/agents/:id/run-approvals", polymarketApprovalsLimit, async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  try {
+    const result = await runPolymarketApprovals(agentId, userId);
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "Agent not found") { res.status(404).json({ error: "Agent not found" }); return; }
+    console.error("[run-approvals] error:", msg);
+    res.status(500).json({ error: "Approvals failed. Ensure wallet has sufficient POL for gas fees." });
   }
 });
 
@@ -786,7 +796,8 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
     wallet_address, created_at, updated_at, deployed_at,
     agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events,
-    autopilot_enabled, autopilot_updated_at`;
+    autopilot_enabled, autopilot_updated_at,
+    polymarket_ready, polymarket_status`;
 
   if (isPgEnabled()) {
     const userId = await getUserIdAsync(req);
@@ -887,6 +898,9 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
       (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
     );
+    (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
+      (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
+    );
 
     res.json(agent);
   } else {
@@ -918,6 +932,9 @@ router.get("/agent/me", async (req: Request, res: Response) => {
 
     (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
       (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
+    );
+    (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
+      (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
     );
 
     res.json(agent);

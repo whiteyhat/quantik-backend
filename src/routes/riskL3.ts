@@ -6,6 +6,7 @@ import {
   getCircuitBreaker,
 } from "../risk";
 import { getDb } from "../db/schema";
+import { requireClerkAuth } from "../middleware/auth";
 
 const router = Router();
 
@@ -101,7 +102,7 @@ router.post("/circuit-breaker/reset", (_req: Request, res: Response) => {
 });
 
 // ── EMERGENCY RESET ───────────────────────────────────────────
-router.get("/emergency/reset-panic", (_req: Request, res: Response) => {
+router.get("/emergency/reset-panic", requireClerkAuth, (_req: Request, res: Response) => {
   const db = getDb();
   try {
     db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();

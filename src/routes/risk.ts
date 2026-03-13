@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 import { runCli } from "../cli";
+import { emitAutopilotStatus, emitToAll } from "../infra/socket";
 
 const router = Router();
 
@@ -245,6 +246,19 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
     "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
   ).run(now, now);
 
+  // Explicitly disable autopilot on ALL active agents so the flag is correct even after panic resets
+  db.prepare("UPDATE agents SET autopilot_enabled = 0, updated_at = ? WHERE autopilot_enabled = 1").run(now);
+
+  // Broadcast panic to all connected clients immediately
+  emitToAll("panic:activated", { timestamp: now });
+  emitAutopilotStatus({
+    isRunning: false,
+    lastScan: null,
+    tradesToday: 0,
+    circuitBreakerTriggered: true,
+    timestamp: now,
+  });
+
   // 2. Read open positions before we close them
   const openPositions = db.prepare<[], { id: string; slug: string; side: string; amount: number; fill_price: number | null; order_id: string | null; status: string }>(
     "SELECT id, slug, side, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
@@ -262,12 +276,13 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
     const paperResult = db.prepare("UPDATE paper_orders SET status = 'cancelled' WHERE status = 'open'").run();
     cancelledCount += paperResult.changes;
 
-    // Cancel live orders via CLI (best-effort)
+    // Cancel live orders via CLI (best-effort — circuit breaker already tripped above)
     try {
       await runCli(["clob", "cancel-all"]);
       cancelledCount += 1; // CLI doesn't return individual count
-    } catch {
-      // CLI unavailable or no live orders — continue
+    } catch (cliErr) {
+      console.error("[PANIC] clob cancel-all failed:", cliErr);
+      // Do NOT abort — circuit breaker and autopilot disable already took effect
     }
   }
 

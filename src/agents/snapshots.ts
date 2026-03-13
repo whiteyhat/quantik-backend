@@ -15,6 +15,7 @@ export interface ToolExecutionContext {
   agentName: string | null;
   lastHeartbeat: number | null;
   agentStatus: string | null;
+  polymarketReady: boolean;
 }
 
 export interface PortfolioPositionSnapshot {
@@ -150,6 +151,7 @@ export interface OpsSnapshot {
   autopilotEnabled: boolean;
   lastHeartbeat: number | null;
   health: HealthScore | null;
+  polymarketReady: boolean;
 }
 
 interface DbAgentContextRow {
@@ -321,6 +323,7 @@ export function buildToolExecutionContextFromAgentRow(
     agentName: typeof agentRow.name === "string" ? agentRow.name : null,
     lastHeartbeat: typeof agentRow.last_heartbeat === "number" ? agentRow.last_heartbeat : null,
     agentStatus: typeof agentRow.status === "string" ? agentRow.status : null,
+    polymarketReady: normalizeBoolean(agentRow.polymarket_ready as number | boolean | null | undefined),
   };
 }
 
@@ -328,7 +331,7 @@ export async function loadToolExecutionContextByAgentId(
   agentId: string,
   userId?: string | null,
 ): Promise<ToolExecutionContext | null> {
-  const columns = `id, user_id, name, agent_type, wallet_address, autopilot_enabled, connection_status, last_heartbeat, status`;
+  const columns = `id, user_id, name, agent_type, wallet_address, autopilot_enabled, connection_status, last_heartbeat, status, polymarket_ready`;
   let row: DbAgentContextRow | null = null;
 
   if (isPgEnabled()) {
@@ -753,5 +756,6 @@ export async function loadOpsSnapshot(context: ToolExecutionContext | null): Pro
     autopilotEnabled: context?.autopilotEnabled ?? false,
     lastHeartbeat: context?.lastHeartbeat ?? null,
     health,
+    polymarketReady: context?.polymarketReady ?? false,
   };
 }

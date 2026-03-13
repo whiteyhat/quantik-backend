@@ -9,6 +9,7 @@ import { getSettings } from "../db/queries";
 import { loadSingleAutopilotExecutionContext } from "../utils/linkedAgent";
 import { insertExecutionRecord } from "../utils/executions";
 import { getWalletFundingSnapshot } from "../utils/balances";
+import { emitAgentAlert, emitTradeExecuted, emitAutopilotStatus } from "../infra/socket";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -359,6 +360,13 @@ export class MarketScanner {
       console.error("[Scanner] Scan cycle failed:", err);
     } finally {
       scannerRunning = false;
+      emitAutopilotStatus({
+        isRunning: false,
+        lastScan: new Date().toISOString(),
+        tradesToday: alertsTriggered,
+        circuitBreakerTriggered: false,
+        timestamp: Date.now(),
+      });
     }
   }
 
@@ -637,6 +645,16 @@ export class MarketScanner {
       return;
     }
 
+    // Emit signal alert immediately — frontend components update before execution starts
+    emitAgentAlert(executionContext.userId, {
+      type: "signal",
+      title: `${result.recommendation}: ${question.slice(0, 60)}`,
+      message: `Confidence ${(result.sigmaConfidence * 100).toFixed(0)}% · Kelly ${(result.kellyFraction * 100).toFixed(1)}%`,
+      slug: result.slug,
+      confidence: result.sigmaConfidence,
+      timestamp: Date.now(),
+    });
+
     const funding = await getWalletFundingSnapshot(executionContext.walletAddress);
     if (!funding.ready) {
       console.log(`[autoExecute] Funding check blocked ${result.slug}: ${funding.fundingMessage}`);
@@ -687,7 +705,7 @@ export class MarketScanner {
 
     // Kelly amount: NO edge = NO trade. Kelly=0 means skip, not default to $10.
     // A $10 floor on a zero-edge signal is just gambling — remove it.
-    const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? "247");
+    const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? process.env.PORTFOLIO_USDC_FALLBACK ?? "1000");
     if (result.kellyFraction <= 0) {
       console.log(`[autoExecute] Kelly=0 on ${result.slug} — no edge, skipping (not gambling)`);
       return;
@@ -769,6 +787,16 @@ export class MarketScanner {
         pnlToday: pnlRowP.total,
         tradesToday: tradeRowP.cnt,
       } as any);
+      emitTradeExecuted(executionContext.userId, {
+        orderId: "PAPER-MODE",
+        slug: result.slug,
+        direction: result.recommendation === "BET_YES" ? "BUY_YES" : "BUY_NO",
+        size: amount,
+        price: entryPrice,
+        status: "paper",
+        paper: true,
+        timestamp: Date.now(),
+      });
       return;
     }
 
@@ -785,7 +813,7 @@ export class MarketScanner {
     // Prevents spending non-existent balance and burning gas on doomed orders
     if (!paperMode) {
       try {
-        const balRes = await fetch("https://quantik-backend-production.up.railway.app/api/clob/balance", { signal: AbortSignal.timeout(5000) });
+        const balRes = await fetch(`${BACKEND_URL}/api/clob/balance`, { signal: AbortSignal.timeout(5000) });
         if (balRes.ok) {
           const balData = await balRes.json() as any;
           const onChainBalance = parseFloat(balData?.data?.balance ?? "0");
@@ -865,6 +893,16 @@ export class MarketScanner {
         pnlToday: pnlRow2.total,
         tradesToday: tradeRow2.cnt,
       } as any);
+      emitTradeExecuted(executionContext.userId, {
+        orderId,
+        slug: result.slug,
+        direction: result.recommendation === "BET_YES" ? "BUY_YES" : "BUY_NO",
+        size: amount,
+        price: actualFillPrice,
+        status: "placed",
+        paper: false,
+        timestamp: Date.now(),
+      });
     } catch (err) {
       await insertExecutionRecord({
         userId: executionContext.userId,

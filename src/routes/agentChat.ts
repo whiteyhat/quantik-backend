@@ -68,6 +68,7 @@ interface AgentChatRequestBody {
   message: string;
   sessionId?: string;
   slug?: string;
+  locale?: string;
   pipelineData?: Record<string, unknown>;
   clientContext?: {
     lastSeenSignalAt?: number;
@@ -154,11 +155,174 @@ interface RecipeResolution {
 const MAX_TOOL_ROUNDS = 4;
 const MAX_REPLY_WORDS = 60;
 const MAX_RAW_REPLY_WORDS = 90;
+// ── Suggestion i18n ────────────────────────────────────────────
+// Keyed by the 3 non-English platform locales; falls back to English.
+
+const SUGGESTION_I18N: Record<string, {
+  portfolioStatus: string;
+  scannerSignals: string;
+  riskStatus: string;
+  refreshSignals: string;
+  explainRisk: string;
+  activePositions: string;
+  reviewTrades: string;
+  findSetup: string;
+  patternInTrades: string;
+  optimizeAgent: string;
+  connectFundWallet: string;
+  agentNeeds: string;
+  afterWalletReady: string;
+  fundWalletWith: (a: string) => string;
+  walletMissing: string;
+  checkFundingAgain: string;
+  readyForAutopilot: string;
+  turnOnAutopilot: string;
+  autopilotGuardrails: string;
+  topSetupReason: (l: string) => string;
+  signalFitsRisk: (l: string) => string;
+  strongestSignal: string;
+  liveRefresh: string;
+  exitPlan: (s: string) => string;
+  weakestPosition: string;
+  roomForTrade: string;
+  biggestRiskCluster: (t: string) => string;
+  sizeTrade: string;
+  cutExposure: string;
+  learnFromTrade: (s: string) => string;
+  highestConviction: string;
+  stabilizeByo: string;
+  healthScoreDown: string;
+  showPortfolioStatus: string;
+  currentRiskStatus: string;
+}> = {
+  es: {
+    portfolioStatus: "¿Cuál es el estado de mi portafolio?",
+    scannerSignals: "¿Hay nuevas señales del scanner?",
+    riskStatus: "¿Cuál es mi nivel de riesgo actual?",
+    refreshSignals: "Actualizar señales ahora.",
+    explainRisk: "Explica mi riesgo actual.",
+    activePositions: "Muestra mis posiciones activas.",
+    reviewTrades: "Revisar operaciones recientes.",
+    findSetup: "Busca una oportunidad que se ajuste a mi capital.",
+    patternInTrades: "¿Qué patrón aparece en mis operaciones recientes?",
+    optimizeAgent: "¿Qué debería optimizar este agente a continuación?",
+    connectFundWallet: "¿Cómo conecto y financio la wallet con USDC.e y POL?",
+    agentNeeds: "Muéstrame exactamente qué le falta al agente para operar.",
+    afterWalletReady: "¿Qué ocurre cuando la wallet esté lista?",
+    fundWalletWith: (a) => `¿Cómo financio esta wallet con ${a}?`,
+    walletMissing: "Muéstrame exactamente qué le falta a esta wallet para Polymarket.",
+    checkFundingAgain: "Verificar estado de fondos de nuevo.",
+    readyForAutopilot: "¿Estoy listo para activar el autopiloto?",
+    turnOnAutopilot: "Guíame para activar el autopiloto de forma segura.",
+    autopilotGuardrails: "¿Qué salvaguardas usará el autopiloto?",
+    topSetupReason: (l) => `¿Por qué ${l} es la mejor oportunidad ahora?`,
+    signalFitsRisk: (l) => `¿${l} encaja con mis límites de riesgo?`,
+    strongestSignal: "¿Cuál de las nuevas señales es la más fuerte?",
+    liveRefresh: "Ejecutar actualización del scanner ahora.",
+    exitPlan: (s) => `¿Cuál es el plan de salida para ${s}?`,
+    weakestPosition: "¿Qué posición abierta parece más débil?",
+    roomForTrade: "¿Tengo margen para otra operación hoy?",
+    biggestRiskCluster: (t) => `¿Por qué ${t} es mi mayor concentración de riesgo?`,
+    sizeTrade: "¿Cómo dimensiono la próxima operación?",
+    cutExposure: "¿Cómo reduzco exposición sin perder potencial alcista?",
+    learnFromTrade: (s) => `¿Qué aprendimos de ${s}?`,
+    highestConviction: "¿Cuál es la acción más importante que debo tomar?",
+    stabilizeByo: "¿Cómo estabilizo la conexión BYO?",
+    healthScoreDown: "¿Qué está bajando mi puntuación de salud?",
+    showPortfolioStatus: "Mostrar estado del portafolio.",
+    currentRiskStatus: "¿Cuál es mi nivel de riesgo actual?",
+  },
+  fr: {
+    portfolioStatus: "Quel est l'état de mon portefeuille ?",
+    scannerSignals: "Y a-t-il de nouveaux signaux du scanner ?",
+    riskStatus: "Quel est mon niveau de risque actuel ?",
+    refreshSignals: "Actualiser les signaux maintenant.",
+    explainRisk: "Expliquer mon risque actuel.",
+    activePositions: "Afficher mes positions actives.",
+    reviewTrades: "Revoir les trades récents.",
+    findSetup: "Trouver une opportunité adaptée à mon capital.",
+    patternInTrades: "Quel schéma apparaît dans mes trades récents ?",
+    optimizeAgent: "Que devrait optimiser cet agent ensuite ?",
+    connectFundWallet: "Comment connecter et financer le wallet avec USDC.e et POL ?",
+    agentNeeds: "Montre-moi exactement ce qu'il manque à l'agent pour trader.",
+    afterWalletReady: "Que se passe-t-il quand le wallet est prêt ?",
+    fundWalletWith: (a) => `Comment financer ce wallet avec ${a} ?`,
+    walletMissing: "Montre-moi exactement ce qui manque pour Polymarket.",
+    checkFundingAgain: "Vérifier l'état du financement à nouveau.",
+    readyForAutopilot: "Suis-je prêt à activer le pilote automatique ?",
+    turnOnAutopilot: "Guide-moi pour activer le pilote automatique en toute sécurité.",
+    autopilotGuardrails: "Quelles protections le pilote automatique utilisera-t-il ?",
+    topSetupReason: (l) => `Pourquoi ${l} est-il la meilleure opportunité ?`,
+    signalFitsRisk: (l) => `${l} respecte-t-il mes limites de risque ?`,
+    strongestSignal: "Quel est le signal le plus fort parmi les nouveaux ?",
+    liveRefresh: "Lancer une actualisation du scanner maintenant.",
+    exitPlan: (s) => `Quel est le plan de sortie pour ${s} ?`,
+    weakestPosition: "Quelle position ouverte semble la plus faible ?",
+    roomForTrade: "Ai-je encore de la place pour un trade aujourd'hui ?",
+    biggestRiskCluster: (t) => `Pourquoi ${t} est-il mon plus grand cluster de risque ?`,
+    sizeTrade: "Comment calibrer le prochain trade ?",
+    cutExposure: "Comment réduire l'exposition sans perdre le potentiel haussier ?",
+    learnFromTrade: (s) => `Qu'avons-nous appris de ${s} ?`,
+    highestConviction: "Quelle est la chose la plus importante à faire maintenant ?",
+    stabilizeByo: "Comment stabiliser la connexion BYO ?",
+    healthScoreDown: "Qu'est-ce qui fait baisser mon score de santé ?",
+    showPortfolioStatus: "Afficher l'état du portefeuille.",
+    currentRiskStatus: "Quel est mon niveau de risque actuel ?",
+  },
+  de: {
+    portfolioStatus: "Wie ist der Stand meines Portfolios?",
+    scannerSignals: "Gibt es neue Scanner-Signale?",
+    riskStatus: "Wie ist mein aktuelles Risikoniveau?",
+    refreshSignals: "Signale jetzt aktualisieren.",
+    explainRisk: "Erkläre mein aktuelles Risiko.",
+    activePositions: "Zeige meine aktiven Positionen.",
+    reviewTrades: "Kürzliche Trades überprüfen.",
+    findSetup: "Finde ein Setup, das zu meinem Kapital passt.",
+    patternInTrades: "Welches Muster zeigt sich in meinen letzten Trades?",
+    optimizeAgent: "Was sollte dieser Agent als nächstes optimieren?",
+    connectFundWallet: "Wie verbinde und finanziere ich das Wallet mit USDC.e und POL?",
+    agentNeeds: "Zeige mir genau, was dem Agenten zum Handeln noch fehlt.",
+    afterWalletReady: "Was passiert, wenn das Wallet bereit ist?",
+    fundWalletWith: (a) => `Wie finanziere ich dieses Wallet mit ${a}?`,
+    walletMissing: "Zeige mir genau, was diesem Wallet für Polymarket fehlt.",
+    checkFundingAgain: "Finanzierungsstatus erneut prüfen.",
+    readyForAutopilot: "Bin ich bereit, den Autopiloten einzuschalten?",
+    turnOnAutopilot: "Führe mich sicher durch das Aktivieren des Autopiloten.",
+    autopilotGuardrails: "Welche Sicherheitsmechanismen nutzt der Autopilot?",
+    topSetupReason: (l) => `Warum ist ${l} gerade das beste Setup?`,
+    signalFitsRisk: (l) => `Passt ${l} zu meinen Risikolimits?`,
+    strongestSignal: "Welches der neuen Signale ist das stärkste?",
+    liveRefresh: "Live-Scanner-Aktualisierung jetzt starten.",
+    exitPlan: (s) => `Was ist der Ausstiegsplan für ${s}?`,
+    weakestPosition: "Welche offene Position wirkt am schwächsten?",
+    roomForTrade: "Habe ich heute noch Spielraum für einen Trade?",
+    biggestRiskCluster: (t) => `Warum ist ${t} mein größtes Risikokonzentrat?`,
+    sizeTrade: "Wie dimensioniere ich den nächsten Trade?",
+    cutExposure: "Wie reduziere ich das Exposure ohne Upside zu verlieren?",
+    learnFromTrade: (s) => `Was haben wir aus ${s} gelernt?`,
+    highestConviction: "Was ist das Wichtigste, das ich jetzt tun sollte?",
+    stabilizeByo: "Wie stabilisiere ich die BYO-Verbindung?",
+    healthScoreDown: "Was zieht meinen Health-Score nach unten?",
+    showPortfolioStatus: "Portfolio-Status anzeigen.",
+    currentRiskStatus: "Wie ist mein aktuelles Risikoniveau?",
+  },
+};
+
+function sugg(locale: string | undefined) {
+  return SUGGESTION_I18N[locale?.split("-")[0] ?? ""] ?? null;
+}
+
 const DEFAULT_SUGGESTIONS = [
   "What's my portfolio status?",
   "Any new scanner signals?",
   "What's my current risk status?",
 ];
+
+function getDefaultSuggestions(locale?: string): string[] {
+  const s = sugg(locale);
+  if (!s) return DEFAULT_SUGGESTIONS;
+  return [s.portfolioStatus, s.scannerSignals, s.riskStatus];
+}
 
 const HUMANIZER_OPENING_PATTERNS = [
   /^great question!?/i,
@@ -423,41 +587,32 @@ function detectRecipe(message: string): RecipeName | null {
   return null;
 }
 
-function getSuggestionsForRecipe(recipe: RecipeName): string[] {
+function getSuggestionsForRecipe(recipe: RecipeName, locale?: string): string[] {
+  const s = sugg(locale);
   switch (recipe) {
     case "scanner_signals":
     case "refresh_signals":
-      return [
-        "Refresh signals now.",
-        "What's my portfolio status?",
-        "Explain my current risk.",
-      ];
+      return s
+        ? [s.refreshSignals, s.portfolioStatus, s.explainRisk]
+        : ["Refresh signals now.", "What's my portfolio status?", "Explain my current risk."];
     case "portfolio_status":
-      return [
-        "Show my active positions.",
-        "What's my current risk status?",
-        "Review recent trades.",
-      ];
+      return s
+        ? [s.activePositions, s.riskStatus, s.reviewTrades]
+        : ["Show my active positions.", "What's my current risk status?", "Review recent trades."];
     case "risk_status":
-      return [
-        "What's my portfolio status?",
-        "Show active positions.",
-        "Any new scanner signals?",
-      ];
+      return s
+        ? [s.portfolioStatus, s.activePositions, s.scannerSignals]
+        : ["What's my portfolio status?", "Show active positions.", "Any new scanner signals?"];
     case "trade_history":
-      return [
-        "What's my portfolio status?",
-        "Explain my current risk.",
-        "Any new scanner signals?",
-      ];
+      return s
+        ? [s.portfolioStatus, s.explainRisk, s.scannerSignals]
+        : ["What's my portfolio status?", "Explain my current risk.", "Any new scanner signals?"];
     case "agent_health":
-      return [
-        "What's my portfolio status?",
-        "Any new scanner signals?",
-        "What's my current risk status?",
-      ];
+      return s
+        ? [s.portfolioStatus, s.scannerSignals, s.riskStatus]
+        : ["What's my portfolio status?", "Any new scanner signals?", "What's my current risk status?"];
     default:
-      return DEFAULT_SUGGESTIONS;
+      return getDefaultSuggestions(locale);
   }
 }
 
@@ -487,8 +642,16 @@ function getMissingFundingAssets(portfolio: PortfolioSnapshot | null, executionC
   return "USDC.e and POL";
 }
 
-function needsWalletFunding(portfolio: PortfolioSnapshot | null): boolean {
-  if (!portfolio) return true;
+function needsWalletFunding(portfolio: PortfolioSnapshot | null, ops?: OpsSnapshot | null, executionContext?: ToolExecutionContext | null): boolean {
+  // No portfolio data — if a wallet address exists we can't confirm it's unfunded, stay silent.
+  if (!portfolio) return !executionContext?.walletAddress;
+  // If polymarket setup was fully completed the wallet was funded at that point.
+  // Don't nag the user about funding just because of a transient RPC failure.
+  if (ops?.polymarketReady) return false;
+  // Autopilot running means the wallet was set up and funded previously.
+  if (ops?.autopilotEnabled) return false;
+  // fundingStatus "unavailable" means RPC is down — don't treat that as "needs funding"
+  if (portfolio.fundingStatus === "unavailable") return false;
   return portfolio.balanceStatus === "no_wallet"
     || portfolio.balanceStatus === "unfunded"
     || portfolio.fundingStatus !== "ready"
@@ -503,16 +666,21 @@ function buildOnboardingNudge(
   ops: OpsSnapshot | null,
   executionContext: ToolExecutionContext | null,
 ): string | null {
+  // If autopilot is on the agent is live — never inject setup/funding nudges.
+  if (ops?.autopilotEnabled) return null;
+  // If a wallet address is present and we have no contrary evidence, trust it's funded.
+  if (executionContext?.walletAddress && !portfolio) return null;
+
   const lowerMessage = message.toLowerCase();
   const lowerReply = reply.toLowerCase();
   const alreadyTalkingAboutFunding = /(fund|wallet|usdc|pol|bridge)/.test(lowerMessage)
     || /(usdc\.e|fund this wallet|fund the wallet|bridge)/.test(lowerReply);
 
-  if (portfolio?.balanceStatus === "no_wallet" && !alreadyTalkingAboutFunding) {
+  if (portfolio?.balanceStatus === "no_wallet" && !executionContext?.walletAddress && !alreadyTalkingAboutFunding) {
     return "Next step is connecting a wallet, funding it with USDC.e and POL, then switching on autopilot.";
   }
 
-  if (needsWalletFunding(portfolio) && !alreadyTalkingAboutFunding) {
+  if (needsWalletFunding(portfolio, ops, executionContext) && !alreadyTalkingAboutFunding) {
     const missingAssets = getMissingFundingAssets(portfolio, executionContext);
     return `I can help you fund this wallet with ${missingAssets} so the agent can trade on Polymarket.`;
   }
@@ -551,6 +719,7 @@ async function buildConversationSuggestions(options: {
   history: ChatMessage[];
   executionContext: ToolExecutionContext | null;
   fallbackSuggestions: string[];
+  locale?: string;
 }): Promise<string[]> {
   const {
     message,
@@ -560,7 +729,9 @@ async function buildConversationSuggestions(options: {
     history,
     executionContext,
     fallbackSuggestions,
+    locale,
   } = options;
+  const s = sugg(locale);
 
   const { portfolio, ops, risk, scanner } = await hydrateSuggestionContexts(contexts, executionContext);
   const recentUserMessages = new Set(
@@ -584,45 +755,46 @@ async function buildConversationSuggestions(options: {
   };
 
   if (portfolio?.balanceStatus === "no_wallet") {
-    addSuggestion("How do I connect and fund the agent wallet with USDC.e and POL?");
-    addSuggestion("Show me exactly what this agent still needs before it can trade.");
-    addSuggestion("What happens after the wallet is ready?");
-  } else if (needsWalletFunding(portfolio)) {
+    addSuggestion(s?.connectFundWallet ?? "How do I connect and fund the agent wallet with USDC.e and POL?");
+    addSuggestion(s?.agentNeeds ?? "Show me exactly what this agent still needs before it can trade.");
+    addSuggestion(s?.afterWalletReady ?? "What happens after the wallet is ready?");
+  } else if (needsWalletFunding(portfolio, ops)) {
     const missingAssets = getMissingFundingAssets(portfolio, executionContext);
-    addSuggestion(`How do I fund this wallet with ${missingAssets}?`);
-    addSuggestion("Show me exactly what this wallet is missing for Polymarket.");
-    addSuggestion("Check my funding status again.");
+    addSuggestion(s ? s.fundWalletWith(missingAssets) : `How do I fund this wallet with ${missingAssets}?`);
+    addSuggestion(s?.walletMissing ?? "Show me exactly what this wallet is missing for Polymarket.");
+    addSuggestion(s?.checkFundingAgain ?? "Check my funding status again.");
   } else if (ops && !ops.autopilotEnabled) {
-    addSuggestion("Am I ready to switch on autopilot?");
-    addSuggestion("Walk me through turning on autopilot safely.");
-    addSuggestion("What guardrails will autopilot use?");
+    addSuggestion(s?.readyForAutopilot ?? "Am I ready to switch on autopilot?");
+    addSuggestion(s?.turnOnAutopilot ?? "Walk me through turning on autopilot safely.");
+    addSuggestion(s?.autopilotGuardrails ?? "What guardrails will autopilot use?");
   }
 
   if (topic === "scanner_signals" || topic === "refresh_signals") {
     const topSignal = scanner?.signals[0];
     if (topSignal) {
       const label = shortenSuggestionLabel(topSignal.question || topSignal.slug);
-      addSuggestion(`Why is ${label} the top setup right now?`);
-      addSuggestion(`Does ${label} fit my current risk limits?`);
+      addSuggestion(s ? s.topSetupReason(label) : `Why is ${label} the top setup right now?`);
+      addSuggestion(s ? s.signalFitsRisk(label) : `Does ${label} fit my current risk limits?`);
     }
     if (scanner?.newSignalCount) {
-      addSuggestion("Which of the new signals is strongest?");
+      addSuggestion(s?.strongestSignal ?? "Which of the new signals is strongest?");
     }
     if (scanner?.stale) {
-      addSuggestion("Run a live scanner refresh now.");
+      addSuggestion(s?.liveRefresh ?? "Run a live scanner refresh now.");
     }
   }
 
   if (topic === "portfolio_status") {
     const topPosition = portfolio?.positions[0];
     if (topPosition) {
-      addSuggestion(`What is the exit plan for ${shortenSuggestionLabel(topPosition.slug, 32)}?`);
-      addSuggestion("Which open position looks weakest right now?");
-    } else if (!needsWalletFunding(portfolio)) {
-      addSuggestion("Find one setup that fits my current bankroll.");
+      const slug = shortenSuggestionLabel(topPosition.slug, 32);
+      addSuggestion(s ? s.exitPlan(slug) : `What is the exit plan for ${slug}?`);
+      addSuggestion(s?.weakestPosition ?? "Which open position looks weakest right now?");
+    } else if (!needsWalletFunding(portfolio, ops)) {
+      addSuggestion(s?.findSetup ?? "Find one setup that fits my current bankroll.");
     }
     if ((portfolio?.tradesToday ?? 0) >= 4) {
-      addSuggestion("Do I still have room for another trade today?");
+      addSuggestion(s?.roomForTrade ?? "Do I still have room for another trade today?");
     }
   }
 
@@ -631,41 +803,42 @@ async function buildConversationSuggestions(options: {
       ? Object.entries(risk.themeExposure).sort((a, b) => b[1] - a[1])[0]
       : null;
     if (hottestTheme) {
-      addSuggestion(`Why is ${hottestTheme[0]} my biggest risk cluster right now?`);
+      addSuggestion(s ? s.biggestRiskCluster(hottestTheme[0]) : `Why is ${hottestTheme[0]} my biggest risk cluster right now?`);
     }
-    addSuggestion("How should I size the next trade?");
+    addSuggestion(s?.sizeTrade ?? "How should I size the next trade?");
     if ((risk?.exposurePct ?? 0) > 40) {
-      addSuggestion("How do I cut exposure without killing upside?");
+      addSuggestion(s?.cutExposure ?? "How do I cut exposure without killing upside?");
     }
   }
 
   if (topic === "trade_history") {
     const latestTrade = portfolio?.recentTrades?.[0];
     if (latestTrade) {
-      addSuggestion(`What did we learn from ${shortenSuggestionLabel(latestTrade.slug, 32)}?`);
+      const slug = shortenSuggestionLabel(latestTrade.slug, 32);
+      addSuggestion(s ? s.learnFromTrade(slug) : `What did we learn from ${slug}?`);
     }
-    addSuggestion("What pattern is showing up in my recent trades?");
+    addSuggestion(s?.patternInTrades ?? "What pattern is showing up in my recent trades?");
   }
 
   if (topic === "agent_health") {
     if (ops?.agentType === "byo" && ops.connectionStatus !== "connected") {
-      addSuggestion("How do I stabilize the BYO connection?");
+      addSuggestion(s?.stabilizeByo ?? "How do I stabilize the BYO connection?");
     }
     if ((ops?.health?.score ?? 100) < 75) {
-      addSuggestion("What's dragging my health score down?");
+      addSuggestion(s?.healthScoreDown ?? "What's dragging my health score down?");
     }
-    addSuggestion("What should this agent optimize next?");
+    addSuggestion(s?.optimizeAgent ?? "What should this agent optimize next?");
   }
 
-  if (!topic && !needsWalletFunding(portfolio)) {
-    addSuggestion("What's the highest-conviction thing I should do next?");
-    addSuggestion("Find one trade setup that fits my current bankroll.");
+  if (!topic && !needsWalletFunding(portfolio, ops)) {
+    addSuggestion(s?.highestConviction ?? "What's the highest-conviction thing I should do next?");
+    addSuggestion(s?.findSetup ?? "Find one trade setup that fits my current bankroll.");
   }
 
   for (const fallback of fallbackSuggestions) {
     addSuggestion(fallback);
   }
-  for (const fallback of DEFAULT_SUGGESTIONS) {
+  for (const fallback of getDefaultSuggestions(locale)) {
     addSuggestion(fallback);
   }
 
@@ -737,7 +910,21 @@ function buildOpsFallback(ops: OpsSnapshot): string {
 
 // ── Context Builder ────────────────────────────────────────────
 
-function buildAgentContext(agentRow: Record<string, unknown>): string {
+// Only the locales the platform ships with
+const LOCALE_LANG_MAP: Record<string, string> = {
+  es: "Spanish",
+  fr: "French",
+  de: "German",
+};
+
+function localeLanguageDirective(locale: string | undefined): string {
+  if (!locale || locale === "en") return "";
+  const lang = LOCALE_LANG_MAP[locale.split("-")[0]] ?? null;
+  if (!lang) return "";
+  return `\n\n## Language\nThe user's interface is set to ${lang}. You MUST reply entirely in ${lang}. Do not switch to English under any circumstances.`;
+}
+
+function buildAgentContext(agentRow: Record<string, unknown>, locale?: string): string {
   const name = agentRow.name as string;
   const systemPrompt = agentRow.system_prompt as string;
 
@@ -755,7 +942,7 @@ You are chatting with your user through the Quantik platform sidebar.
 - Never claim you lack access to portfolio, signal, or agent status data if internal context is present.
 - Write like a human operator, not a chatbot. No em dashes, no "great question", no "I hope this helps", no "let me know", and no generic wrap-up sentence.
 - Prefer plain verbs like is, has, and can. Keep the tone sharp, natural, and specific.
-- Your onboarding mission is not finished until the user has an agent, the wallet is funded with USDC.e and POL, and autopilot is switched on. If one step is missing, guide them to the next step.
+- Only suggest wallet funding or onboarding steps when internal context explicitly shows the wallet is unfunded or autopilot is off. If autopilot is already enabled or the wallet is already funded, never mention setup steps.
 
 ## Tool Usage
 You have access to tools that let you fetch live data. ALWAYS use the appropriate tool when the user asks about:
@@ -773,24 +960,28 @@ After receiving tool results, synthesize the data naturally in your personality.
 - Scanner runs every 5min, auto-executes when sigma confidence >= 0.72 + Kelly >= 0.40
 - Circuit breakers: $10 max/bet, 5 trades/day, -$25 daily loss limit
 - Agents: Aura (sentiment), Oracle (probability), Edge (Kelly), Flux (liquidity), Sigma (final call), Clause (resolution risk)
-- Lucifer provides adversarial devil's advocate analysis on every signal`;
+- Lucifer provides adversarial devil's advocate analysis on every signal${localeLanguageDirective(locale)}`;
 }
 
 function buildRecipePrompt(
   recipe: RecipeName,
   originalMessage: string,
   contexts: ContextEnvelope[],
+  locale?: string,
 ): string {
   const payload = Object.fromEntries(contexts.map((context) => {
     if (context.kind === "portfolio") {
       const data = context.data as PortfolioSnapshot & { tradeHistory?: TradeHistorySnapshot };
       return [context.kind, {
         totalValue: data.totalValue,
+        onChainUsdc: data.onChainUsdc,
+        pol: data.pol,
         dailyPnl: data.dailyPnl,
         exposurePct: data.exposurePct,
         positionCount: data.positions?.length ?? 0,
         positions: data.positions?.slice(0, 3) ?? [],
         balanceStatus: data.balanceStatus,
+        fundingStatus: data.fundingStatus,
         tradeHistory: data.tradeHistory
           ? {
               count: data.tradeHistory.count,
@@ -830,6 +1021,7 @@ function buildRecipePrompt(
         connectionStatus: data.connectionStatus,
         autopilotEnabled: data.autopilotEnabled,
         lastHeartbeat: data.lastHeartbeat,
+        polymarketReady: data.polymarketReady,
         health: data.health
           ? {
               status: data.health.status,
@@ -843,6 +1035,8 @@ function buildRecipePrompt(
   }));
   const recipeLabel = recipe.replace(/_/g, " ");
 
+  const langNote = localeLanguageDirective(locale);
+
   return [
     `User request: ${originalMessage}`,
     `Primary task: ${recipeLabel}`,
@@ -850,7 +1044,14 @@ function buildRecipePrompt(
     "Answer in under 60 words. Mention only the most important numbers. Sound decisive, natural, and platform-native.",
     "If scanner data is cached, say so plainly. Only mention live refresh when explicit action is required.",
     "Do not sound like a chatbot. No em dashes, canned praise, 'I hope this helps', 'let me know', or generic closing lines.",
-    "If the wallet is not ready or autopilot is still off, guide the user to the next onboarding step.",
+    ...((() => {
+      const opsCtx = contexts.find((c) => c.kind === "ops")?.data as OpsSnapshot | undefined;
+      const portfolioCtx = contexts.find((c) => c.kind === "portfolio")?.data as PortfolioSnapshot | undefined;
+      const onboardingIncomplete = !opsCtx?.autopilotEnabled && !opsCtx?.polymarketReady
+        && (portfolioCtx?.balanceStatus === "no_wallet" || portfolioCtx?.balanceStatus === "unfunded" || portfolioCtx?.fundingStatus === "pending");
+      return onboardingIncomplete ? ["If the wallet is not ready or autopilot is still off, guide the user to the next onboarding step."] : [];
+    })()),
+    ...(langNote ? [langNote.trim()] : []),
     `Internal context:\n${JSON.stringify(payload)}`,
   ].join("\n\n");
 }
@@ -920,9 +1121,9 @@ async function resolveRecipe(
     emitTrace(res, TOOL_TRACE_META.get_scanner_signals, "Scanner snapshot ready", "done");
     return {
       contexts,
-      suggestions: getSuggestionsForRecipe(recipe),
+      suggestions: getSuggestionsForRecipe(recipe, body.locale),
       fallbackReply: buildScannerFallback(scanner),
-      prompt: buildRecipePrompt(recipe, body.message, contexts),
+      prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
 
@@ -943,9 +1144,9 @@ async function resolveRecipe(
     emitTrace(res, TOOL_TRACE_META.get_portfolio, "Portfolio snapshot ready", "done");
     return {
       contexts,
-      suggestions: getSuggestionsForRecipe(recipe),
+      suggestions: getSuggestionsForRecipe(recipe, body.locale),
       fallbackReply: buildPortfolioFallback(portfolio, ops),
-      prompt: buildRecipePrompt(recipe, body.message, contexts),
+      prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
 
@@ -963,9 +1164,9 @@ async function resolveRecipe(
     emitTrace(res, TOOL_TRACE_META.get_risk_status, "Risk snapshot ready", "done");
     return {
       contexts,
-      suggestions: getSuggestionsForRecipe(recipe),
+      suggestions: getSuggestionsForRecipe(recipe, body.locale),
       fallbackReply: buildRiskFallback(risk, portfolio),
-      prompt: buildRecipePrompt(recipe, body.message, contexts),
+      prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
 
@@ -981,9 +1182,9 @@ async function resolveRecipe(
     emitTrace(res, TOOL_TRACE_META.get_trade_history, "Trade history ready", "done");
     return {
       contexts,
-      suggestions: getSuggestionsForRecipe(recipe),
+      suggestions: getSuggestionsForRecipe(recipe, body.locale),
       fallbackReply: buildTradeHistoryFallback(history),
-      prompt: buildRecipePrompt(recipe, body.message, contexts),
+      prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
 
@@ -995,9 +1196,9 @@ async function resolveRecipe(
   emitTrace(res, TOOL_TRACE_META.get_health_score, "Agent runtime ready", "done");
   return {
     contexts,
-    suggestions: getSuggestionsForRecipe(recipe),
+    suggestions: getSuggestionsForRecipe(recipe, body.locale),
     fallbackReply: buildOpsFallback(ops),
-    prompt: buildRecipePrompt(recipe, body.message, contexts),
+    prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
   };
 }
 
@@ -1078,6 +1279,7 @@ async function resolveGenericToolFlow(
   contents: GeminiContent[],
   systemInstruction: { parts: GeminiPart[] } | undefined,
   context: ToolExecutionContext | null,
+  locale?: string,
 ): Promise<{
   finalContents: GeminiContent[];
   toolResults: { name: string; data: unknown }[];
@@ -1104,7 +1306,9 @@ async function resolveGenericToolFlow(
         finalContents: workingContents,
         toolResults,
         contexts,
-        suggestions: toolResults.length > 0 ? ["Show my portfolio status.", "Any new scanner signals?"] : DEFAULT_SUGGESTIONS,
+        suggestions: toolResults.length > 0
+        ? (sugg(locale) ? [sugg(locale)!.showPortfolioStatus, sugg(locale)!.scannerSignals] : ["Show my portfolio status.", "Any new scanner signals?"])
+        : getDefaultSuggestions(locale),
         directReply: replyText,
         model,
       };
@@ -1159,7 +1363,9 @@ async function resolveGenericToolFlow(
     finalContents: workingContents,
     toolResults,
     contexts,
-    suggestions: ["Show my portfolio status.", "What's my current risk status?"],
+    suggestions: sugg(locale)
+      ? [sugg(locale)!.showPortfolioStatus, sugg(locale)!.currentRiskStatus]
+      : ["Show my portfolio status.", "What's my current risk status?"],
     model,
   };
 }
@@ -1202,16 +1408,39 @@ router.post("/agent/chat", chatRateLimit, async (req: Request, res: Response) =>
 
   const executionContext = buildToolExecutionContextFromAgentRow(userId, agentRow);
   const systemContent = agentRow
-    ? buildAgentContext(agentRow)
-    : "You are Quantik Relay, a sharp trading assistant. Keep responses under 60 words. Sound human, plainspoken, and specific. No em dashes, no chatbot filler, and no 'let me know'. You have tools available to fetch live data.";
+    ? buildAgentContext(agentRow, body.locale)
+    : `You are Quantik Relay, a sharp trading assistant. Keep responses under 60 words. Sound human, plainspoken, and specific. No em dashes, no chatbot filler, and no 'let me know'. You have tools available to fetch live data.${localeLanguageDirective(body.locale)}`;
 
   // SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // prevent nginx/proxy buffering
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
   res.write(`data: ${JSON.stringify({ type: "heartbeat" })}\n\n`);
+
+  // Abort flag — set when the client disconnects before the stream finishes
+  let clientGone = false;
+  req.on("close", () => { clientGone = true; });
+
+  // Keepalive: send a comment every 15s so proxies don't close the connection
+  const keepaliveInterval = setInterval(() => {
+    if (!clientGone && !res.writableEnded) res.write(": keepalive\n\n");
+  }, 15_000);
+
+  const safeEnd = () => {
+    clearInterval(keepaliveInterval);
+    if (!res.writableEnded) res.end();
+  };
+
+  // Hard timeout: 90s max per request
+  const timeoutHandle = setTimeout(() => {
+    if (!clientGone && !res.writableEnded) {
+      emitSse(res, { type: "error", error: "Request timed out. Please try again." });
+    }
+    safeEnd();
+  }, 90_000);
 
   const sessionId = body.sessionId ?? (req.headers["x-session-id"] as string) ?? uuidv4();
 
@@ -1252,7 +1481,7 @@ router.post("/agent/chat", chatRateLimit, async (req: Request, res: Response) =>
         { role: "user", content: body.message },
       ];
       const { system_instruction, contents } = buildGeminiContents(messages);
-      const generic = await resolveGenericToolFlow(res, contents, system_instruction, executionContext);
+      const generic = await resolveGenericToolFlow(res, contents, system_instruction, executionContext, body.locale);
       contexts = generic.contexts;
       suggestions = generic.suggestions;
       toolResults = generic.toolResults;
@@ -1298,31 +1527,36 @@ router.post("/agent/chat", chatRateLimit, async (req: Request, res: Response) =>
       history: baseMessages,
       executionContext,
       fallbackSuggestions: suggestions,
+      locale: body.locale,
     });
-    emitReplyTokens(res, fullReply);
+    if (!clientGone) emitReplyTokens(res, fullReply);
     fullReply = clampReplyWords(fullReply, MAX_REPLY_WORDS);
 
     // Store in session
     appendToSession(sessionId, { role: "user", content: body.message });
     appendToSession(sessionId, { role: "assistant", content: fullReply });
 
-    const latencyMs = Date.now() - start;
-    emitSse(res, {
-      type: "done",
-      reply: fullReply,
-      latencyMs,
-      model: usedModel,
-      toolCalls: toolResults.length > 0 ? toolResults : null,
-      agentName: agentRow ? agentRow.name : "Relay",
-      agentEmoji: agentRow ? agentRow.avatar_emoji : null,
-      suggestions,
-      contexts: Object.fromEntries(contexts.map((context) => [context.kind, context.data])),
-    });
-    res.end();
+    if (!clientGone) {
+      const latencyMs = Date.now() - start;
+      emitSse(res, {
+        type: "done",
+        reply: fullReply,
+        latencyMs,
+        model: usedModel,
+        toolCalls: toolResults.length > 0 ? toolResults : null,
+        agentName: agentRow ? agentRow.name : "Relay",
+        agentEmoji: agentRow ? agentRow.avatar_emoji : null,
+        suggestions,
+        contexts: Object.fromEntries(contexts.map((context) => [context.kind, context.data])),
+      });
+    }
+    clearTimeout(timeoutHandle);
+    safeEnd();
 
   } catch {
-    emitSse(res, { type: "error", error: "Agent is momentarily offline." });
-    res.end();
+    clearTimeout(timeoutHandle);
+    if (!clientGone) emitSse(res, { type: "error", error: "Agent is momentarily offline." });
+    safeEnd();
   }
 });
 
