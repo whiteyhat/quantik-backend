@@ -871,42 +871,8 @@ const RELEASES: LocalizedRelease[] = [
 ];
 
 async function seedReleases() {
-  const db = getDb();
-
-  const upsert = db.prepare(`
-    INSERT OR REPLACE INTO versions
-      (version, released_at, features, fixes, highlight,
-       highlight_es, highlight_fr, highlight_de,
-       features_es, features_fr, features_de,
-       fixes_es, fixes_fr, fixes_de)
-    VALUES
-      (?, ?, ?, ?, ?,
-       ?, ?, ?,
-       ?, ?, ?,
-       ?, ?, ?)
-  `);
-
-  for (const r of RELEASES) {
-    upsert.run(
-      r.version,
-      r.released_at,
-      JSON.stringify(r.features.en),
-      JSON.stringify(r.fixes.en),
-      r.highlight.en,
-      r.highlight.es,
-      r.highlight.fr,
-      r.highlight.de,
-      JSON.stringify(r.features.es),
-      JSON.stringify(r.features.fr),
-      JSON.stringify(r.features.de),
-      JSON.stringify(r.fixes.es),
-      JSON.stringify(r.fixes.fr),
-      JSON.stringify(r.fixes.de),
-    );
-  }
-
-  console.log(`[seed-releases] SQLite: upserted ${RELEASES.length} releases`);
-
+  // When DATABASE_URL is present (production/Railway), seed only PostgreSQL
+  // to avoid SQLite path issues on non-persistent environments.
   if (isPgEnabled()) {
     for (const r of RELEASES) {
       await pgExec(`
@@ -948,6 +914,31 @@ async function seedReleases() {
       ]);
     }
     console.log(`[seed-releases] PostgreSQL: upserted ${RELEASES.length} releases`);
+  } else {
+    // Local SQLite fallback
+    const db = getDb();
+    const upsert = db.prepare(`
+      INSERT OR REPLACE INTO versions
+        (version, released_at, features, fixes, highlight,
+         highlight_es, highlight_fr, highlight_de,
+         features_es, features_fr, features_de,
+         fixes_es, fixes_fr, fixes_de)
+      VALUES
+        (?, ?, ?, ?, ?,
+         ?, ?, ?,
+         ?, ?, ?,
+         ?, ?, ?)
+    `);
+    for (const r of RELEASES) {
+      upsert.run(
+        r.version, r.released_at,
+        JSON.stringify(r.features.en), JSON.stringify(r.fixes.en), r.highlight.en,
+        r.highlight.es, r.highlight.fr, r.highlight.de,
+        JSON.stringify(r.features.es), JSON.stringify(r.features.fr), JSON.stringify(r.features.de),
+        JSON.stringify(r.fixes.es), JSON.stringify(r.fixes.fr), JSON.stringify(r.fixes.de),
+      );
+    }
+    console.log(`[seed-releases] SQLite: upserted ${RELEASES.length} releases`);
   }
 
   console.log("[seed-releases] Done.");
