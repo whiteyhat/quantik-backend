@@ -34,10 +34,19 @@ export interface WalletFundingSnapshot {
 
 async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[]): Promise<string> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
-  const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(8000) });
+  const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(5000) });
   const json = await res.json() as any;
   if (!json.result) throw new Error(json.error?.message ?? "No result");
   return json.result;
+}
+
+// Race all RPC providers — first successful response wins, avoiding sequential 8s timeouts
+async function polygonRpcRace(method: string, params: unknown[]): Promise<{ result: string; rpcUrl: string }> {
+  const races = POLYGON_RPC_URLS.map(async (rpcUrl) => {
+    const result = await polygonRpcCall(rpcUrl, method, params);
+    return { result, rpcUrl };
+  });
+  return Promise.any(races);
 }
 
 export async function getUsdcBalance(address?: string | null): Promise<number> {
@@ -57,33 +66,28 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
 
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
-  let lastError: string | null = null;
 
-  for (const rpcUrl of POLYGON_RPC_URLS) {
-    try {
-      const [uBH, uNH] = await Promise.all([
-        polygonRpcCall(rpcUrl, "eth_call", [{ to: USDC_BRIDGED_CONTRACT, data: callData }, "latest"]),
-        polygonRpcCall(rpcUrl, "eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]),
-      ]);
-      const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-      return {
-        balance: Number(safeBigInt(uBH) + safeBigInt(uNH)) / 1e6,
-        status: "live",
-        rpcUrl,
-        error: null,
-      };
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-      continue;
-    }
+  try {
+    // Race all RPCs for bridged USDC, race all RPCs for native USDC — both in parallel
+    const [bridgedRace, nativeRace] = await Promise.all([
+      polygonRpcRace("eth_call", [{ to: USDC_BRIDGED_CONTRACT, data: callData }, "latest"]),
+      polygonRpcRace("eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]),
+    ]);
+    const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
+    return {
+      balance: Number(safeBigInt(bridgedRace.result) + safeBigInt(nativeRace.result)) / 1e6,
+      status: "live",
+      rpcUrl: bridgedRace.rpcUrl,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      balance: 0,
+      status: "rpc_unavailable",
+      rpcUrl: null,
+      error: err instanceof Error ? err.message : "All Polygon RPC requests failed",
+    };
   }
-
-  return {
-    balance: 0,
-    status: "rpc_unavailable",
-    rpcUrl: null,
-    error: lastError ?? "All Polygon RPC requests failed",
-  };
 }
 
 export async function getClobBalance(): Promise<number> {
@@ -109,25 +113,23 @@ export async function getPolBalanceSnapshot(address: string | null | undefined):
     };
   }
 
-  for (const rpcUrl of POLYGON_RPC_URLS) {
-    try {
-      const pH = await polygonRpcCall(rpcUrl, "eth_getBalance", [address, "latest"]);
-      const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-      return {
-        balance: Number(safeBigInt(pH)) / 1e18,
-        status: "live",
-        rpcUrl,
-        error: null,
-      };
-    } catch { continue; }
+  try {
+    const { result, rpcUrl } = await polygonRpcRace("eth_getBalance", [address, "latest"]);
+    const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
+    return {
+      balance: Number(safeBigInt(result)) / 1e18,
+      status: "live",
+      rpcUrl,
+      error: null,
+    };
+  } catch {
+    return {
+      balance: 0,
+      status: "rpc_unavailable",
+      rpcUrl: null,
+      error: "All Polygon RPC requests failed",
+    };
   }
-
-  return {
-    balance: 0,
-    status: "rpc_unavailable",
-    rpcUrl: null,
-    error: "All Polygon RPC requests failed",
-  };
 }
 
 export async function getWalletFundingSnapshot(address: string | null | undefined): Promise<WalletFundingSnapshot> {

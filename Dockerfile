@@ -17,6 +17,10 @@ RUN curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz |
 # Install Polymarket CLI (Requires GLIBC 2.38+)
 RUN curl -sSL https://raw.githubusercontent.com/Polymarket/polymarket-cli/main/install.sh | sh
 
+# Make the CLI binary findable without relying on PATH in the Node process
+ENV PATH="/root/.local/bin:${PATH}"
+ENV POLYMARKET_CLI=/root/.local/bin/polymarket
+
 WORKDIR /app
 
 # Confirm environment

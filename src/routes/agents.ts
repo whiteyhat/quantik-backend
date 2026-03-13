@@ -643,6 +643,55 @@ router.post("/agents", async (req: Request, res: Response) => {
   }
 });
 
+// ── POST /api/v1/agents/:id/wallet — Assign or update wallet credentials ─────
+// Allows re-assigning the wallet address and/or providing the encrypted private
+// key for agents where the key was not captured at creation time (e.g. the user
+// refreshed the page during the agent factory wallet step).
+
+router.post("/agents/:id/wallet", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const body = req.body as {
+    wallet_address?: string;
+    private_key?: string;
+    seed_phrase?: string;
+  };
+
+  if (!body.wallet_address || !EVM_ADDRESS_RE.test(body.wallet_address)) {
+    res.status(400).json({ error: "Valid wallet_address (0x EVM address) is required" });
+    return;
+  }
+
+  const agent = await loadOwnedAgent(agentId, userId);
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const walletAddress = body.wallet_address;
+  const now = Date.now();
+
+  const fields: Record<string, unknown> = {
+    wallet_address: walletAddress,
+    polymarket_ready: 0,
+    polymarket_status: "pending_funding",
+    updated_at: now,
+  };
+
+  if (body.private_key) {
+    fields.encrypted_private_key = encrypt(body.private_key);
+  }
+  if (body.seed_phrase) {
+    fields.encrypted_seed_phrase = encrypt(body.seed_phrase);
+  }
+
+  await syncAgentFields(agentId, fields);
+
+  res.json({ ok: true, wallet_address: walletAddress });
+});
+
 // ── POST /api/v1/agents/:id/verify-polymarket — Run Polymarket approvals ─────
 // Decrypts the agent's stored private key, checks funding, runs CLI approvals,
 // and marks the agent as Polymarket-ready. Rate-limited to 3 calls/min/user.
@@ -770,13 +819,18 @@ router.get("/agent/me", async (req: Request, res: Response) => {
                  FROM agents WHERE id = ?`
               ).get(sqliteUser.agent_id) as Record<string, unknown> | undefined;
               if (agentFromSqlite) {
-                // Sync this agent to PG
+                // Sync this agent to PG — on conflict, patch wallet_address/keys if they were missing
                 const a = agentFromSqlite;
                 const agentCols = Object.keys(a);
                 const placeholders = agentCols.map((_, i) => `$${i + 1}`).join(", ");
                 const vals = agentCols.map(k => a[k]);
                 await pgExec(
-                  `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders}) ON CONFLICT (id) DO NOTHING`,
+                  `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders})
+                   ON CONFLICT (id) DO UPDATE SET
+                     wallet_address = COALESCE(EXCLUDED.wallet_address, agents.wallet_address),
+                     encrypted_private_key = COALESCE(NULLIF(EXCLUDED.encrypted_private_key, ''), agents.encrypted_private_key),
+                     encrypted_seed_phrase = COALESCE(NULLIF(EXCLUDED.encrypted_seed_phrase, ''), agents.encrypted_seed_phrase)
+                   WHERE agents.wallet_address IS NULL OR agents.encrypted_private_key IS NULL OR agents.encrypted_private_key = ''`,
                   vals
                 );
                 await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [sqliteUser.agent_id, userId]);
@@ -786,13 +840,18 @@ router.get("/agent/me", async (req: Request, res: Response) => {
             }
           }
         } else {
-          // Agent found by user_id in SQLite — sync it
+          // Agent found by user_id in SQLite — sync it, patch wallet fields if missing in PG
           const agentId = sqliteAgent.id as string;
           const agentCols = Object.keys(sqliteAgent);
           const placeholders = agentCols.map((_, i) => `$${i + 1}`).join(", ");
           const vals = agentCols.map(k => sqliteAgent[k]);
           await pgExec(
-            `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders}) ON CONFLICT (id) DO NOTHING`,
+            `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders})
+             ON CONFLICT (id) DO UPDATE SET
+               wallet_address = COALESCE(EXCLUDED.wallet_address, agents.wallet_address),
+               encrypted_private_key = COALESCE(NULLIF(EXCLUDED.encrypted_private_key, ''), agents.encrypted_private_key),
+               encrypted_seed_phrase = COALESCE(NULLIF(EXCLUDED.encrypted_seed_phrase, ''), agents.encrypted_seed_phrase)
+             WHERE agents.wallet_address IS NULL OR agents.encrypted_private_key IS NULL OR agents.encrypted_private_key = ''`,
             vals
           );
           await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [agentId, userId]);

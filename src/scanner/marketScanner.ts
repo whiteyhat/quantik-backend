@@ -1,5 +1,4 @@
 import { CircuitBreaker } from "../risk/circuitBreaker";
-import { execFile } from "child_process";
 import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runClause } from "../clause/index";
@@ -199,24 +198,6 @@ let alertsTriggered = 0;
 let lastScanDay = new Date().toDateString();
 
 // ── Helpers ────────────────────────────────────────────────────
-
-function runPolymarketCli(args: string[]): Promise<unknown> {
-  const bin = process.env.POLYMARKET_CLI || "polymarket";
-  const fullArgs = ["-o", "json", ...args];
-  return new Promise((resolve, reject) => {
-    execFile(bin, fullArgs, { maxBuffer: 10 * 1024 * 1024, timeout: 30_000 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(`polymarket ${args.join(" ")} failed: ${stderr || err.message}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout.trim()));
-      } catch {
-        resolve(stdout.trim());
-      }
-    });
-  });
-}
 
 function daysUntilClose(endDate: string): number {
   const end = new Date(endDate).getTime();
