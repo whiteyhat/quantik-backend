@@ -1,6 +1,8 @@
 // src/aura/cryptopanic.ts
 // CryptoPanic API client — aggregated crypto news with vote-based sentiment
 
+import { fetchWithRetry } from "./fetchWithRetry";
+
 export interface CryptoPanicPost {
   title: string;
   publishedAt: string;
@@ -25,7 +27,7 @@ export async function fetchCryptoPanic(
   if (currencies) url += `&currencies=${encodeURIComponent(currencies)}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetchWithRetry(url);
 
     if (!res.ok) {
       console.warn(`[CryptoPanic] HTTP ${res.status}`);

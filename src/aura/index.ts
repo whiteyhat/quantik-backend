@@ -85,13 +85,16 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
 }
 
 // Aggregate news from GNews + Guardian + NYT in parallel, deduplicated
+// Small stagger between API calls to reduce concurrent rate-limit hits
+const stagger = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function fetchAllNews(
   query: string
 ): Promise<{ title: string; publishedAt: string; source?: string; description?: string; url?: string }[]> {
   const [gnews, guardian, nyt] = await Promise.allSettled([
     fetchGNews(query, { maxResults: 10, periodDays: 7 }),
-    fetchGuardian(query, { maxResults: 10, daysBack: 7 }),
-    fetchNYT(query, { maxResults: 10, daysBack: 7 }),
+    stagger(300).then(() => fetchGuardian(query, { maxResults: 10, daysBack: 7 })),
+    stagger(600).then(() => fetchNYT(query, { maxResults: 10, daysBack: 7 })),
   ]);
 
   const articles: { title: string; publishedAt: string; source?: string; description?: string; url?: string }[] = [];

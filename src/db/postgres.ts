@@ -97,6 +97,11 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
   `);
 
+  // Ensure users.agent_id exists (may be missing if table was created by an older migration)
+  await db.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_id UUID;
+  `);
+
   await db.query(`
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'created';
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS endpoint_url TEXT;

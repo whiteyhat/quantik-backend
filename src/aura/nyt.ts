@@ -1,6 +1,8 @@
 // src/aura/nyt.ts
 // NYT Article Search API client
 
+import { fetchWithRetry } from "./fetchWithRetry";
+
 export interface NYTArticle {
   title: string;
   snippet: string;
@@ -29,7 +31,7 @@ export async function fetchNYT(
     `&api-key=${NYT_API_KEY}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetchWithRetry(url);
 
     if (!res.ok) {
       console.warn(`[NYT] HTTP ${res.status} for query: "${query}"`);

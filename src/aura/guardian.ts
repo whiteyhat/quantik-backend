@@ -1,6 +1,8 @@
 // src/aura/guardian.ts
 // The Guardian Open Platform API client
 
+import { fetchWithRetry } from "./fetchWithRetry";
+
 export interface GuardianArticle {
   title: string;
   snippet: string;
@@ -28,7 +30,7 @@ export async function fetchGuardian(
     `&order-by=relevance&api-key=${GUARDIAN_API_KEY}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetchWithRetry(url);
 
     if (!res.ok) {
       console.warn(`[Guardian] HTTP ${res.status} for query: "${query}"`);
