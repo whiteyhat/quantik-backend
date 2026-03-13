@@ -556,9 +556,8 @@ export async function migratePg(): Promise<void> {
     );
   `);
 
-  // ── Scanner & Execution tables ──────────────────────────────────────────────
-  await safeQuery("scanner & execution tables", `
-    -- Scanner Results
+  // ── Scanner tables ─────────────────────────────────────────────────────────
+  await safeQuery("scanner tables", `
     CREATE TABLE IF NOT EXISTS scanner_results (
       id SERIAL PRIMARY KEY,
       user_id UUID,
@@ -576,8 +575,10 @@ export async function migratePg(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_scanner_slug_time ON scanner_results(slug, scanned_at DESC);
     CREATE INDEX IF NOT EXISTS idx_scanner_user ON scanner_results(user_id, scanned_at DESC);
+  `);
 
-    -- Executions (autopilot log)
+  // ── Executions table (without agent_id index — column may not exist yet) ──
+  await safeQuery("executions table", `
     CREATE TABLE IF NOT EXISTS executions (
       id SERIAL PRIMARY KEY,
       user_id UUID,
@@ -594,9 +595,22 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC);
+  `);
 
-    -- Versions / Changelog
+  // ── Ensure agent_id column exists BEFORE creating index on it ─────────────
+  await safeQuery("executions.agent_id column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
+  await safeQuery("executions.agent_id index", `CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
+
+  await safeQuery("backfill executions.agent_id", `
+    UPDATE executions
+    SET agent_id = users.agent_id
+    FROM users
+    WHERE executions.user_id = users.id AND executions.agent_id IS NULL
+      AND users.agent_id IS NOT NULL
+  `);
+
+  // ── Versions / Changelog ──────────────────────────────────────────────────
+  await safeQuery("versions table", `
     CREATE TABLE IF NOT EXISTS versions (
       id SERIAL PRIMARY KEY,
       version TEXT NOT NULL UNIQUE,
@@ -605,19 +619,6 @@ export async function migratePg(): Promise<void> {
       fixes TEXT NOT NULL DEFAULT '[]',
       highlight TEXT
     );
-  `);
-
-  // These must be separate queries — PG parses all statements in a single
-  // db.query() call before executing any, so referencing a column added by
-  // an ALTER in the same query string fails with "column does not exist".
-  await safeQuery("executions.agent_id", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
-
-  await safeQuery("backfill executions.agent_id", `
-    UPDATE executions
-    SET agent_id = users.agent_id
-    FROM users
-    WHERE executions.user_id = users.id AND executions.agent_id IS NULL
-      AND users.agent_id IS NOT NULL
   `);
 
   console.log("[postgres] Migration complete — all tables ready");
