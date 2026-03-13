@@ -60,14 +60,14 @@ router.get("/", async (_req: Request, res: Response) => {
   try {
     if (isPgEnabled()) {
       const rows = await pgQuery<VersionRow>(
-        "SELECT * FROM versions ORDER BY id DESC"
+        "SELECT * FROM versions ORDER BY released_at DESC, version DESC"
       );
       return res.json(formatRows(rows));
     }
 
     const db = getDb();
     const rows = db.prepare<[], VersionRow>(
-      "SELECT * FROM versions ORDER BY id DESC"
+      "SELECT * FROM versions ORDER BY released_at DESC, version DESC"
     ).all();
     return res.json(formatRows(rows));
   } catch (err) {
