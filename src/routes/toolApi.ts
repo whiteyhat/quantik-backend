@@ -330,4 +330,28 @@ router.get("/usage", requireApiKey, readRateLimit, (req: Request, res: Response)
   }
 });
 
+// ── Polymarket wallet status & approvals ─────────────────────────────────────
+
+router.get("/get_polymarket_status", requireApiKey, requireScope("read"), readRateLimit, (req: Request, res: Response) => {
+  callTool(req, res, "get_polymarket_status", {});
+});
+
+// POST /run_polymarket_approvals — directly executes the 6 on-chain approval txns.
+// Unlike the chat tool (which returns a confirmation request), calling this REST endpoint
+// is considered explicit consent — the agent has deliberately invoked it with config scope.
+router.post("/run_polymarket_approvals", requireApiKey, requireScope("config"), tradeToolRateLimit, async (req: Request, res: Response) => {
+  const { agentId, userId } = req.apiKeyAgent!;
+  const start = Date.now();
+  try {
+    const { runPolymarketApprovals } = await import("../services/polymarket-prep.service");
+    const result = await runPolymarketApprovals(agentId, userId);
+    logRequest(agentId, userId, "run_polymarket_approvals", "POST", 200, Date.now() - start);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Approval submission failed";
+    logRequest(agentId, userId, "run_polymarket_approvals", "POST", 500, Date.now() - start, msg);
+    res.status(500).json({ success: false, error: msg, code: "INTERNAL_ERROR" });
+  }
+});
+
 export default router;

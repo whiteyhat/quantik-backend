@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
+import { apiKeyAuth } from "../middleware/apiKeyAuth";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { chatRateLimit } from "../infra/rateLimit";
 import { TOOL_DECLARATIONS, executeTool } from "../agents/tools";
@@ -368,11 +369,15 @@ function emitTrace(
   state: "running" | "done" = "running",
   detail?: string,
 ): void {
+  const camel = trace.key.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase());
+  const cap = camel.charAt(0).toUpperCase() + camel.slice(1);
   emitSse(res, {
     type: "trace",
     key: trace.key,
     label: trace.label,
+    labelKey: `traceLabel${cap}`,
     status,
+    statusKey: `trace${cap}${state === "done" ? "Done" : "Running"}`,
     state,
     ...(detail ? { detail } : {}),
   });
@@ -565,22 +570,28 @@ function formatTimeAgo(timestamp: number | null): string {
 function detectRecipe(message: string): RecipeName | null {
   const lower = message.toLowerCase();
 
-  if (/(refresh|rerun|rescan|run).*(scanner|signals)|refresh signals|run scanner/.test(lower)) {
+  // Refresh/rescan — en/es/fr/de
+  if (/(refresh|rerun|rescan|run).*(scanner|signals?|se[ñn]ales?|signaux|signale)|refresh signals|run scanner|actualizar.*esc[aá]ner|relancer.*scanner|scanner.*neu/.test(lower)) {
     return "refresh_signals";
   }
-  if (/(scanner|signal|signals|opportunit)/.test(lower)) {
+  // Scanner signals — en + es(señales,escáner,oportunidades) + fr(signaux,opportunités) + de(signale,chancen)
+  if (/(scanner|signal|signals?|se[ñn]ales?|esc[aá]ner|oportunidad|signaux|opportunit|signale|chancen)/.test(lower)) {
     return "scanner_signals";
   }
-  if (/(portfolio|balance|pnl|positions|holdings)/.test(lower)) {
+  // Portfolio — en + es(portafolio,cartera,posiciones) + fr(portefeuille,solde) + de(guthaben,positionen)
+  if (/(portfolio|portafolio|cartera|balance|pnl|positions?|posiciones?|holdings|portefeuille|solde|guthaben|rendimiento|performance)/.test(lower)) {
     return "portfolio_status";
   }
-  if (/(risk|drawdown|exposure|circuit breaker|kelly)/.test(lower)) {
+  // Risk — en + es(riesgo,exposición,pérdida) + fr(risque,exposition,perte) + de(risiko,verlust)
+  if (/(risk|riesgo|exposici[oó]n|p[eé]rdida|drawdown|exposure|circuit breaker|kelly|risque|exposition|perte|risiko|verlust)/.test(lower)) {
     return "risk_status";
   }
-  if (/(trade history|recent trades|past trades|win rate|performance)/.test(lower)) {
+  // Trade history — en + es(historial,operaciones) + fr(historique,transactions) + de(handel,transaktionen)
+  if (/(trade history|recent trades|past trades|win rate|performance|historial|operaciones|transacciones|historique|transactions?|taux de|handel|transaktionen|gewinnrate)/.test(lower)) {
     return "trade_history";
   }
-  if (/(health|connected|connection status|heartbeat|agent status|ops)/.test(lower)) {
+  // Agent health — en + es(agente,conexión,estado) + fr(agent,connexion) + de(agent,verbindung)
+  if (/(health|connected|connection status|heartbeat|agent status|ops|agente|conexi[oó]n|estado.*agente|agent.*status|connexion|verbindung)/.test(lower)) {
     return "agent_health";
   }
 
@@ -1105,12 +1116,9 @@ async function resolveRecipe(
     : null;
 
   if (recipe === "scanner_signals" || recipe === "refresh_signals") {
-    emitTrace(res, TOOL_TRACE_META.get_scanner_signals, "Checking cached scanner results");
-    if (recipe === "refresh_signals") {
-      emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Explicit live scanner refresh requested");
-      await executeTool("trigger_scanner", {}, context);
-      emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Scanner refresh finished", "done");
-    }
+    emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Running live scanner scan");
+    await executeTool("trigger_scanner", {}, context);
+    emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Scanner scan finished", "done");
     const scanner = loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
     const ops = await loadOpsSnapshot(context);
     const scannerContext: ContextEnvelope = { kind: "scanner", data: scanner };
@@ -1336,6 +1344,14 @@ async function resolveGenericToolFlow(
         });
       }
 
+      const maybePolyConfirm = toolResult.data as { action?: string; message?: string };
+      if (maybePolyConfirm?.action === "polymarket_confirm_required") {
+        emitSse(res, {
+          type: "polymarket_confirm",
+          message: maybePolyConfirm.message ?? "Confirm Polymarket approvals via POST /api/v1/tools/run_polymarket_approvals.",
+        });
+      }
+
       workingContents = [
         ...workingContents,
         { role: "model", parts: [{ functionCall }] },
@@ -1372,7 +1388,10 @@ async function resolveGenericToolFlow(
 
 // ── POST /api/v1/agent/chat — Personalized streaming chat with tool use ─────
 
-router.post("/agent/chat", chatRateLimit, async (req: Request, res: Response) => {
+// apiKeyAuth runs passively — sets req.apiKeyAgent if a valid qk_live_ key is present,
+// then falls through so Clerk auth can also work. This allows BYO agents (OpenClaw,
+// Telegram bots) to use the chat endpoint using their API key.
+router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: Response) => {
   const start = Date.now();
   const body = req.body as AgentChatRequestBody;
 
@@ -1384,29 +1403,37 @@ router.post("/agent/chat", chatRateLimit, async (req: Request, res: Response) =>
   // Sanitize user input against prompt injection
   body.message = sanitizeUserMessage(body.message);
 
-  const userId = (await getUserIdAsync(req)) ?? getUserId(req);
+  // Primary: Clerk session auth. Fallback: API key auth for BYO agents (OpenClaw / Telegram).
+  let resolvedUserId = (await getUserIdAsync(req)) ?? getUserId(req);
+  if (!resolvedUserId && req.apiKeyAgent) {
+    resolvedUserId = req.apiKeyAgent.userId;
+  }
 
   // Get user's agent (dual-driver: PG or SQLite)
   let agentRow: Record<string, unknown> | null = null;
   if (isPgEnabled()) {
-    if (userId) {
+    if (req.apiKeyAgent?.agentId) {
+      // Direct lookup by agent ID — faster than the user join, and correct for BYO agents.
+      agentRow = await pgQueryOne(`SELECT * FROM agents WHERE id = $1`, [req.apiKeyAgent.agentId]);
+    } else if (resolvedUserId) {
       agentRow = await pgQueryOne(
         `SELECT a.* FROM agents a JOIN users u ON u.agent_id = a.id WHERE u.id = $1`,
-        [userId]
+        [resolvedUserId]
       );
     }
   } else {
-    const userId = getUserId(req);
     const db = getDb();
-    if (userId) {
-      const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
+    if (req.apiKeyAgent?.agentId) {
+      agentRow = db.prepare("SELECT * FROM agents WHERE id = ?").get(req.apiKeyAgent.agentId) as Record<string, unknown> | null;
+    } else if (resolvedUserId) {
+      const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(resolvedUserId) as { agent_id: string | null } | undefined;
       if (user?.agent_id) {
         agentRow = db.prepare("SELECT * FROM agents WHERE id = ?").get(user.agent_id) as Record<string, unknown> | null;
       }
     }
   }
 
-  const executionContext = buildToolExecutionContextFromAgentRow(userId, agentRow);
+  const executionContext = buildToolExecutionContextFromAgentRow(resolvedUserId, agentRow);
   const systemContent = agentRow
     ? buildAgentContext(agentRow, body.locale)
     : `You are Quantik Relay, a sharp trading assistant. Keep responses under 60 words. Sound human, plainspoken, and specific. No em dashes, no chatbot filler, and no 'let me know'. You have tools available to fetch live data.${localeLanguageDirective(body.locale)}`;

@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "jest --testPathPatterns=tests/ --passWithNoTests",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "tsx src/db/seed.ts",
+    "seed:releases": "tsx src/db/seed-releases.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.0.1",

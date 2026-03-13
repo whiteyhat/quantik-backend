@@ -671,6 +671,17 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN encrypted_wallet_bundle TEXT");
   addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN wallet_downloaded_at INTEGER");
 
+  // ── Versions locale columns ───────────────────────────────────────────
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_de TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_de TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_de TEXT");
+
   // ── Chat History (persistent across sessions) ──────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS chat_sessions (

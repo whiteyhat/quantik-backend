@@ -617,8 +617,28 @@ export async function migratePg(): Promise<void> {
       released_at TEXT NOT NULL,
       features TEXT NOT NULL DEFAULT '[]',
       fixes TEXT NOT NULL DEFAULT '[]',
-      highlight TEXT
+      highlight TEXT,
+      highlight_es TEXT,
+      highlight_fr TEXT,
+      highlight_de TEXT,
+      features_es TEXT,
+      features_fr TEXT,
+      features_de TEXT,
+      fixes_es TEXT,
+      fixes_fr TEXT,
+      fixes_de TEXT
     );
+  `);
+  await safeQuery("versions locale columns", `
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS highlight_es TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS highlight_fr TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS highlight_de TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS features_es TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS features_fr TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS features_de TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS fixes_es TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS fixes_fr TEXT;
+    ALTER TABLE versions ADD COLUMN IF NOT EXISTS fixes_de TEXT;
   `);
 
   console.log("[postgres] Migration complete — all tables ready");

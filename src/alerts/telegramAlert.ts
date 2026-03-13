@@ -198,7 +198,7 @@ export class AlertPoller {
         AND pr.confidence >= 0.55
         AND COALESCE(er.fractional_kelly, 0) >= 0.05
         AND (pr.signal_state = 'TRADE' OR pr.decision IN ('BUY_YES','BUY_NO','TRADE','BET_YES','BET_NO'))
-      ORDER BY pr.created_at DESC LIMIT 10
+      ORDER BY pr.created_at DESC LIMIT 1
     `).all() as Array<Record<string, unknown>>;
 
     for (const row of rows) {

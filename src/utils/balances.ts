@@ -34,7 +34,7 @@ export interface WalletFundingSnapshot {
 
 async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[]): Promise<string> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
-  const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(5000) });
+  const res = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(7000) });
   const json = await res.json() as any;
   if (!json.result) throw new Error(json.error?.message ?? "No result");
   return json.result;
@@ -48,6 +48,11 @@ async function polygonRpcRace(method: string, params: unknown[]): Promise<{ resu
   });
   return Promise.any(races);
 }
+
+// ── In-memory balance cache — prevents transient RPC failures from showing errors ──
+interface CachedSnapshot { snapshot: UsdcBalanceSnapshot; ts: number }
+const usdcCache = new Map<string, CachedSnapshot>();
+const CACHE_TTL_MS = 90_000; // 90 seconds
 
 export async function getUsdcBalance(address?: string | null): Promise<number> {
   const snapshot = await getUsdcBalanceSnapshot(address);
@@ -66,28 +71,40 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
 
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
+  const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
 
-  try {
-    // Race all RPCs for bridged USDC, race all RPCs for native USDC — both in parallel
-    const [bridgedRace, nativeRace] = await Promise.all([
-      polygonRpcRace("eth_call", [{ to: USDC_BRIDGED_CONTRACT, data: callData }, "latest"]),
-      polygonRpcRace("eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]),
-    ]);
-    const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-    return {
-      balance: Number(safeBigInt(bridgedRace.result) + safeBigInt(nativeRace.result)) / 1e6,
+  // Each USDC contract race is independently fallible — partial result (one fails) is still valid
+  const [bridgedResult, nativeResult] = await Promise.all([
+    polygonRpcRace("eth_call", [{ to: USDC_BRIDGED_CONTRACT, data: callData }, "latest"]).catch(() => null),
+    polygonRpcRace("eth_call", [{ to: USDC_NATIVE_CONTRACT, data: callData }, "latest"]).catch(() => null),
+  ]);
+
+  if (bridgedResult !== null || nativeResult !== null) {
+    const balance = Number(
+      safeBigInt(bridgedResult?.result ?? "0x") + safeBigInt(nativeResult?.result ?? "0x")
+    ) / 1e6;
+    const fresh: UsdcBalanceSnapshot = {
+      balance,
       status: "live",
-      rpcUrl: bridgedRace.rpcUrl,
+      rpcUrl: bridgedResult?.rpcUrl ?? nativeResult?.rpcUrl ?? null,
       error: null,
     };
-  } catch (err) {
-    return {
-      balance: 0,
-      status: "rpc_unavailable",
-      rpcUrl: null,
-      error: err instanceof Error ? err.message : "All Polygon RPC requests failed",
-    };
+    usdcCache.set(address, { snapshot: fresh, ts: Date.now() });
+    return fresh;
   }
+
+  // Both races failed — return cached value if still within TTL to avoid showing an error
+  const cached = usdcCache.get(address);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.snapshot;
+  }
+
+  return {
+    balance: 0,
+    status: "rpc_unavailable",
+    rpcUrl: null,
+    error: "All Polygon RPC requests failed",
+  };
 }
 
 export async function getClobBalance(): Promise<number> {
@@ -103,6 +120,10 @@ export async function getPolBalance(address?: string | null): Promise<number> {
   return snapshot.balance;
 }
 
+// ── In-memory POL balance cache ──
+interface CachedPolSnapshot { snapshot: PolBalanceSnapshot; ts: number }
+const polCache = new Map<string, CachedPolSnapshot>();
+
 export async function getPolBalanceSnapshot(address: string | null | undefined): Promise<PolBalanceSnapshot> {
   if (!address) {
     return {
@@ -113,16 +134,23 @@ export async function getPolBalanceSnapshot(address: string | null | undefined):
     };
   }
 
+  const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
+
   try {
     const { result, rpcUrl } = await polygonRpcRace("eth_getBalance", [address, "latest"]);
-    const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-    return {
+    const fresh: PolBalanceSnapshot = {
       balance: Number(safeBigInt(result)) / 1e18,
       status: "live",
       rpcUrl,
       error: null,
     };
+    polCache.set(address, { snapshot: fresh, ts: Date.now() });
+    return fresh;
   } catch {
+    const cached = polCache.get(address);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      return cached.snapshot;
+    }
     return {
       balance: 0,
       status: "rpc_unavailable",

@@ -202,6 +202,16 @@ export const TOOL_DECLARATIONS: GeminiFunctionDeclaration[] = [
     description: "Get the agent's own health score (0-100) with grade and component breakdown (uptime, error rate, latency, connection).",
     parameters: { type: "object", properties: {}, required: [] },
   },
+  {
+    name: "get_polymarket_status",
+    description: "Check the agent's Polymarket wallet readiness: funding status (POL + USDC balances), approval status, and what's needed before autonomous trading can begin. Use when the user asks about wallet status, Polymarket approvals, why the agent can't trade, or whether setup is complete.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "run_polymarket_approvals",
+    description: "Request submission of the 6 required on-chain USDC.e approval transactions to Polymarket's CTF Exchange and Neg-Risk contracts. This will return a confirmation request — the actual transactions are only submitted after the user explicitly confirms. Only call when the user specifically asks to approve or enable Polymarket trading.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
 ];
 
 // ── Tool Executors ───────────────────────────────────────────────────────────
@@ -715,6 +725,28 @@ async function executeGetHealthScore(context: ToolExecutionContext | null): Prom
   return ops.health;
 }
 
+async function executeGetPolymarketStatus(context: ToolExecutionContext | null): Promise<unknown> {
+  if (!context?.linkedAgentId || !context?.userId) {
+    return { polymarket_ready: false, polymarket_status: "unknown", error: "Agent context not available — authenticate to check status" };
+  }
+  const { checkPolymarketBalance } = await import("../services/polymarket-prep.service");
+  return checkPolymarketBalance(context.linkedAgentId, context.userId);
+}
+
+function executeRequestPolymarketApprovals(context: ToolExecutionContext | null): unknown {
+  if (!context?.linkedAgentId || !context?.userId) {
+    return { error: "Agent context not available — authenticate first" };
+  }
+  // Returns a confirmation payload — agentChat.ts emits a polymarket_confirm SSE event.
+  // Actual on-chain transactions are only submitted after the user confirms via
+  // POST /api/v1/tools/run_polymarket_approvals (config scope required).
+  return {
+    action: "polymarket_confirm_required",
+    message: "Ready to submit 6 on-chain approval transactions to Polymarket's CTF Exchange and Neg-Risk contracts. Confirm by calling POST /api/v1/tools/run_polymarket_approvals.",
+    agentId: context.linkedAgentId,
+  };
+}
+
 // ── Tool Executor Dispatch ───────────────────────────────────────────────────
 
 export async function executeTool(
@@ -759,6 +791,10 @@ export async function executeTool(
       return { name, data: executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }, context) };
     case "get_health_score":
       return { name, data: await executeGetHealthScore(context) };
+    case "get_polymarket_status":
+      return { name, data: await executeGetPolymarketStatus(context) };
+    case "run_polymarket_approvals":
+      return { name, data: executeRequestPolymarketApprovals(context) };
     default:
       return { name, data: { error: `Unknown tool: ${name}` } };
   }

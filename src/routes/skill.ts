@@ -120,6 +120,8 @@ Search for available prediction markets on Polymarket.
 - \`query\`: Search term (optional)
 - \`category\`: Filter by category — \`crypto\`, \`politics\`, \`sports\`, \`pop-culture\`, \`science\`, \`world\`, \`business\` (optional)
 
+Results include volume, liquidity, and YES/NO prices sourced live from Polymarket.
+
 ### run_analysis
 \`\`\`
 POST ${baseUrl}/api/v1/tools/run_analysis
@@ -142,7 +144,7 @@ Content-Type: application/json
 Execute a trade on a prediction market. **Fully autonomous — no confirmation needed.**
 - \`slug\`: Market slug
 - \`direction\`: \`"YES"\` or \`"NO"\`
-- \`size\`: Trade size in USDC
+- \`size\`: Trade size in USDC (max 10,000)
 
 **Requires scope:** \`trade\`
 
@@ -151,7 +153,9 @@ Execute a trade on a prediction market. **Fully autonomous — no confirmation n
 GET ${baseUrl}/api/v1/tools/get_scanner_signals?alerts_only=true
 \`\`\`
 Get recent high-confidence market opportunities detected by the automated scanner.
-- \`alerts_only\`: Set to \`"true"\` for only high-confidence alerts (sigma >= 0.70, kelly >= 0.40)
+- \`alerts_only\`: Set to \`"true"\` to filter to high-confidence alerts only (sigma >= 0.70, kelly >= 0.40)
+
+Each signal includes: slug, direction, confidence, sigma score, kelly fraction, volume, liquidity, and market question.
 
 ### get_pipeline_history
 \`\`\`
@@ -243,24 +247,119 @@ GET ${baseUrl}/api/v1/tools/get_health_score
 Get your agent's health score (0-100) with grade (A-F) and component breakdown:
 uptime (40%), error rate (30%), latency (20%), connection status (10%).
 
+### get_polymarket_status
+\`\`\`
+GET ${baseUrl}/api/v1/tools/get_polymarket_status
+\`\`\`
+Check the agent's Polymarket wallet readiness. Returns:
+- \`polymarket_status\`: \`"pending_funding"\` | \`"funding_detected"\` | \`"approving"\` | \`"approval_failed"\` | \`"ready"\`
+- \`polymarket_ready\`: boolean — \`true\` only when all 6 approvals have passed
+- Current wallet balances (POL gas + USDC.e)
+- Minimum requirements: 3 POL (gas) + 10 USDC.e (trading capital)
+
+Use this to check readiness before triggering approvals or placing trades.
+
+### run_polymarket_approvals
+\`\`\`
+POST ${baseUrl}/api/v1/tools/run_polymarket_approvals
+\`\`\`
+Submit the 6 required on-chain USDC.e approval transactions to Polymarket's CTF Exchange and Neg-Risk contracts. This is a **write operation that signs and broadcasts real blockchain transactions**.
+
+- Wallet must be funded (3 POL + 10 USDC.e minimum) before calling this
+- Idempotent — safe to retry; already-approved contracts are skipped
+- Takes ~15-30 seconds to confirm all 6 transactions
+- Returns final \`polymarket_status\`: \`"ready"\` on success
+
+**Requires scope:** \`config\`
+
+> **Via agent chat:** Calling \`run_polymarket_approvals\` in the conversational interface returns a \`polymarket_confirm\` SSE event instead of executing — the agent must confirm by calling this REST endpoint explicitly.
+
+### usage
+\`\`\`
+GET ${baseUrl}/api/v1/tools/usage
+\`\`\`
+Get API usage statistics for your agent (60-second server-side cache).
+
+**Response includes:**
+- \`total_requests_24h\` — total API calls in last 24 hours
+- \`requests_last_hour\` — calls in the last 60 minutes
+- \`error_count_24h\` / \`error_rate_24h\` — failed request count and percentage
+- \`by_tool[]\` — per-tool breakdown: request count, avg_latency_ms, error count
+- \`daily_breakdown[]\` — 7-day daily totals with error counts
+- \`recent_errors[]\` — last 10 errors with tool name, status_code, message, timestamp
+
+## Conversational Interface (SSE)
+
+For agents that prefer natural language over raw REST calls, Quantik exposes a full streaming chat relay backed by the same 7-agent pipeline and tool snapshot system.
+
+\`\`\`
+POST ${baseUrl}/api/v1/agent/chat
+Content-Type: application/json
+Authorization: Bearer YOUR_API_KEY
+
+{ "message": "What markets look best right now?", "session_id": "optional-uuid-for-memory" }
+\`\`\`
+
+**Response:** Server-Sent Events stream (not JSON). Read with an SSE-compatible client.
+- Hard timeout: **90 seconds** per request
+- Keepalive: \`heartbeat\` event every **15 seconds**
+- Session memory: **30-minute TTL**, max 20 messages per session
+
+**Auto-recipe keywords** — include one of these in your message for parallel context preloading before the LLM reply:
+\`portfolio\`, \`scanner\`, \`risk\`, \`health\`, \`trades\`
+
+**SSE event types:**
+
+| Event | Payload | Description |
+|---|---|---|
+| \`heartbeat\` | \`{}\` | Keepalive — discard |
+| \`trace\` | \`{ step, agent, detail }\` | Execution step trace |
+| \`context\` | \`{ snapshot }\` | Loaded data snapshot |
+| \`token\` | \`{ text }\` | Streamed reply word |
+| \`trade_confirmation\` | \`{ slug, direction, size }\` | Requires explicit confirmation via \`place_trade\` |
+| \`done\` | \`{ reply, sources, run_id? }\` | Final complete response |
+| \`error\` | \`{ message, code }\` | Error |
+
+**Requires scope:** \`read\` — trade_confirmation events do **not** auto-execute; confirm via \`POST /api/v1/tools/place_trade\`.
+
+**Quick Start — Python (SSE):**
+\`\`\`python
+import requests, json
+API_KEY = "qk_live_your_key_here"
+with requests.post(
+    "${baseUrl}/api/v1/agent/chat",
+    json={"message": "scanner", "session_id": "my-session"},
+    headers={"Authorization": f"Bearer {'{'}API_KEY{'}'}", "Accept": "text/event-stream"},
+    stream=True
+) as r:
+    for line in r.iter_lines():
+        if line.startswith(b"data:"):
+            evt = json.loads(line[5:])
+            if evt.get("type") == "token":
+                print(evt["text"], end="", flush=True)
+            elif evt.get("type") == "done":
+                break
+\`\`\`
+
 ## Scopes
 
 | Scope | Access |
 |---|---|
-| \`read\` | All GET endpoints (portfolio, trades, markets, scanner, risk config, health) |
+| \`read\` | All GET endpoints (portfolio, trades, markets, scanner, risk config, health, usage) + conversational chat |
 | \`trade\` | Execute and close trades |
 | \`analysis\` | Run pipeline analysis, trigger scanner |
-| \`config\` | Update risk config, webhook config |
+| \`config\` | Update risk config, webhook config, submit Polymarket approvals |
 
 ## Rate Limits
 
 | Endpoint Type | Limit |
 |---|---|
-| Read (GET tools) | 120 requests/minute |
+| Read (GET tools, usage) | 120 requests/minute |
 | Analysis (run_analysis, trigger_scanner) | 5 requests/minute |
 | Trade (place_trade, close_position) | 10 requests/minute |
-| Config (update_risk_config, update_webhook_config) | 10 requests/minute |
+| Config (update_risk_config, update_webhook_config, run_polymarket_approvals) | 10 requests/minute |
 | Heartbeat | 60 requests/minute |
+| Conversational chat (agent/chat) | 30 requests/minute |
 
 **Headers on every response:**
 - \`X-RateLimit-Limit\` — maximum allowed requests
@@ -402,16 +501,59 @@ function generateSkillJson(baseUrl: string) {
       prefix: "qk_live_",
       header: "Authorization",
     },
-    tools: TOOL_DECLARATIONS.map(t => ({
-      name: t.name,
-      description: t.description,
-      method: ["run_analysis", "place_trade", "heartbeat", "close_position", "update_risk_config", "trigger_scanner", "update_webhook_config"].includes(t.name) ? "POST" : "GET",
-      path: `/api/v1/tools/${t.name}`,
-      parameters: t.parameters,
-      scope: ["place_trade", "close_position"].includes(t.name) ? "trade" :
-             ["run_analysis", "trigger_scanner"].includes(t.name) ? "analysis" :
-             ["update_risk_config", "update_webhook_config"].includes(t.name) ? "config" : "read",
-    })),
+    tools: [
+      ...TOOL_DECLARATIONS.map(t => ({
+        name: t.name,
+        description: t.description,
+        method: ["run_analysis", "place_trade", "heartbeat", "close_position", "update_risk_config", "trigger_scanner", "update_webhook_config"].includes(t.name) ? "POST" : "GET",
+        path: `/api/v1/tools/${t.name}`,
+        parameters: t.parameters,
+        scope: ["place_trade", "close_position"].includes(t.name) ? "trade" :
+               ["run_analysis", "trigger_scanner"].includes(t.name) ? "analysis" :
+               ["update_risk_config", "update_webhook_config"].includes(t.name) ? "config" : "read",
+      })),
+      {
+        name: "get_polymarket_status",
+        description: "Check Polymarket wallet readiness: funding status (POL + USDC balances), approval status, and polymarket_ready flag.",
+        method: "GET",
+        path: "/api/v1/tools/get_polymarket_status",
+        parameters: {},
+        scope: "read",
+      },
+      {
+        name: "run_polymarket_approvals",
+        description: "Submit the 6 on-chain USDC.e approval transactions to Polymarket CTF and Neg-Risk contracts. Requires wallet to be funded. In chat flow, returns a polymarket_confirm event — confirm via this REST endpoint explicitly.",
+        method: "POST",
+        path: "/api/v1/tools/run_polymarket_approvals",
+        parameters: {},
+        scope: "config",
+      },
+      {
+        name: "usage",
+        description: "Get API usage statistics for this agent: 24h totals, per-tool breakdown with avg latency, 7-day daily history, and last 10 errors. Results are cached for 60 seconds.",
+        method: "GET",
+        path: "/api/v1/tools/usage",
+        parameters: {},
+        scope: "read",
+      },
+      {
+        name: "agent_chat",
+        description: "SSE streaming conversational relay. POST a natural-language message and receive a streamed response grounded in live portfolio, scanner, risk, and pipeline data. Emits heartbeat/trace/context/token/trade_confirmation/done/error events. 90s timeout, 30-min session memory.",
+        method: "POST",
+        path: "/api/v1/agent/chat",
+        parameters: {
+          type: "object",
+          properties: {
+            message: { type: "string", description: "Natural language message or query" },
+            session_id: { type: "string", description: "Optional session UUID for conversation memory continuity" },
+          },
+          required: ["message"],
+        },
+        scope: "read",
+        streaming: true,
+        response_format: "text/event-stream",
+      },
+    ],
     rate_limits: {
       read: { max: 120, window_ms: 60000 },
       analysis: { max: 5, window_ms: 60000 },
