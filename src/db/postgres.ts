@@ -34,9 +34,19 @@ export function getPgPool(): Pool {
 export async function migratePg(): Promise<void> {
   const db = getPgPool();
 
-  // ── Core multi-tenant tables ────────────────────────────────────────────────
-  await db.query(`
-    -- Users (Clerk-linked accounts)
+  // Helper: run a migration step, log and continue on failure so later steps
+  // still execute.  Critical column ALTERs must not be blocked by unrelated
+  // CREATE TABLE failures earlier in the chain.
+  const safeQuery = async (label: string, sql: string) => {
+    try {
+      await db.query(sql);
+    } catch (err) {
+      console.error(`[postgres] Migration step "${label}" failed:`, (err as Error).message);
+    }
+  };
+
+  // ── 1. Core tables (each in its own call so one failure can't block all) ───
+  await safeQuery("create users", `
     CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       clerk_id TEXT UNIQUE NOT NULL,
@@ -45,8 +55,15 @@ export async function migratePg(): Promise<void> {
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_users_clerk_id ON users(clerk_id);
+  `);
 
-    -- Trading Agents (Agent Factory)
+  // CRITICAL: ensure agent_id column exists on users — must run even if the
+  // table was created by an older migration without this column.
+  await safeQuery("users.agent_id", `
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_id UUID
+  `);
+
+  await safeQuery("create agents", `
     CREATE TABLE IF NOT EXISTS agents (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       agent_code TEXT UNIQUE NOT NULL,
@@ -74,8 +91,9 @@ export async function migratePg(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
     CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
+  `);
 
-    -- Chat Sessions
+  await safeQuery("create chat tables", `
     CREATE TABLE IF NOT EXISTS chat_sessions (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id UUID NOT NULL,
@@ -85,7 +103,6 @@ export async function migratePg(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, last_message_at DESC);
 
-    -- Chat Messages
     CREATE TABLE IF NOT EXISTS chat_messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       session_id UUID NOT NULL REFERENCES chat_sessions(id),
@@ -97,12 +114,7 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
   `);
 
-  // Ensure users.agent_id exists (may be missing if table was created by an older migration)
-  await db.query(`
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_id UUID;
-  `);
-
-  await db.query(`
+  await safeQuery("agents columns", `
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'created';
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS endpoint_url TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_url TEXT;
@@ -113,12 +125,13 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS webhook_events TEXT DEFAULT '["*"]';
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_enabled INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS autopilot_updated_at BIGINT;
-
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_private_key TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_seed_phrase TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_ready INTEGER DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_status TEXT DEFAULT 'pending_funding';
+  `);
 
+  await safeQuery("create api_keys", `
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
@@ -134,7 +147,9 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
     CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_id);
     CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at DESC);
+  `);
 
+  await safeQuery("create byo tables", `
     CREATE TABLE IF NOT EXISTS byo_request_log (
       id BIGSERIAL PRIMARY KEY,
       agent_id TEXT NOT NULL,
@@ -186,13 +201,13 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_byo_onboarding_status ON byo_onboarding_sessions(status, expires_at);
   `);
 
-  await db.query(`
+  await safeQuery("byo_onboarding columns", `
     ALTER TABLE byo_onboarding_sessions ADD COLUMN IF NOT EXISTS encrypted_wallet_bundle TEXT;
     ALTER TABLE byo_onboarding_sessions ADD COLUMN IF NOT EXISTS wallet_downloaded_at BIGINT;
   `);
 
   // ── Trading tables (with user_id for multi-tenancy) ─────────────────────────
-  await db.query(`
+  await safeQuery("trading tables", `
     -- Pipeline Runs
     CREATE TABLE IF NOT EXISTS pipeline_runs (
       id TEXT PRIMARY KEY,
@@ -392,7 +407,7 @@ export async function migratePg(): Promise<void> {
   `);
 
   // ── Agent result tables ─────────────────────────────────────────────────────
-  await db.query(`
+  await safeQuery("agent result tables", `
     -- Aura Results
     CREATE TABLE IF NOT EXISTS aura_results (
       slug TEXT NOT NULL,
@@ -542,7 +557,7 @@ export async function migratePg(): Promise<void> {
   `);
 
   // ── Scanner & Execution tables ──────────────────────────────────────────────
-  await db.query(`
+  await safeQuery("scanner & execution tables", `
     -- Scanner Results
     CREATE TABLE IF NOT EXISTS scanner_results (
       id SERIAL PRIMARY KEY,
@@ -595,9 +610,9 @@ export async function migratePg(): Promise<void> {
   // These must be separate queries — PG parses all statements in a single
   // db.query() call before executing any, so referencing a column added by
   // an ALTER in the same query string fails with "column does not exist".
-  await db.query(`ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
+  await safeQuery("executions.agent_id", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
 
-  await db.query(`
+  await safeQuery("backfill executions.agent_id", `
     UPDATE executions
     SET agent_id = users.agent_id
     FROM users
