@@ -1059,7 +1059,7 @@ function buildRecipePrompt(
       const opsCtx = contexts.find((c) => c.kind === "ops")?.data as OpsSnapshot | undefined;
       const portfolioCtx = contexts.find((c) => c.kind === "portfolio")?.data as PortfolioSnapshot | undefined;
       const onboardingIncomplete = !opsCtx?.autopilotEnabled && !opsCtx?.polymarketReady
-        && (portfolioCtx?.balanceStatus === "no_wallet" || portfolioCtx?.balanceStatus === "unfunded" || portfolioCtx?.fundingStatus === "pending");
+        && (portfolioCtx?.balanceStatus === "no_wallet" || portfolioCtx?.balanceStatus === "unfunded" || portfolioCtx?.fundingStatus === "funding_required");
       return onboardingIncomplete ? ["If the wallet is not ready or autopilot is still off, guide the user to the next onboarding step."] : [];
     })()),
     ...(langNote ? [langNote.trim()] : []),
