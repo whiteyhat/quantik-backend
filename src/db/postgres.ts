@@ -592,13 +592,17 @@ export async function migratePg(): Promise<void> {
     );
   `);
 
-  await db.query(`
-    ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID;
+  // These must be separate queries — PG parses all statements in a single
+  // db.query() call before executing any, so referencing a column added by
+  // an ALTER in the same query string fails with "column does not exist".
+  await db.query(`ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
 
+  await db.query(`
     UPDATE executions
     SET agent_id = users.agent_id
     FROM users
     WHERE executions.user_id = users.id AND executions.agent_id IS NULL
+      AND users.agent_id IS NOT NULL
   `);
 
   console.log("[postgres] Migration complete — all tables ready");
