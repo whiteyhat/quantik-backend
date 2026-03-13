@@ -564,6 +564,26 @@ router.post("/agents", async (req: Request, res: Response) => {
   ];
 
   try {
+    // Always write to SQLite (local fallback)
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO agents (
+        id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
+        personality, decision_style, trading_instinct, time_patience, profit_dream,
+        money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
+        system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
+        polymarket_ready, polymarket_status, user_id, created_at, updated_at
+      ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending_funding', ?, ?, ?)
+    `).run(...agentParams.slice(0, 20), userId, ...agentParams.slice(20));
+
+    if (userId) {
+      db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
+    }
+
+    const derivedRisk = deriveRiskConfig(body);
+    applyDerivedRiskConfig(db, derivedRisk);
+
+    // Also write to PG when enabled (primary persistent store)
     if (isPgEnabled()) {
       await pgExec(`
         INSERT INTO agents (
@@ -579,28 +599,7 @@ router.post("/agents", async (req: Request, res: Response) => {
         await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [id, userId]);
       }
 
-      // Derive and apply risk config from agent personality
-      const derivedRisk = deriveRiskConfig(body);
       await applyDerivedRiskConfigPg(derivedRisk);
-    } else {
-      const db = getDb();
-      db.prepare(`
-        INSERT INTO agents (
-          id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
-          personality, decision_style, trading_instinct, time_patience, profit_dream,
-          money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
-          system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
-          polymarket_ready, polymarket_status, user_id, created_at, updated_at
-        ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending_funding', ?, ?, ?)
-      `).run(...agentParams.slice(0, 20), userId, ...agentParams.slice(20));
-
-      if (userId) {
-        db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
-      }
-
-      // Derive and apply risk config from agent personality
-      const derivedRisk = deriveRiskConfig(body);
-      applyDerivedRiskConfig(db, derivedRisk);
     }
 
     res.status(201).json({
@@ -744,7 +743,67 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     const userId = await getUserIdAsync(req);
     if (!userId) { res.status(401).json({ error: "Authentication required" }); return; }
 
-    const user = await pgQueryOne<{ agent_id: string | null }>("SELECT agent_id FROM users WHERE id = $1", [userId]);
+    let user = await pgQueryOne<{ agent_id: string | null }>("SELECT agent_id FROM users WHERE id = $1", [userId]);
+
+    // ── SQLite → PG auto-sync fallback ──────────────────────────────────────
+    // If the PG user has no agent_id, check SQLite for an existing agent that
+    // was created before PG was enabled, and sync it forward.
+    if (!user?.agent_id) {
+      try {
+        const db = getDb();
+        // Find agent owned by this user in SQLite (user_id column on agents table)
+        const sqliteAgent = db.prepare(
+          `SELECT ${AGENT_COLS}, system_prompt, encrypted_private_key, encrypted_seed_phrase,
+                  polymarket_ready, polymarket_status, user_id, webhook_secret
+           FROM agents WHERE user_id = ? AND status != 'terminated' ORDER BY created_at DESC LIMIT 1`
+        ).get(userId) as Record<string, unknown> | undefined;
+
+        if (!sqliteAgent) {
+          // Also check if the SQLite user record (same clerk_id) has an agent_id
+          const pgUser = await pgQueryOne<{ clerk_id: string }>("SELECT clerk_id FROM users WHERE id = $1", [userId]);
+          if (pgUser?.clerk_id) {
+            const sqliteUser = db.prepare("SELECT id, agent_id FROM users WHERE clerk_id = ?").get(pgUser.clerk_id) as { id: string; agent_id: string | null } | undefined;
+            if (sqliteUser?.agent_id) {
+              const agentFromSqlite = db.prepare(
+                `SELECT ${AGENT_COLS}, system_prompt, encrypted_private_key, encrypted_seed_phrase,
+                        polymarket_ready, polymarket_status, user_id, webhook_secret
+                 FROM agents WHERE id = ?`
+              ).get(sqliteUser.agent_id) as Record<string, unknown> | undefined;
+              if (agentFromSqlite) {
+                // Sync this agent to PG
+                const a = agentFromSqlite;
+                const agentCols = Object.keys(a);
+                const placeholders = agentCols.map((_, i) => `$${i + 1}`).join(", ");
+                const vals = agentCols.map(k => a[k]);
+                await pgExec(
+                  `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders}) ON CONFLICT (id) DO NOTHING`,
+                  vals
+                );
+                await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [sqliteUser.agent_id, userId]);
+                console.log(`[agent/me] Auto-synced agent ${sqliteUser.agent_id} from SQLite → PG for user ${userId}`);
+                user = { agent_id: sqliteUser.agent_id as string };
+              }
+            }
+          }
+        } else {
+          // Agent found by user_id in SQLite — sync it
+          const agentId = sqliteAgent.id as string;
+          const agentCols = Object.keys(sqliteAgent);
+          const placeholders = agentCols.map((_, i) => `$${i + 1}`).join(", ");
+          const vals = agentCols.map(k => sqliteAgent[k]);
+          await pgExec(
+            `INSERT INTO agents (${agentCols.join(", ")}) VALUES (${placeholders}) ON CONFLICT (id) DO NOTHING`,
+            vals
+          );
+          await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [agentId, userId]);
+          console.log(`[agent/me] Auto-synced agent ${agentId} from SQLite → PG for user ${userId}`);
+          user = { agent_id: agentId };
+        }
+      } catch (syncErr) {
+        console.error("[agent/me] SQLite→PG sync fallback error:", syncErr);
+      }
+    }
+
     if (!user?.agent_id) { res.status(404).json({ error: "No agent configured. Create one in Agent Factory." }); return; }
 
     const agent = await pgQueryOne(`SELECT ${AGENT_COLS} FROM agents WHERE id = $1`, [user.agent_id]);

@@ -71,12 +71,18 @@ async function ensureUserPg(clerkId: string): Promise<void> {
   if (existing) {
     userIdCache.set(clerkId, existing.id);
   } else {
+    // Use upsert to handle race conditions — if another request already
+    // inserted this clerk_id, retrieve the existing row instead of failing.
     const id = uuidv4();
     await pgExec(
-      "INSERT INTO users (id, clerk_id, created_at) VALUES ($1, $2, $3)",
+      "INSERT INTO users (id, clerk_id, created_at) VALUES ($1, $2, $3) ON CONFLICT (clerk_id) DO NOTHING",
       [id, clerkId, Date.now()]
     );
-    userIdCache.set(clerkId, id);
+    // Re-read to get the actual id (ours or the winner's)
+    const row = await pgQueryOne<{ id: string }>(
+      "SELECT id FROM users WHERE clerk_id = $1", [clerkId]
+    );
+    if (row) userIdCache.set(clerkId, row.id);
   }
 }
 
