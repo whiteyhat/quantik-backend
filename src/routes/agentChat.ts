@@ -195,6 +195,9 @@ const SUGGESTION_I18N: Record<string, {
   healthScoreDown: string;
   showPortfolioStatus: string;
   currentRiskStatus: string;
+  nudgeNoWallet: string;
+  nudgeFundWallet: (assets: string) => string;
+  nudgeEnableAutopilot: string;
 }> = {
   es: {
     portfolioStatus: "¿Cuál es el estado de mi portafolio?",
@@ -232,6 +235,9 @@ const SUGGESTION_I18N: Record<string, {
     healthScoreDown: "¿Qué está bajando mi puntuación de salud?",
     showPortfolioStatus: "Mostrar estado del portafolio.",
     currentRiskStatus: "¿Cuál es mi nivel de riesgo actual?",
+    nudgeNoWallet: "El siguiente paso es conectar una wallet, fondearla con USDC.e y POL, y luego activar el autopiloto.",
+    nudgeFundWallet: (a) => `Puedo ayudarte a fondear esta wallet con ${a} para que el agente opere en Polymarket.`,
+    nudgeEnableAutopilot: "Una vez que la wallet esté lista, puedo ayudarte a activar el autopiloto.",
   },
   fr: {
     portfolioStatus: "Quel est l'état de mon portefeuille ?",
@@ -269,6 +275,9 @@ const SUGGESTION_I18N: Record<string, {
     healthScoreDown: "Qu'est-ce qui fait baisser mon score de santé ?",
     showPortfolioStatus: "Afficher l'état du portefeuille.",
     currentRiskStatus: "Quel est mon niveau de risque actuel ?",
+    nudgeNoWallet: "L'étape suivante est de connecter un wallet, le financer avec USDC.e et POL, puis activer le pilote automatique.",
+    nudgeFundWallet: (a) => `Je peux t'aider à financer ce wallet avec ${a} pour que l'agent trade sur Polymarket.`,
+    nudgeEnableAutopilot: "Une fois le wallet prêt, je peux t'aider à activer le pilote automatique.",
   },
   de: {
     portfolioStatus: "Wie ist der Stand meines Portfolios?",
@@ -306,6 +315,9 @@ const SUGGESTION_I18N: Record<string, {
     healthScoreDown: "Was zieht meinen Health-Score nach unten?",
     showPortfolioStatus: "Portfolio-Status anzeigen.",
     currentRiskStatus: "Wie ist mein aktuelles Risikoniveau?",
+    nudgeNoWallet: "Der nächste Schritt ist, ein Wallet zu verbinden, es mit USDC.e und POL aufzuladen und dann den Autopiloten zu aktivieren.",
+    nudgeFundWallet: (a) => `Ich kann dir helfen, dieses Wallet mit ${a} aufzuladen, damit der Agent auf Polymarket handeln kann.`,
+    nudgeEnableAutopilot: "Sobald das Wallet bereit ist, kann ich dir helfen, den Autopiloten zu aktivieren.",
   },
 };
 
@@ -676,28 +688,30 @@ function buildOnboardingNudge(
   portfolio: PortfolioSnapshot | null,
   ops: OpsSnapshot | null,
   executionContext: ToolExecutionContext | null,
+  locale?: string,
 ): string | null {
   // If autopilot is on the agent is live — never inject setup/funding nudges.
   if (ops?.autopilotEnabled) return null;
   // If a wallet address is present and we have no contrary evidence, trust it's funded.
   if (executionContext?.walletAddress && !portfolio) return null;
 
+  const s = sugg(locale);
   const lowerMessage = message.toLowerCase();
   const lowerReply = reply.toLowerCase();
-  const alreadyTalkingAboutFunding = /(fund|wallet|usdc|pol|bridge)/.test(lowerMessage)
+  const alreadyTalkingAboutFunding = /(fund|wallet|usdc|pol|bridge|fondear|financer|wallet|billetera|cartera|auflade)/.test(lowerMessage)
     || /(usdc\.e|fund this wallet|fund the wallet|bridge)/.test(lowerReply);
 
   if (portfolio?.balanceStatus === "no_wallet" && !executionContext?.walletAddress && !alreadyTalkingAboutFunding) {
-    return "Next step is connecting a wallet, funding it with USDC.e and POL, then switching on autopilot.";
+    return s?.nudgeNoWallet ?? "Next step is connecting a wallet, funding it with USDC.e and POL, then switching on autopilot.";
   }
 
   if (needsWalletFunding(portfolio, ops, executionContext) && !alreadyTalkingAboutFunding) {
     const missingAssets = getMissingFundingAssets(portfolio, executionContext);
-    return `I can help you fund this wallet with ${missingAssets} so the agent can trade on Polymarket.`;
+    return s ? s.nudgeFundWallet(missingAssets) : `I can help you fund this wallet with ${missingAssets} so the agent can trade on Polymarket.`;
   }
 
-  if (ops && !ops.autopilotEnabled && !/autopilot/.test(lowerMessage) && !/autopilot/.test(lowerReply)) {
-    return "Once the wallet is ready, I can help you switch on autopilot.";
+  if (ops && !ops.autopilotEnabled && !/autopilot|autopiloto|autopilote|autopilot/.test(lowerMessage) && !/autopilot/.test(lowerReply)) {
+    return s?.nudgeEnableAutopilot ?? "Once the wallet is ready, I can help you switch on autopilot.";
   }
 
   return null;
@@ -856,66 +870,161 @@ async function buildConversationSuggestions(options: {
   return suggestions.slice(0, 3);
 }
 
-function buildScannerFallback(scanner: ScannerSnapshot): string {
+const FALLBACK_I18N: Record<string, {
+  scannerNoSignals: (freshness: string) => string;
+  scannerSignals: (count: number, newText: string, question: string, sigma: number, kelly: number, freshness: string) => string;
+  scannerNewSince: (n: number) => string;
+  scannerNothingNew: string;
+  portfolioValue: (val: string, pnl: string, count: number, exposure: string, opsText: string) => string;
+  riskSummary: (status: string, exposure: string, pnl: string, maxPos: string, themeText: string) => string;
+  riskNoTheme: string;
+  riskTheme: (theme: string, pct: string) => string;
+  noTrades: string;
+  tradesSummary: (count: number, winRate: string, totalPnl: string, direction: string, slug: string, outcome: string) => string;
+  opsConnected: (name: string, status: string, heartbeat: string, health: string, score: string) => string;
+  opsAutopilot: (name: string, status: string, autopilot: string, heartbeat: string) => string;
+  autopilotEnabled: string;
+  autopilotDisabled: string;
+  refreshHint: string;
+}> = {
+  es: {
+    scannerNoSignals: (f) => `Sin señales activas en el escáner. Último análisis: ${f}. Di "actualizar señales" para un nuevo escaneo.`,
+    scannerSignals: (c, n, q, s, k, f) => `Escáner: ${c} señales activas. ${n} Mejor setup: ${q}, sigma ${s}%, Kelly ${k}%. Último análisis: ${f}. Di "actualizar señales" para un rescaneo.`,
+    scannerNewSince: (n) => `${n} nueva${n !== 1 ? "s" : ""} desde tu última visita.`,
+    scannerNothingNew: "Sin novedades desde tu última visita.",
+    portfolioValue: (v, p, c, e, o) => `Cartera: ${v}. PnL del día: ${p}. ${c} posiciones abiertas con ${e}% de exposición. ${o}`,
+    riskSummary: (s, e, p, m, t) => `Riesgo: ${s}. Exposición ${e}%, PnL diario ${p}, posición máxima ${m}%. ${t}`,
+    riskNoTheme: "Sin concentración de temas.",
+    riskTheme: (t, p) => `${t} representa el ${p}% del capital.`,
+    noTrades: "Sin operaciones registradas aún para este agente.",
+    tradesSummary: (c, w, p, d, s, o) => `Historial: ${c} operaciones, tasa de éxito ${w}%, PnL total ${p}. Última: ${d} en ${s} con estado ${o}.`,
+    opsConnected: (n, s, h, hs, sc) => `${n} ${s}, último heartbeat ${h}, salud ${hs}${sc}.`,
+    opsAutopilot: (n, _s, a, h) => `${n} activo. Autopiloto ${a}, última sync ${h}.`,
+    autopilotEnabled: "activado",
+    autopilotDisabled: "desactivado",
+    refreshHint: "Di \"actualizar señales\" para un nuevo escaneo.",
+  },
+  fr: {
+    scannerNoSignals: (f) => `Aucun signal actif dans le scanner. Dernier scan : ${f}. Dis "actualiser les signaux" pour un nouveau scan.`,
+    scannerSignals: (c, n, q, s, k, f) => `Scanner : ${c} signaux actifs. ${n} Meilleur setup : ${q}, sigma ${s}%, Kelly ${k}%. Dernier scan : ${f}. Dis "actualiser les signaux" pour un rescan.`,
+    scannerNewSince: (n) => `${n} nouveau${n !== 1 ? "x" : ""} depuis ta dernière visite.`,
+    scannerNothingNew: "Rien de nouveau depuis ta dernière visite.",
+    portfolioValue: (v, p, c, e, o) => `Portefeuille : ${v}. PnL du jour : ${p}. ${c} positions ouvertes avec ${e}% d'exposition. ${o}`,
+    riskSummary: (s, e, p, m, t) => `Risque : ${s}. Exposition ${e}%, PnL journalier ${p}, position max ${m}%. ${t}`,
+    riskNoTheme: "Pas de concentration thématique.",
+    riskTheme: (t, p) => `${t} représente ${p}% du capital.`,
+    noTrades: "Aucune transaction enregistrée pour cet agent.",
+    tradesSummary: (c, w, p, d, s, o) => `Historique : ${c} trades, taux de réussite ${w}%, PnL total ${p}. Dernier : ${d} sur ${s} avec statut ${o}.`,
+    opsConnected: (n, s, h, hs, sc) => `${n} ${s}, dernier heartbeat ${h}, santé ${hs}${sc}.`,
+    opsAutopilot: (n, _s, a, h) => `${n} actif. Pilote automatique ${a}, dernière sync ${h}.`,
+    autopilotEnabled: "activé",
+    autopilotDisabled: "désactivé",
+    refreshHint: "Dis \"actualiser les signaux\" pour un nouveau scan.",
+  },
+  de: {
+    scannerNoSignals: (f) => `Keine aktiven Signale im Scanner. Letzter Scan: ${f}. Sag "Signale aktualisieren" für einen neuen Scan.`,
+    scannerSignals: (c, n, q, s, k, f) => `Scanner: ${c} aktive Signale. ${n} Bestes Setup: ${q}, Sigma ${s}%, Kelly ${k}%. Letzter Scan: ${f}. Sag "Signale aktualisieren" für einen Rescan.`,
+    scannerNewSince: (n) => `${n} neu${n !== 1 ? "e" : "es"} seit deinem letzten Aufruf.`,
+    scannerNothingNew: "Nichts Neues seit deinem letzten Aufruf.",
+    portfolioValue: (v, p, c, e, o) => `Portfolio: ${v}. Tages-PnL: ${p}. ${c} offene Positionen mit ${e}% Exposure. ${o}`,
+    riskSummary: (s, e, p, m, t) => `Risiko: ${s}. Exposure ${e}%, Tages-PnL ${p}, max. Position ${m}%. ${t}`,
+    riskNoTheme: "Keine Themenkonzentration.",
+    riskTheme: (t, p) => `${t} macht ${p}% des Kapitals aus.`,
+    noTrades: "Noch keine Trades für diesen Agenten.",
+    tradesSummary: (c, w, p, d, s, o) => `Handelsverlauf: ${c} Trades, Gewinnrate ${w}%, Gesamt-PnL ${p}. Letzter: ${d} auf ${s} mit Status ${o}.`,
+    opsConnected: (n, s, h, hs, sc) => `${n} ${s}, letzter Heartbeat ${h}, Gesundheit ${hs}${sc}.`,
+    opsAutopilot: (n, _s, a, h) => `${n} aktiv. Autopilot ${a}, letzte Sync ${h}.`,
+    autopilotEnabled: "aktiviert",
+    autopilotDisabled: "deaktiviert",
+    refreshHint: "Sag \"Signale aktualisieren\" für einen neuen Scan.",
+  },
+};
+
+function fb(locale: string | undefined) {
+  return FALLBACK_I18N[locale?.split("-")[0] ?? ""] ?? null;
+}
+
+function buildScannerFallback(scanner: ScannerSnapshot, locale?: string): string {
+  const f = fb(locale);
   const top = scanner.signals[0];
-  if (!top) {
-    return `Cached scanner check found no active signals. Last scan ${formatTimeAgo(scanner.lastScannedAt)}. Say "refresh signals" if you want a live rescan.`;
-  }
-
   const freshness = formatTimeAgo(scanner.lastScannedAt);
-  const newText = scanner.newSignalCount > 0
-    ? `${scanner.newSignalCount} new since your last view.`
-    : "Nothing new since your last view.";
-
+  if (!top) {
+    return f
+      ? f.scannerNoSignals(freshness)
+      : `Scanner found no active signals. Last scan ${freshness}. Say "refresh signals" for a live rescan.`;
+  }
+  const sigma = Math.round(top.sigmaConfidence * 100);
+  const kelly = Math.round(top.kellyFraction * 100);
+  const newText = f
+    ? (scanner.newSignalCount > 0 ? f.scannerNewSince(scanner.newSignalCount) : f.scannerNothingNew)
+    : (scanner.newSignalCount > 0 ? `${scanner.newSignalCount} new since your last view.` : "Nothing new since your last view.");
   return clampReplyWords(
-    `Cached scanner check found ${scanner.count} live signals. ${newText} Top setup is ${top.question} with sigma ${Math.round(top.sigmaConfidence * 100)}% and Kelly ${Math.round(top.kellyFraction * 100)}%. Last scan ${freshness}. Say "refresh signals" if you want a live rescan.`,
+    f
+      ? f.scannerSignals(scanner.count, newText, top.question, sigma, kelly, freshness)
+      : `Scanner found ${scanner.count} live signals. ${newText} Top setup: ${top.question}, sigma ${sigma}%, Kelly ${kelly}%. Last scan ${freshness}. Say "refresh signals" for a live rescan.`,
   );
 }
 
-function buildPortfolioFallback(portfolio: PortfolioSnapshot, ops: OpsSnapshot): string {
-  const totalValue = portfolio.totalValue != null
-    ? `$${portfolio.totalValue.toFixed(2)}`
-    : portfolio.balanceMessage;
+function buildPortfolioFallback(portfolio: PortfolioSnapshot, ops: OpsSnapshot, locale?: string): string {
+  const f = fb(locale);
+  const totalValue = portfolio.totalValue != null ? `$${portfolio.totalValue.toFixed(2)}` : portfolio.balanceMessage;
   const dailyPnl = `${portfolio.dailyPnl >= 0 ? "+" : ""}$${portfolio.dailyPnl.toFixed(2)}`;
   const opsText = ops.agentType === "byo" && ops.health
     ? `Connection ${ops.connectionStatus ?? "pending"}, health ${ops.health.status}.`
-    : `Autopilot ${ops.autopilotEnabled ? "enabled" : "disabled"}.`;
-
+    : f
+      ? `${ops.autopilotEnabled ? f.autopilotEnabled : f.autopilotDisabled}.`
+      : `Autopilot ${ops.autopilotEnabled ? "enabled" : "disabled"}.`;
   return clampReplyWords(
-    `Portfolio value ${totalValue}. Daily PnL ${dailyPnl}. ${portfolio.positions.length} open positions with ${portfolio.exposurePct.toFixed(1)}% exposure. ${opsText}`,
+    f
+      ? f.portfolioValue(totalValue, dailyPnl, portfolio.positions.length, portfolio.exposurePct.toFixed(1), opsText)
+      : `Portfolio value ${totalValue}. Daily PnL ${dailyPnl}. ${portfolio.positions.length} open positions with ${portfolio.exposurePct.toFixed(1)}% exposure. ${opsText}`,
   );
 }
 
-function buildRiskFallback(risk: RiskSnapshot, portfolio: PortfolioSnapshot): string {
-  const hottestTheme = Object.entries(risk.themeExposure)
-    .sort((a, b) => b[1] - a[1])[0];
-  const themeText = hottestTheme ? `${hottestTheme[0]} ${hottestTheme[1].toFixed(1)}% of capital.` : "No concentrated theme exposure.";
-
+function buildRiskFallback(risk: RiskSnapshot, portfolio: PortfolioSnapshot, locale?: string): string {
+  const f = fb(locale);
+  const hottestTheme = Object.entries(risk.themeExposure).sort((a, b) => b[1] - a[1])[0];
+  const themeText = hottestTheme
+    ? (f ? f.riskTheme(hottestTheme[0], hottestTheme[1].toFixed(1)) : `${hottestTheme[0]} ${hottestTheme[1].toFixed(1)}% of capital.`)
+    : (f ? f.riskNoTheme : "No concentrated theme exposure.");
+  const pnl = `${portfolio.dailyPnl >= 0 ? "+" : ""}$${portfolio.dailyPnl.toFixed(2)}`;
   return clampReplyWords(
-    `Risk is ${risk.circuitBreaker}. Exposure ${risk.exposurePct.toFixed(1)}%, daily PnL ${portfolio.dailyPnl >= 0 ? "+" : ""}$${portfolio.dailyPnl.toFixed(2)}, max position ${(risk.maxPositionSizePct * 100).toFixed(1)}%. ${themeText}`,
+    f
+      ? f.riskSummary(risk.circuitBreaker, risk.exposurePct.toFixed(1), pnl, (risk.maxPositionSizePct * 100).toFixed(1), themeText)
+      : `Risk is ${risk.circuitBreaker}. Exposure ${risk.exposurePct.toFixed(1)}%, daily PnL ${pnl}, max position ${(risk.maxPositionSizePct * 100).toFixed(1)}%. ${themeText}`,
   );
 }
 
-function buildTradeHistoryFallback(history: TradeHistorySnapshot): string {
+function buildTradeHistoryFallback(history: TradeHistorySnapshot, locale?: string): string {
+  const f = fb(locale);
   if (history.count === 0) {
-    return "No scoped trades yet for this agent. Once executions land, I can summarize win rate, recent outcomes, and total PnL.";
+    return f?.noTrades ?? "No scoped trades yet for this agent. Once executions land, I can summarize win rate, recent outcomes, and total PnL.";
   }
-
   const latest = history.trades[0];
+  const totalPnl = `${history.totalPnl >= 0 ? "+" : ""}$${history.totalPnl.toFixed(2)}`;
   return clampReplyWords(
-    `Recent trade history: ${history.count} trades, win rate ${history.winRate.toFixed(1)}%, total PnL ${history.totalPnl >= 0 ? "+" : ""}$${history.totalPnl.toFixed(2)}. Latest was ${latest.direction} on ${latest.slug} with ${latest.outcome} status.`,
+    f
+      ? f.tradesSummary(history.count, history.winRate.toFixed(1), totalPnl, latest.direction, latest.slug, latest.outcome)
+      : `Recent trade history: ${history.count} trades, win rate ${history.winRate.toFixed(1)}%, total PnL ${totalPnl}. Latest was ${latest.direction} on ${latest.slug} with ${latest.outcome} status.`,
   );
 }
 
-function buildOpsFallback(ops: OpsSnapshot): string {
+function buildOpsFallback(ops: OpsSnapshot, locale?: string): string {
+  const f = fb(locale);
+  const name = ops.agentName ?? (f ? "Tu agente" : "Your agent");
   if (ops.agentType === "byo" && ops.health) {
+    const score = ops.health.score != null ? ` at ${ops.health.score}/100` : "";
     return clampReplyWords(
-      `${ops.agentName ?? "Your agent"} is ${ops.connectionStatus ?? "pending"}, last heartbeat ${formatTimeAgo(ops.lastHeartbeat)}, health ${ops.health.status}${ops.health.score != null ? ` at ${ops.health.score}/100` : ""}.`,
+      f
+        ? f.opsConnected(name, ops.connectionStatus ?? "pending", formatTimeAgo(ops.lastHeartbeat), ops.health.status, score)
+        : `${name} is ${ops.connectionStatus ?? "pending"}, last heartbeat ${formatTimeAgo(ops.lastHeartbeat)}, health ${ops.health.status}${score}.`,
     );
   }
-
+  const autopilotText = f ? (ops.autopilotEnabled ? f.autopilotEnabled : f.autopilotDisabled) : (ops.autopilotEnabled ? "enabled" : "disabled");
   return clampReplyWords(
-    `${ops.agentName ?? "Your agent"} is ${ops.agentStatus ?? "active"}. Autopilot is ${ops.autopilotEnabled ? "enabled" : "disabled"}, last sync ${formatTimeAgo(ops.lastHeartbeat)}.`,
+    f
+      ? f.opsAutopilot(name, ops.agentStatus ?? "active", autopilotText, formatTimeAgo(ops.lastHeartbeat))
+      : `${name} is ${ops.agentStatus ?? "active"}. Autopilot is ${autopilotText}, last sync ${formatTimeAgo(ops.lastHeartbeat)}.`,
   );
 }
 
@@ -986,6 +1095,7 @@ function buildRecipePrompt(
       return [context.kind, {
         totalValue: data.totalValue,
         onChainUsdc: data.onChainUsdc,
+        clobBalance: data.clobBalance,
         pol: data.pol,
         dailyPnl: data.dailyPnl,
         exposurePct: data.exposurePct,
@@ -1116,9 +1226,15 @@ async function resolveRecipe(
     : null;
 
   if (recipe === "scanner_signals" || recipe === "refresh_signals") {
-    emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Running live scanner scan");
-    await executeTool("trigger_scanner", {}, context);
-    emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Scanner scan finished", "done");
+    const SCANNER_DEBOUNCE_MS = 5 * 60 * 1000; // 5 minutes — matches scanner's own cadence
+    const cached = loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
+    const cacheAge = cached.lastScannedAt ? Date.now() - cached.lastScannedAt : Infinity;
+    const shouldTrigger = recipe === "refresh_signals" || cacheAge > SCANNER_DEBOUNCE_MS;
+    if (shouldTrigger) {
+      emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Running live scanner scan");
+      await executeTool("trigger_scanner", {}, context);
+      emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Scanner scan finished", "done");
+    }
     const scanner = loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
     const ops = await loadOpsSnapshot(context);
     const scannerContext: ContextEnvelope = { kind: "scanner", data: scanner };
@@ -1130,7 +1246,7 @@ async function resolveRecipe(
     return {
       contexts,
       suggestions: getSuggestionsForRecipe(recipe, body.locale),
-      fallbackReply: buildScannerFallback(scanner),
+      fallbackReply: buildScannerFallback(scanner, body.locale),
       prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
@@ -1153,7 +1269,7 @@ async function resolveRecipe(
     return {
       contexts,
       suggestions: getSuggestionsForRecipe(recipe, body.locale),
-      fallbackReply: buildPortfolioFallback(portfolio, ops),
+      fallbackReply: buildPortfolioFallback(portfolio, ops, body.locale),
       prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
@@ -1173,7 +1289,7 @@ async function resolveRecipe(
     return {
       contexts,
       suggestions: getSuggestionsForRecipe(recipe, body.locale),
-      fallbackReply: buildRiskFallback(risk, portfolio),
+      fallbackReply: buildRiskFallback(risk, portfolio, body.locale),
       prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
@@ -1191,7 +1307,7 @@ async function resolveRecipe(
     return {
       contexts,
       suggestions: getSuggestionsForRecipe(recipe, body.locale),
-      fallbackReply: buildTradeHistoryFallback(history),
+      fallbackReply: buildTradeHistoryFallback(history, body.locale),
       prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }
@@ -1205,7 +1321,7 @@ async function resolveRecipe(
   return {
     contexts,
     suggestions: getSuggestionsForRecipe(recipe, body.locale),
-    fallbackReply: buildOpsFallback(ops),
+    fallbackReply: buildOpsFallback(ops, body.locale),
     prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
   };
 }
@@ -1540,6 +1656,7 @@ router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: 
       suggestionContextData.portfolio,
       suggestionContextData.ops,
       executionContext,
+      body.locale,
     );
     const finalDraft = onboardingNudge ? `${draftReply || replyFallback} ${onboardingNudge}` : (draftReply || replyFallback);
     const finalFallback = onboardingNudge ? `${replyFallback} ${onboardingNudge}` : replyFallback;

@@ -58,10 +58,13 @@ router.get("/trades", async (req, res) => {
     const livePrice = new Map(priceRows2.map(r => [r.slug, r.probability]));
 
     const tradeList = executions.map(e => {
-      const entry = e.fill_price ?? 0.5;
-      const current = livePrice.get(e.slug) ?? entry;
-      const shares = entry > 0 ? e.amount / entry : 0;
-      const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      const fillPrice = e.fill_price ?? 0.5;
+      const isLiveNoBet = e.side === "sell" && e.status !== "paper";
+      const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+      const currentYes = livePrice.get(e.slug) ?? entryYes;
+      const pnl = e.side === "buy"
+        ? (currentYes - entryYes) * (e.amount / Math.max(0.01, entryYes))
+        : (entryYes - currentYes) * (e.amount / Math.max(0.01, 1 - entryYes));
 
       let outcome = "OPEN";
       if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
@@ -73,7 +76,7 @@ router.get("/trades", async (req, res) => {
         market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
         direction: e.side === "buy" ? "YES" : "NO",
         size: e.amount,
-        price: entry,
+        price: entryYes,
         outcome,
         timestamp: e.executed_at,
         pnl: e.pnl ?? pnl,

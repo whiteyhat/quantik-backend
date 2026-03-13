@@ -83,23 +83,20 @@ async function commandExists(cmd: string): Promise<boolean> {
 
 // ── runCli ───────────────────────────────────────────────────────────────────
 
-export async function runCli(args: string[]): Promise<unknown> {
-  await ensureCliInstalled();
-
+function execCli(args: string[], env: NodeJS.ProcessEnv): Promise<unknown> {
   const fullArgs = ["-o", "json", ...args];
 
   return new Promise((resolve, reject) => {
     execFile(
       POLYMARKET_BIN,
       fullArgs,
-      { maxBuffer: 10 * 1024 * 1024, timeout: 60_000, env: process.env },
+      { maxBuffer: 10 * 1024 * 1024, timeout: 60_000, env },
       (error, stdout, stderr) => {
         if (error) {
           const code =
             typeof (error as NodeJS.ErrnoException).code === "number"
               ? (error as { code: number }).code
               : 1;
-          // Include both stderr and stdout so no detail is lost
           const parts = [stderr?.trim(), stdout?.trim()].filter(Boolean).join(" | stderr: ");
           const detail = parts || error.message;
           console.error(`[cli] polymarket ${args.join(" ")} stderr: ${stderr?.trim() || "(empty)"}`);
@@ -112,10 +109,27 @@ export async function runCli(args: string[]): Promise<unknown> {
           const parsed: unknown = JSON.parse(stdout.trim());
           resolve(parsed);
         } catch {
-          // If stdout isn't JSON, return raw string
           resolve(stdout.trim());
         }
       }
     );
   });
+}
+
+export async function runCli(args: string[]): Promise<unknown> {
+  await ensureCliInstalled();
+  return execCli(args, process.env as NodeJS.ProcessEnv);
+}
+
+/**
+ * Run the CLI with a wallet private key injected into the subprocess env only.
+ * The key is NEVER written to process.env — it exists solely in the child process.
+ */
+export async function runCliWithWallet(args: string[], privateKey: string): Promise<unknown> {
+  await ensureCliInstalled();
+  const env: NodeJS.ProcessEnv = { ...process.env, POLYMARKET_PRIVATE_KEY: privateKey };
+  const result = await execCli(args, env);
+  // Overwrite the private key string reference (best-effort in JS)
+  (env as Record<string, unknown>)["POLYMARKET_PRIVATE_KEY"] = undefined;
+  return result;
 }

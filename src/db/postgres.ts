@@ -641,6 +641,11 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE versions ADD COLUMN IF NOT EXISTS fixes_de TEXT;
   `);
 
+  // ── Remove stale version entries that were renamed in v1.x migration ────────
+  await safeQuery("remove stale version entries", `
+    DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0');
+  `);
+
   // ── Seed / upsert localized releases ────────────────────────────────────────
   try {
     const { RELEASES } = await import("./releases-data");

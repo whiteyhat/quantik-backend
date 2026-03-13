@@ -10,6 +10,8 @@ import { pipelineRateLimit } from "../infra/rateLimit";
 import { runClause } from "../clause/index";
 import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
+import { execute } from "../execution/index";
+import { approvePosition } from "../risk";
 
 const router = Router();
 
@@ -227,13 +229,21 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const resolution_date = String(marketRaw.endDateIso ?? marketRaw.endDate ?? new Date(Date.now() + 30*86400000).toISOString());
   const days_to_resolution = Math.max(1, Math.round((new Date(resolution_date).getTime() - Date.now()) / 86400000));
 
-  // clobTokenIds[0] for Flux
+  // clobTokenIds[0]=YES, [1]=NO — needed for both Flux and live execution
   let token_id: string | undefined;
+  let token_id_no: string | undefined;
   const rawTokenIds = marketRaw.clobTokenIds ?? marketRaw.tokenIds;
   if (typeof rawTokenIds === "string") {
-    try { const p = JSON.parse(rawTokenIds); token_id = Array.isArray(p) ? String(p[0]) : undefined; } catch { /* ignore */ }
+    try {
+      const p = JSON.parse(rawTokenIds);
+      if (Array.isArray(p)) {
+        token_id = String(p[0]);
+        token_id_no = p[1] != null ? String(p[1]) : undefined;
+      }
+    } catch { /* ignore */ }
   } else if (Array.isArray(rawTokenIds)) {
     token_id = String(rawTokenIds[0]);
+    token_id_no = rawTokenIds[1] != null ? String(rawTokenIds[1]) : undefined;
   }
 
   const marketInput = {
@@ -348,10 +358,54 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     market_question: marketInput.question,
   });
 
+  // ── Auto-execute if SIGMA says BET_YES or BET_NO ───────────────
+  const decision = sigmaData["decision"];
+  let executionResult: Record<string, unknown> | null = null;
+
+  if (decision === "BET_YES" || decision === "BET_NO") {
+    const direction = decision === "BET_YES" ? "YES" : "NO";
+    const sizeUsd = typeof sigmaData["size_usd"] === "number" ? sigmaData["size_usd"] : 10;
+    const entryPrice = typeof sigmaData["entry_price"] === "number" ? sigmaData["entry_price"] : 0.5;
+    const resolvedTokenId = direction === "YES" ? token_id : token_id_no;
+
+    try {
+      const riskApproval = await approvePosition(effectiveSlug, sizeUsd, marketInput.category);
+      if (!riskApproval.approved) {
+        sendEvent("trade:rejected", { reason: riskApproval.reason, slug: effectiveSlug });
+      } else {
+        const result = await execute(
+          {
+            slug: effectiveSlug,
+            direction,
+            sizeUsdc: riskApproval.adjustedSize,
+            tokenId: resolvedTokenId,
+            price: entryPrice,
+          },
+          riskApproval
+        );
+        executionResult = result as unknown as Record<string, unknown>;
+        sendEvent("trade:executed", {
+          slug: effectiveSlug,
+          direction,
+          orderId: result.orderId,
+          status: result.status,
+          execution_mode: result.execution_mode,
+          filledPrice: result.filledPrice,
+          filledSize: result.filledSize,
+        });
+        console.log(`[Pipeline] Auto-executed ${direction} on ${effectiveSlug} — orderId=${result.orderId} mode=${result.execution_mode}`);
+      }
+    } catch (execErr) {
+      sendEvent("trade:error", { slug: effectiveSlug, error: String(execErr) });
+      console.error("[Pipeline] Auto-execution failed:", execErr);
+    }
+  }
+
   sendEvent("pipeline:complete", {
     runId,
     decision: sigmaData["decision"],
     confidence: sigmaData["confidence"],
+    execution: executionResult,
   });
 
   res.end();

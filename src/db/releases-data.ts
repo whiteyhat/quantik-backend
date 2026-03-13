@@ -10,7 +10,69 @@ export interface LocalizedRelease {
 
 export const RELEASES: LocalizedRelease[] = [
   {
-    version: "v0.11.0",
+    version: "v1.3.0",
+    released_at: "2026-03-13",
+    highlight: {
+      en: "Database-backed changelog with full EN/ES/FR/DE locale support, new-release notification dot, and sticky Manage Agent header.",
+      es: "Changelog respaldado por base de datos con soporte completo de idiomas EN/ES/FR/DE, punto de notificación de nueva versión y encabezado sticky de Gestión de Agente.",
+      fr: "Journal des modifications basé sur la base de données avec support complet des langues EN/ES/FR/DE, point de notification de nouvelle version et en-tête sticky de Gestion d'Agent.",
+      de: "Datenbank-gestütztes Changelog mit vollständiger EN/ES/FR/DE-Sprachunterstützung, Benachrichtigungspunkt für neue Versionen und fixierter Manage-Agent-Header.",
+    },
+    features: {
+      en: [
+        "🗄️ DB-backed changelog — release notes stored in PostgreSQL/SQLite with ON CONFLICT upsert; auto-seeded on every backend deploy",
+        "🌐 Full locale support — highlight, features, and fixes translated into EN, ES, FR, and DE; switches instantly with the language selector",
+        "🔵 New-release notification dot — blue dot on the changelog button for unseen versions; dismissed on first open, persisted in localStorage",
+        "📌 Sticky Manage Agent header — AgentIdentityHeader, EquityCurveChart, and MetricsRow stay visible while scrolling",
+        "🔧 AutopilotControlCard — ExecutionLog only renders when Telegram is configured",
+      ],
+      es: [
+        "🗄️ Changelog respaldado por BD — notas de versión almacenadas en PostgreSQL/SQLite con upsert ON CONFLICT; sembradas automáticamente en cada despliegue",
+        "🌐 Soporte completo de idiomas — highlight, características y correcciones traducidos a EN, ES, FR y DE; cambia instantáneamente con el selector de idioma",
+        "🔵 Punto de notificación de nueva versión — punto azul en el botón changelog para versiones no vistas; descartado al primer clic, persistido en localStorage",
+        "📌 Encabezado sticky de Gestión de Agente — AgentIdentityHeader, EquityCurveChart y MetricsRow permanecen visibles al desplazarse",
+        "🔧 AutopilotControlCard — ExecutionLog solo se renderiza cuando Telegram está configurado",
+      ],
+      fr: [
+        "🗄️ Changelog basé sur la BD — notes de version stockées dans PostgreSQL/SQLite avec upsert ON CONFLICT ; semées automatiquement à chaque déploiement",
+        "🌐 Support complet des langues — highlight, fonctionnalités et correctifs traduits en EN, ES, FR et DE ; change instantanément avec le sélecteur de langue",
+        "🔵 Point de notification de nouvelle version — point bleu sur le bouton changelog pour les versions non vues ; rejeté à la première ouverture, persisté dans localStorage",
+        "📌 En-tête sticky de Gestion d'Agent — AgentIdentityHeader, EquityCurveChart et MetricsRow restent visibles en faisant défiler",
+        "🔧 AutopilotControlCard — ExecutionLog ne s'affiche que lorsque Telegram est configuré",
+      ],
+      de: [
+        "🗄️ DB-gestütztes Changelog — Versionshinweise in PostgreSQL/SQLite mit ON CONFLICT Upsert; bei jedem Deploy automatisch geseedet",
+        "🌐 Vollständige Sprachunterstützung — Highlight, Features und Fixes in EN, ES, FR und DE; wechselt sofort mit dem Sprachselektor",
+        "🔵 Benachrichtigungspunkt für neue Versionen — blauer Punkt auf dem Changelog-Button für ungesehene Versionen; beim ersten Öffnen verworfen, in localStorage gespeichert",
+        "📌 Fixierter Manage-Agent-Header — bleibt beim Scrollen durch Positionen und Logs sichtbar",
+        "🔧 AutopilotControlCard — ExecutionLog wird nur angezeigt wenn Telegram konfiguriert ist",
+      ],
+    },
+    fixes: {
+      en: [
+        "🔧 layout.tsx: overflowX hidden → clip to fix sticky child element rendering",
+        "⚙️ ExecutionLog: trade id coercion ?? → || for safer fallback",
+        "🗑️ Old static RELEASES array removed from frontend bundle — data now served from API",
+      ],
+      es: [
+        "🔧 layout.tsx: overflowX hidden → clip para corregir el renderizado de elementos sticky",
+        "⚙️ ExecutionLog: coerción de id de trade ?? → || para fallback más seguro",
+        "🗑️ Array RELEASES estático eliminado del bundle del frontend — los datos ahora vienen de la API",
+      ],
+      fr: [
+        "🔧 layout.tsx : overflowX hidden → clip pour corriger le rendu des éléments sticky",
+        "⚙️ ExecutionLog : coercition d'id de trade ?? → || pour un fallback plus sûr",
+        "🗑️ Ancien tableau RELEASES statique supprimé du bundle frontend — les données viennent de l'API",
+      ],
+      de: [
+        "🔧 layout.tsx: overflowX hidden → clip zur Behebung von Sticky-Element-Rendering",
+        "⚙️ ExecutionLog: Trade-ID-Koerzion ?? → || für sichereren Fallback",
+        "🗑️ Altes statisches RELEASES-Array aus dem Frontend-Bundle entfernt — Daten kommen jetzt von der API",
+      ],
+    },
+  },
+  {
+    version: "v1.2.0",
     released_at: "2026-03-13",
     highlight: {
       en: "ScannerFeed redesign, PolymarketStatus deep metrics, relay pipeline streaming, market scanner upgrades, and live dashboard data binding.",
@@ -96,7 +158,7 @@ export const RELEASES: LocalizedRelease[] = [
     },
   },
   {
-    version: "v0.10.0",
+    version: "v1.1.0",
     released_at: "2026-03-12",
     highlight: {
       en: "Full i18n rollout, Polymarket status card, Playwright E2E migration, and component polish pass.",
@@ -162,7 +224,7 @@ export const RELEASES: LocalizedRelease[] = [
     },
   },
   {
-    version: "v0.9.0",
+    version: "v1.0.0",
     released_at: "2026-03-09",
     highlight: {
       en: "BYO OpenClaw Agent, Agent World pixel environment, Architecture Viewer, onboarding flow, and full Manage Agent dashboard.",

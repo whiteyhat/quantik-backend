@@ -1,5 +1,6 @@
 import { getDb } from "../db/schema";
 import { getUsdcBalance, getClobBalance } from "../utils/balances";
+import { tryLoadActiveAgentContext } from "../utils/agentKey";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -63,13 +64,14 @@ export class PortfolioManager {
 
   /** Total Portfolio Value: On-chain + Deployed (unified async source) */
   async getTotalCapital(): Promise<number> {
+    const agentCtx = await tryLoadActiveAgentContext();
     const [onChain, clob] = await Promise.all([
-      getUsdcBalance(),
-      getClobBalance(),
+      getUsdcBalance(agentCtx?.walletAddress),
+      getClobBalance(agentCtx?.privateKey),
     ]);
     const deployed = this.getDeployedCapital();
     const openPnl = this.getOpenPositions().reduce((sum, p) => sum + p.openPnl, 0);
-    
+
     const total = onChain + clob + deployed + openPnl;
     if (total <= 0) {
       console.warn("[PortfolioManager] getTotalCapital resolved to 0 — wallet RPC or CLOB balance may be unreachable");
@@ -79,9 +81,10 @@ export class PortfolioManager {
 
   /** Capital not currently deployed in open positions */
   async getAvailableCapital(): Promise<number> {
+    const agentCtx = await tryLoadActiveAgentContext();
     const [onChain, clob] = await Promise.all([
-      getUsdcBalance(),
-      getClobBalance(),
+      getUsdcBalance(agentCtx?.walletAddress),
+      getClobBalance(agentCtx?.privateKey),
     ]);
     return onChain + clob;
   }

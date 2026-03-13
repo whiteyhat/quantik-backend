@@ -197,8 +197,17 @@ httpServer.listen(PORT, () => {
 async function ensureClobAllowances(): Promise<void> {
   if (process.env.PAPER_TRADING !== "false") return; // default: skip in paper mode
   try {
-    const { runCli } = await import("./cli");
-    const result = await runCli(["clob", "update-balance", "--asset-type", "collateral", "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"]);
+    const { runCliWithWallet } = await import("./cli");
+    const { tryLoadActiveAgentContext } = await import("./utils/agentKey");
+    const agentCtx = await tryLoadActiveAgentContext();
+    if (!agentCtx) {
+      console.warn("[startup] CLOB allowance setup skipped — no Polymarket-ready agent found");
+      return;
+    }
+    const result = await runCliWithWallet(
+      ["clob", "update-balance", "--asset-type", "collateral", "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"],
+      agentCtx.privateKey
+    );
     console.log("[startup] CLOB allowances set:", JSON.stringify(result).slice(0, 200));
   } catch (err) {
     console.error("[startup] CLOB allowance setup failed:", err);

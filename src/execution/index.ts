@@ -2,7 +2,8 @@
 
 import { PaperModeEngine } from "./paperMode";
 import { FillMonitor } from "./fillMonitor";
-import { runCli } from "../cli";
+import { runCliWithWallet } from "../cli";
+import { loadActiveAgentContext } from "../utils/agentKey";
 import type { PaperOrder } from "./paperMode";
 import type { RiskApproval } from "../risk";
 
@@ -28,6 +29,7 @@ export interface ExecutionResult {
 
 const paperEngine = new PaperModeEngine();
 const fillMonitor = new FillMonitor();
+
 
 const PAPER_TRADING = process.env.PAPER_TRADING !== "false"; // default true
 const MAX_BET_USDC = Number(process.env.MAX_BET_USDC ?? 10);  // default $10 hard cap
@@ -112,7 +114,9 @@ export async function execute(
     };
   }
 
-  const rawData = await runCli(cliArgs) as Record<string, unknown>;
+  // Decrypt the active agent's private key and inject it into the CLI subprocess env
+  const { privateKey } = await loadActiveAgentContext();
+  const rawData = await runCliWithWallet(cliArgs, privateKey) as Record<string, unknown>;
   const orderId =
     typeof rawData["orderID"] === "string"
       ? rawData["orderID"]

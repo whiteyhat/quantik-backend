@@ -33,6 +33,7 @@ export interface PortfolioSnapshot {
   onChainUsdc: number;
   onChainUsdcFormatted: string;
   pol: number;
+  clobBalance: number;
   polFormatted: string;
   totalValue: number | null;
   pnl: number;
@@ -260,6 +261,7 @@ function emptyPortfolioSnapshot(context: ToolExecutionContext): PortfolioSnapsho
     onChainUsdc: 0,
     onChainUsdcFormatted: "0.00",
     pol: 0,
+    clobBalance: 0,
     polFormatted: "0.0000",
     totalValue: null,
     pnl: 0,
@@ -397,12 +399,16 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
 
   let unrealizedToday = 0;
   const positions: PortfolioPositionSnapshot[] = openExecutions.map((execution) => {
-    const entry = execution.fill_price ?? 0.5;
-    const current = latestPrices.get(execution.slug) ?? entry;
-    const shares = entry > 0 ? execution.amount / entry : 0;
+    const fillPrice = execution.fill_price ?? 0.5;
+    // Live NO bets store fill_price as NO token price (1 - yes_price).
+    // Paper NO bets and all YES bets store fill_price as YES probability.
+    // Normalise everything to YES-probability space before computing P&L.
+    const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
+    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+    const currentYes = latestPrices.get(execution.slug) ?? entryYes;
     const pnl = execution.side === "buy"
-      ? (current - entry) * shares
-      : (entry - current) * shares;
+      ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
+      : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
 
     unrealizedToday += pnl;
 
@@ -410,8 +416,8 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
       slug: execution.slug,
       direction: execution.side === "buy" ? "YES" : "NO",
       size: round2(execution.amount),
-      entryPrice: round2(entry),
-      currentPrice: round2(current),
+      entryPrice: round2(entryYes),
+      currentPrice: round2(currentYes),
       pnl: round2(pnl),
     };
   });
@@ -557,6 +563,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     drawdownLimit: config?.drawdown_limit_pct ?? 0.15,
     balanceStatus,
     balanceMessage,
+    clobBalance: round2(funding.clobBalance),
     fundingStatus: funding.fundingStatus,
     fundingMessage: funding.fundingMessage,
     funding_status: funding.fundingStatus,
@@ -649,12 +656,13 @@ export async function loadTradeHistorySnapshot(
   }>;
 
   const trades = executions.map((execution) => {
-    const entry = execution.fill_price ?? 0.5;
-    const current = livePrice.get(execution.slug) ?? entry;
-    const shares = entry > 0 ? execution.amount / entry : 0;
+    const fillPrice = execution.fill_price ?? 0.5;
+    const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
+    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+    const currentYes = livePrice.get(execution.slug) ?? entryYes;
     const syntheticPnl = execution.side === "buy"
-      ? (current - entry) * shares
-      : (entry - current) * shares;
+      ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
+      : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
 
     let outcome: "WIN" | "LOSS" | "OPEN" = "OPEN";
     if (execution.pnl != null) outcome = execution.pnl > 0 ? "WIN" : "LOSS";
@@ -664,7 +672,7 @@ export async function loadTradeHistorySnapshot(
       slug: execution.slug,
       direction: execution.side === "buy" ? "YES" as const : "NO" as const,
       size: round2(execution.amount),
-      price: round2(entry),
+      price: round2(entryYes),
       outcome,
       pnl: round2(execution.pnl ?? syntheticPnl),
       timestamp: execution.executed_at,

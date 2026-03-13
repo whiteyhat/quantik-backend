@@ -1,4 +1,5 @@
-import { runCli } from "../cli";
+import { runCli, runCliWithWallet } from "../cli";
+import { tryLoadActiveAgentContext } from "./agentKey";
 
 const POLYGON_RPC_URLS = ["https://polygon.drpc.org", "https://polygon-bor-rpc.publicnode.com"];
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
@@ -25,6 +26,7 @@ export interface WalletFundingSnapshot {
   address: string | null;
   onChainUsdc: number;
   pol: number;
+  clobBalance: number;
   usdcStatus: UsdcBalanceStatus;
   polStatus: UsdcBalanceStatus;
   fundingStatus: FundingStatus;
@@ -107,9 +109,11 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
   };
 }
 
-export async function getClobBalance(): Promise<number> {
+export async function getClobBalance(privateKey?: string): Promise<number> {
   try {
-    const raw = await runCli(["clob", "balance", "--asset-type", "collateral"]);
+    const key = privateKey ?? (await tryLoadActiveAgentContext())?.privateKey;
+    const args = ["clob", "balance", "--asset-type", "collateral"];
+    const raw = key ? await runCliWithWallet(args, key) : await runCli(args);
     if (raw && typeof raw === "object") return Number((raw as any).balance ?? 0);
   } catch {}
   return 0;
@@ -166,6 +170,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
       address: null,
       onChainUsdc: 0,
       pol: 0,
+      clobBalance: 0,
       usdcStatus: "no_address",
       polStatus: "no_address",
       fundingStatus: "no_wallet",
@@ -174,9 +179,11 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
     };
   }
 
-  const [usdc, pol] = await Promise.all([
+  const agentCtx = await tryLoadActiveAgentContext();
+  const [usdc, pol, clobBalance] = await Promise.all([
     getUsdcBalanceSnapshot(address),
     getPolBalanceSnapshot(address),
+    getClobBalance(agentCtx?.privateKey).catch(() => 0),
   ]);
 
   if (usdc.status !== "live" || pol.status !== "live") {
@@ -184,6 +191,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
       address,
       onChainUsdc: usdc.balance,
       pol: pol.balance,
+      clobBalance,
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "unavailable",
@@ -197,6 +205,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
       address,
       onChainUsdc: usdc.balance,
       pol: pol.balance,
+      clobBalance,
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
@@ -210,6 +219,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
       address,
       onChainUsdc: usdc.balance,
       pol: pol.balance,
+      clobBalance,
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
@@ -223,6 +233,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
       address,
       onChainUsdc: usdc.balance,
       pol: pol.balance,
+      clobBalance,
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
@@ -235,6 +246,7 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
     address,
     onChainUsdc: usdc.balance,
     pol: pol.balance,
+    clobBalance,
     usdcStatus: usdc.status,
     polStatus: pol.status,
     fundingStatus: "ready",

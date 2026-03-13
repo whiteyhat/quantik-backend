@@ -1,13 +1,34 @@
 import { Router, Request, Response } from "express";
-import { runCli, CliError } from "../cli";
+import { runCli, runCliWithWallet, CliError } from "../cli";
 import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { decrypt } from "../infra/encryption";
 import { v4 as uuid } from "uuid";
 import { tradeRateLimit } from "../infra/rateLimit";
 import { emitTradeExecuted } from "../infra/socket";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
 import { insertExecutionRecord } from "../utils/executions";
+
+async function loadAgentPrivateKey(agentId: string): Promise<string | null> {
+  let encryptedKey: string | null = null;
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<{ encrypted_private_key: string | null }>(
+      `SELECT encrypted_private_key FROM agents WHERE id = $1`,
+      [agentId]
+    );
+    encryptedKey = row?.encrypted_private_key ?? null;
+  } else {
+    const db = getDb();
+    const row = db
+      .prepare(`SELECT encrypted_private_key FROM agents WHERE id = ?`)
+      .get(agentId) as { encrypted_private_key: string | null } | undefined;
+    encryptedKey = row?.encrypted_private_key ?? null;
+  }
+  if (!encryptedKey) return null;
+  try { return decrypt(encryptedKey); } catch { return null; }
+}
 
 const router = Router();
 
@@ -32,10 +53,13 @@ router.get("/", async (req: Request, res: Response) => {
     const livePrice = new Map(priceRows.map(r => [r.slug, r.probability]));
 
     const tradeList = executions.map(e => {
-      const entry = e.fill_price ?? 0.5;
-      const current = livePrice.get(e.slug) ?? entry;
-      const shares = entry > 0 ? e.amount / entry : 0;
-      const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      const fillPrice = e.fill_price ?? 0.5;
+      const isLiveNoBet = e.side === "sell" && e.status !== "paper";
+      const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+      const currentYes = livePrice.get(e.slug) ?? entryYes;
+      const pnl = e.side === "buy"
+        ? (currentYes - entryYes) * (e.amount / Math.max(0.01, entryYes))
+        : (entryYes - currentYes) * (e.amount / Math.max(0.01, 1 - entryYes));
       
       let outcome = "OPEN";
       if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
@@ -47,7 +71,7 @@ router.get("/", async (req: Request, res: Response) => {
         market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
         direction: e.side === "buy" ? "YES" : "NO",
         size: e.amount,
-        price: entry,
+        price: entryYes,
         outcome,
         timestamp: e.executed_at,
         pnl: e.pnl ?? pnl,
@@ -142,14 +166,18 @@ router.post("/execute", async (req: Request, res: Response) => {
     }
 
     // ── Real trade ─────────────────────────────────────────
-    const rawData = await runCli([
+    const agentPrivKey = linkedAgent ? await loadAgentPrivateKey(linkedAgent.agentId) : null;
+    const cliArgs = [
       "clob",
       "create-order",
       "--token-id", String(tokenId),
       "--side", String(side),
       "--price", String(price),
       "--size", String(size),
-    ]);
+    ];
+    const rawData = agentPrivKey
+      ? await runCliWithWallet(cliArgs, agentPrivKey)
+      : await runCli(cliArgs);
 
     const data =
       rawData !== null && typeof rawData === "object"
@@ -242,7 +270,12 @@ router.post("/cancel", async (req: Request, res: Response) => {
       res.status(400).json({ error: "Missing required field: orderId" });
       return;
     }
-    const data = await runCli(["clob", "cancel", String(orderId)]);
+    const userId = await getUserIdAsync(req);
+    const linked = userId ? await loadLinkedAgentForUser(userId) : null;
+    const privKey = linked ? await loadAgentPrivateKey(linked.agentId) : null;
+    const data = privKey
+      ? await runCliWithWallet(["clob", "cancel", String(orderId)], privKey)
+      : await runCli(["clob", "cancel", String(orderId)]);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);
@@ -250,9 +283,14 @@ router.post("/cancel", async (req: Request, res: Response) => {
 });
 
 // ── POST /api/trade/cancel-all ────────────────────────────────
-router.post("/cancel-all", async (_req: Request, res: Response) => {
+router.post("/cancel-all", async (req: Request, res: Response) => {
   try {
-    const data = await runCli(["clob", "cancel-all"]);
+    const userId = await getUserIdAsync(req);
+    const linked = userId ? await loadLinkedAgentForUser(userId) : null;
+    const privKey = linked ? await loadAgentPrivateKey(linked.agentId) : null;
+    const data = privKey
+      ? await runCliWithWallet(["clob", "cancel-all"], privKey)
+      : await runCli(["clob", "cancel-all"]);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);

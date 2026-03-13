@@ -320,13 +320,14 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
   let totalPnl = 0;
 
   for (const pos of openPositions) {
-    const entry = pos.fill_price ?? 0.5;
-    const current = currentPrices.get(pos.slug) ?? entry;
-    const shares = entry > 0 ? pos.amount / entry : 0;
+    const fillPrice = pos.fill_price ?? 0.5;
+    const isLiveNoBet = pos.side === "sell" && pos.status !== "paper";
+    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+    const currentYes = currentPrices.get(pos.slug) ?? entryYes;
     const pnl = pos.side === "buy"
-      ? (current - entry) * shares
-      : (entry - current) * shares;
-    const realizedValue = current * shares;
+      ? (currentYes - entryYes) * (pos.amount / Math.max(0.01, entryYes))
+      : (entryYes - currentYes) * (pos.amount / Math.max(0.01, 1 - entryYes));
+    const realizedValue = currentYes * (pos.amount / Math.max(0.01, entryYes));
 
     const direction = pos.side === "buy" ? "YES" : "NO";
     const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
@@ -336,9 +337,9 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
       reportId,
       `${pos.slug.toUpperCase()}-${direction}`,
       `${label} — ${direction}`,
-      current,
-      entry,
-      shares,
+      currentYes,
+      entryYes,
+      pos.amount / Math.max(0.01, entryYes),
       "shares",
       parseFloat(pnl.toFixed(2))
     );

@@ -26,8 +26,8 @@ router.get("/prices", (req: Request, res: Response) => {
 
   const sendPrices = async () => {
     try {
-      // Try batch-prices first, fall back to individual calls
-      const args = ["clob", "batch-prices", ...tokens];
+      // batch-prices requires --side and token IDs as a single comma-separated argument
+      const args = ["clob", "batch-prices", "--side", "buy", tokens.join(",")];
       const data = await runCli(args);
       res.write(`event: prices\ndata: ${JSON.stringify({ tokens, prices: data, timestamp: Date.now() })}\n\n`);
     } catch {

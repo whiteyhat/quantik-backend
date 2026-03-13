@@ -440,12 +440,13 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
     `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
   ).get(args.slug) as { probability: number } | undefined;
 
-  const entryPrice = execution.fill_price ?? 0.5;
-  const currentPrice = priceRow?.probability ?? entryPrice;
-  const shares = entryPrice > 0 ? execution.amount / entryPrice : 0;
+  const fillPrice = execution.fill_price ?? 0.5;
+  const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
+  const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+  const currentYes = priceRow?.probability ?? entryYes;
   const pnl = execution.side === "buy"
-    ? (currentPrice - entryPrice) * shares
-    : (entryPrice - currentPrice) * shares;
+    ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
+    : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
 
   const now = Date.now();
   db.prepare(
@@ -456,8 +457,8 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
     slug: args.slug,
     direction: execution.side === "buy" ? "YES" : "NO",
     size: execution.amount,
-    entry_price: entryPrice,
-    exit_price: currentPrice,
+    entry_price: entryYes,
+    exit_price: currentYes,
     pnl: Math.round(pnl * 100) / 100,
     status: "closed",
   };
