@@ -61,6 +61,11 @@ export function createWorker(config: WorkerConfig): Worker {
     {
       ...getConnectionOpts(),
       concurrency: config.concurrency ?? 1,
+      // Lock must outlive the longest possible job execution. Default is 30s,
+      // which is too tight for queues that run every 30s — any slight delay
+      // causes the lock to expire before the job completes, producing
+      // "Missing lock" errors. BullMQ auto-renews at lockDuration/2 (45s here).
+      lockDuration: 90000,
       limiter: {
         max: 1,
         duration: 1000,
@@ -76,6 +81,12 @@ export function createWorker(config: WorkerConfig): Worker {
 
   worker.on("failed", (job, err) => {
     console.error(`[bullmq] ${config.name} job ${job?.id} failed:`, err.message);
+  });
+
+  // Catch worker-level errors (e.g. "Missing lock" on stalled jobs) to prevent
+  // unhandled rejections from surfacing as crashes.
+  worker.on("error", (err) => {
+    console.error(`[bullmq] ${config.name} worker error:`, err.message);
   });
 
   workers.set(config.name, worker);
