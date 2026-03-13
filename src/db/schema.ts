@@ -671,17 +671,6 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN encrypted_wallet_bundle TEXT");
   addColumn(db, "ALTER TABLE byo_onboarding_sessions ADD COLUMN wallet_downloaded_at INTEGER");
 
-  // ── Versions locale columns ───────────────────────────────────────────
-  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_es TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_fr TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_de TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN features_es TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN features_fr TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN features_de TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_es TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_fr TEXT");
-  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_de TEXT");
-
   // ── Chat History (persistent across sessions) ──────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -717,55 +706,38 @@ function migrate(db: Database.Database): void {
     );
   `);
 
-  const insertVersion = db.prepare(`
-    INSERT OR IGNORE INTO versions (version, released_at, features, fixes, highlight)
-    VALUES (?, ?, ?, ?, ?)
+  // Ensure locale columns exist (safe no-op on fresh dbs after CREATE TABLE above)
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_de TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN features_de TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_es TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_fr TEXT");
+  addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_de TEXT");
+
+  // Clean up stale version entries that were renumbered in the v1.x migration
+  db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
+
+  // Seed all versions from the centralized releases-data (single source of truth)
+  const { RELEASES } = require("./releases-data") as typeof import("./releases-data");
+  const upsertVersion = db.prepare(`
+    INSERT OR REPLACE INTO versions
+      (version, released_at, features, fixes, highlight,
+       highlight_es, highlight_fr, highlight_de,
+       features_es, features_fr, features_de,
+       fixes_es, fixes_fr, fixes_de)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const VERSION_SEED = [
-    {
-      version: "v0.0.1", released_at: "2026-02-27", highlight: "Project initialized",
-      features: ["Quantik autonomous Polymarket trading platform","Layer 0–5 architecture (data → signal → execution → monitoring)","Next.js 15 frontend on Vercel","Node/Express backend on Railway","SQLite database with 20+ tables"],
-      fixes: []
-    },
-    {
-      version: "v0.1.0", released_at: "2026-02-27", highlight: "All 5 frontend layers shipped",
-      features: ["L1: Dashboard with live market scanner feed","L2: Signal Generation — RecentSignals wired to /api/signals","L3: Risk panel — circuit breaker, live exposure","L4: Execute Trade wired to /api/execution/order","L5: PerformancePanel, Brier scores, attribution, drift status","Market page full rebuild — live pipeline log, chart, Terminal X design"],
-      fixes: ["Cypress catches TypeError crashes + market page error state","Agent output normalization","circuitBreaker API response normalization"]
-    },
-    {
-      version: "v0.2.0", released_at: "2026-02-28", highlight: "Relay chat + Autopilot dashboard",
-      features: ["Relay SSE streaming — TTFT ~250ms, word-by-word tokens","Autopilot dashboard — scanner feed, execution log, P&L ticker","RelayChat with model badge, latency, agent chips, glassmorphism","Always-visible suggested follow-up question pills","Relay typing indicator"],
-      fixes: ["PipelineLog rewrite — reliable queue drainer, no stale closures","Chart uses clobTokenIds[0] as tokenId","SSE event parsing in runPipeline","Relay system prompt — 50-word limit, humanizer enforced"]
-    },
-    {
-      version: "v0.3.0", released_at: "2026-02-28", highlight: "All 7 specialist agents live",
-      features: ["GAP-1: Real agents in scanner (Oracle, Edge, Sigma, Clause, Aura, Flux)","GAP-2: Performance endpoint with Brier scores","GAP-3: PnL settler (30-min cycle)","GAP-4: Relay pre-warm + heartbeat","GAP-5: Market scoring pipeline","GAP-6: Circuit breaker hardening","Lucifer dynamic per-market devil's advocate analysis","Order ID + Polymarket verification link in alerts"],
-      fixes: ["Flux CLI-only orderbook (removed broken CLOB API fallback)","Scanner INSERT OR REPLACE","Agent field mappings (fractional_kelly, riskLevel, confidence)","Relay: never echo raw JSON in responses"]
-    },
-    {
-      version: "v0.4.0", released_at: "2026-03-01", highlight: "CI gate — 69 tests block every deploy",
-      features: ["Backend: 8 real API contract tests gate Railway deploys","Frontend: Cypress Tier1 (37 tests) + Tier2 (24 tests) gate Vercel deploys","SSE mock pattern with ReadableStream stub","/api/execution/log endpoint","Scanner market coverage expanded"],
-      fixes: ["CI: jest flag --testPathPattern removed in jest 30","Markets GET /:slug normalizes tokenId from Gamma","Price-history returns flat array from CLOB REST API"]
-    },
-    {
-      version: "v0.5.0", released_at: "2026-03-01", highlight: "Full autonomous pipeline with real agents",
-      features: ["Scanner sorts by liquidity (not volume)","Sports/esports markets excluded from scanner","Oracle runs via direct import (no HTTP self-call)","GNews RSS integration for Aura — real-time news, no API key","Synthesized Kelly when Kelly=0 via oracle divergence","Real yesPrice in market_price alert field","FAILED ❌ / LIVE ✅ status labels in alerts"],
-      fixes: ["Edge INSERT OR REPLACE + correlation timeout","Sigma weighted confidence (Oracle×3, Clause×2, Edge×2, Flux×1, Aura×1)","CLI stdout capture (polymarket prints errors to stdout)","Duplicate -o json flag removed","Price rounded to 2dp for CLOB tick size (0.01 minimum)"]
-    },
-    {
-      version: "v0.6.0", released_at: "2026-03-02", highlight: "Persistent SQLite on Railway volume",
-      features: ["Railway persistent volume (/data/quantik.db)","Simulated P&L for paper trades (entry vs current scanner price)","fill_price stored at execution time","CLOB balance health endpoint /api/clob/balance","CLOB allowances set at startup (max_uint256)"],
-      fixes: ["Portfolio summary reads from executions table (not missing trades table)","Trade history returns real executions as trades[]","TS2869 nullish unreachable errors in marketScanner"]
-    },
-    {
-      version: "v0.7.0", released_at: "2026-03-02", highlight: "First live trade placed on Polymarket CLOB",
-      features: ["Market orders (FOK) — fills immediately at market price, no stale bids","USDC.e live wallet funded ($247.59 on Polygon)","BET_NO correctly buys NO token (clobTokenIds[1])","Attribution dashboard reads from executions table","Version changelog system in sidebar"],
-      fixes: ["safeBigInt guard — no more 0x crash on RPC empty response","Flux CLI orderbook→book (correct subcommand)","Removed 4 dead RPCs (polygon-rpc.com, maticvigil, meowrpc, omniatech)","Fixed scanner_results query (removed nonexistent yes_price column)","pnlSettler SQL string literals (single-quotes for status values)"]
-    }
-  ];
-
-  for (const v of VERSION_SEED) {
-    insertVersion.run(v.version, v.released_at, JSON.stringify(v.features), JSON.stringify(v.fixes), v.highlight ?? null);
+  for (const r of RELEASES) {
+    upsertVersion.run(
+      r.version, r.released_at,
+      JSON.stringify(r.features.en), JSON.stringify(r.fixes.en), r.highlight.en,
+      r.highlight.es, r.highlight.fr, r.highlight.de,
+      JSON.stringify(r.features.es), JSON.stringify(r.features.fr), JSON.stringify(r.features.de),
+      JSON.stringify(r.fixes.es), JSON.stringify(r.fixes.fr), JSON.stringify(r.fixes.de),
+    );
   }
 }
