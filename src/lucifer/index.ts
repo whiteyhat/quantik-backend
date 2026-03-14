@@ -64,10 +64,10 @@ export async function runLucifer(slug: string, agentResults?: Record<string, unk
 
     // Build real Gemini counter-thesis — market-specific devil's advocate
     let counterThesis = veto
-      ? `Clause vetoed — resolution criteria are ambiguous. Market may resolve differently than expected.`
+      ? `<strong>Clause vetoed</strong> — resolution criteria are ambiguous. Market may resolve differently than expected.`
       : ambiguityScore > 0.5
-      ? `Resolution ambiguity ${ambiguityScore.toFixed(2)} — criteria could be disputed.`
-      : `Edge requires validation — confirm Kelly is not overfit.`;
+      ? `<strong>Resolution ambiguity</strong> at <em>${ambiguityScore.toFixed(2)}</em> — criteria could be disputed, risking adverse resolution.`
+      : `<strong>Edge requires validation</strong> — confirm Kelly fraction is not overfit to recent data.`;
 
     let worstCase = veto
       ? "Full loss with dispute risk — Clause recommends no position"
@@ -77,7 +77,7 @@ export async function runLucifer(slug: string, agentResults?: Record<string, unk
     if (!veto) {
       try {
         const auraHeadlines = (aura as any)?.newsHeadlines?.slice(0, 2).join("; ") ?? "";
-        const prompt = `You are Lucifer — a ruthless adversarial agent for a prediction market trading system. Your only job is to find the single strongest argument AGAINST this position. You are not balanced. You are adversarial on purpose. Your role is to prevent overconfidence.
+        const prompt = `You are Lucifer — a ruthless adversarial agent for a prediction market trading system. Find the single strongest argument AGAINST this position. You are adversarial on purpose to prevent overconfidence.
 
 POSITION UNDER REVIEW
 Market: ${slug}
@@ -88,17 +88,22 @@ Recent news: ${auraHeadlines || "None"}
 
 ADVERSARIAL HIERARCHY — use the most forceful one that applies:
 1. RESOLUTION RISK: Could this resolve against us due to vague criteria, source failure, or technicality?
-2. INFORMATION RISK: Is our edge from stale, biased, or crowd-contaminated signals? Are we following noise?
+2. INFORMATION RISK: Is our edge from stale, biased, or crowd-contaminated signals?
 3. MODEL RISK: Does a Kelly fraction this size mean overfit or thin data?
 4. TIMING RISK: Could event slippage or time decay erode the edge before resolution?
 
-OUTPUT RULES: 1-2 sentences max. Specific to this market. No generic warnings. No hedging. No preamble. Start directly with the risk.`;
+FORMAT RULES:
+- 80 words MAXIMUM. Be ruthlessly concise.
+- Output as simple HTML. Use <strong> for key risks and <em> for market-specific details. No other tags.
+- NO markdown syntax (no **, no *, no #, no backticks, no bullet points).
+- NO preamble, no hedging. Start directly with the risk.
+- One short paragraph only.`;
         const geminiText = await Promise.race([
           callGemini(prompt),
           new Promise<null>((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000))
         ]) as string | null;
         if (geminiText && geminiText.length > 20) {
-          counterThesis = geminiText.slice(0, 300); // cap at 300 chars
+          counterThesis = geminiText.slice(0, 500);
         }
       } catch { /* fallback to template thesis above */ }
     }
@@ -125,7 +130,7 @@ OUTPUT RULES: 1-2 sentences max. Specific to this market. No generic warnings. N
       data: {
         devils_advocate_score: 0.35,
         bias_flags: ["Data unavailable — applying conservative adversarial penalty"],
-        counter_thesis: "Unable to run full devil's advocate analysis. Treat signal with additional caution.",
+        counter_thesis: "<strong>Analysis unavailable</strong> — unable to run full adversarial review. Treat this signal with additional caution.",
         worst_case: "Full loss if underlying assumptions are wrong",
         adjusted_confidence: -0.08,
         pass: true,

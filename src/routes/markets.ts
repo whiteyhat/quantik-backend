@@ -203,16 +203,25 @@ interface GammaMarketRaw {
   [key: string]: unknown;
 }
 
-/** Gamma returns clobTokenIds as either an array or a JSON-encoded string */
-function parseClobTokenId(raw: unknown): string | null {
-  if (Array.isArray(raw) && raw.length > 0) return String(raw[0]);
-  if (typeof raw === "string") {
+/** Gamma returns clobTokenIds as either an array or a JSON-encoded string.
+ *  Order follows outcomes: ["No","Yes"] → clobTokenIds[0]=NO, [1]=YES */
+function parseClobTokenIds(raw: unknown): { noTokenId: string | null; yesTokenId: string | null } {
+  let arr: string[] = [];
+  if (Array.isArray(raw)) {
+    arr = raw.map(String);
+  } else if (typeof raw === "string") {
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return String(parsed[0]);
+      if (Array.isArray(parsed)) arr = parsed.map(String);
     } catch { /* ignore */ }
   }
-  return null;
+  return {
+    noTokenId: arr[0] ?? null,
+    yesTokenId: arr[1] ?? null,
+  };
+}
+function parseClobTokenId(raw: unknown): string | null {
+  return parseClobTokenIds(raw).noTokenId;
 }
 
 function transformTrendingMarket(raw: GammaMarketRaw): unknown {
@@ -228,6 +237,7 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
   const liquidityGrade =
     liquidity > 50000 ? "A" : liquidity > 10000 ? "B" : liquidity > 1000 ? "C" : "D";
 
+  const tokens = parseClobTokenIds(raw.clobTokenIds);
   return {
     slug: raw.slug ?? raw.conditionId ?? "",
     question: raw.question ?? "",
@@ -236,7 +246,9 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
     volume: raw.volume24hr ?? 0,
     liquidity,
     liquidityGrade,
-    tokenId: parseClobTokenId(raw.clobTokenIds) ?? raw.conditionId ?? "",
+    tokenId: tokens.noTokenId ?? raw.conditionId ?? "",
+    yesTokenId: tokens.yesTokenId ?? raw.conditionId ?? "",
+    noTokenId: tokens.noTokenId ?? raw.conditionId ?? "",
   };
 }
 

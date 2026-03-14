@@ -19,6 +19,28 @@ interface AgentKeyRow {
   encrypted_private_key: string | null;
 }
 
+async function loadAgentRow(agentId: string): Promise<AgentKeyRow | null> {
+  if (isPgEnabled()) {
+    return pgQueryOne<AgentKeyRow>(
+      `SELECT id, wallet_address, encrypted_private_key
+       FROM agents
+       WHERE id = $1`,
+      [agentId]
+    );
+  }
+
+  const db = getDb();
+  return (
+    db
+      .prepare(
+        `SELECT id, wallet_address, encrypted_private_key
+         FROM agents
+         WHERE id = ?`
+      )
+      .get(agentId) as AgentKeyRow | undefined
+  ) ?? null;
+}
+
 async function loadActiveAgentRow(): Promise<AgentKeyRow | null> {
   if (isPgEnabled()) {
     return pgQueryOne<AgentKeyRow>(
@@ -71,6 +93,34 @@ export async function loadActiveAgentContext(): Promise<AgentWalletContext> {
 export async function tryLoadActiveAgentContext(): Promise<AgentWalletContext | null> {
   try {
     return await loadActiveAgentContext();
+  } catch {
+    return null;
+  }
+}
+
+export async function loadAgentWalletContext(agentId: string): Promise<AgentWalletContext> {
+  const row = await loadAgentRow(agentId);
+
+  if (!row) {
+    throw new Error("Agent wallet context not found.");
+  }
+  if (!row.wallet_address) {
+    throw new Error("Agent has no wallet address.");
+  }
+  if (!row.encrypted_private_key) {
+    throw new Error("Agent has no encrypted private key.");
+  }
+
+  return {
+    agentId: row.id,
+    walletAddress: row.wallet_address,
+    privateKey: decrypt(row.encrypted_private_key),
+  };
+}
+
+export async function tryLoadAgentWalletContext(agentId: string): Promise<AgentWalletContext | null> {
+  try {
+    return await loadAgentWalletContext(agentId);
   } catch {
     return null;
   }

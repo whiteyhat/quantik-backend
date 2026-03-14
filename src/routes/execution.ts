@@ -98,7 +98,7 @@ router.post("/dry-run", (req: Request, res: Response) => {
 
     const cliArgs = [
       "clob", "create-order",
-      "--token-id", String(slug),
+      "--token", String(slug),
       "--side", dir,
       "--price", "0.5",
       "--size", String(size),

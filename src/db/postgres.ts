@@ -238,6 +238,7 @@ export async function migratePg(): Promise<void> {
       order_id TEXT,
       market_slug TEXT,
       direction TEXT,
+      source TEXT,
       size REAL,
       price REAL,
       net_ev REAL,
@@ -585,12 +586,14 @@ export async function migratePg(): Promise<void> {
       agent_id UUID,
       slug TEXT NOT NULL,
       side TEXT NOT NULL,
+      direction TEXT,
       amount REAL NOT NULL,
       executed_at BIGINT NOT NULL,
       status TEXT NOT NULL,
       order_id TEXT,
       fill_price REAL,
-      pnl REAL
+      pnl REAL,
+      resolution_date TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
@@ -599,7 +602,41 @@ export async function migratePg(): Promise<void> {
 
   // ── Ensure agent_id column exists BEFORE creating index on it ─────────────
   await safeQuery("executions.agent_id column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS agent_id UUID`);
+  await safeQuery("executions.direction column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS direction TEXT`);
+  await safeQuery("executions.source column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS source TEXT`);
+  await safeQuery("executions.resolution_date column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS resolution_date TEXT`);
   await safeQuery("executions.agent_id index", `CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
+  await safeQuery("executions.agent_slug_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_slug_time ON executions(agent_id, slug, executed_at DESC)`);
+  await safeQuery("executions.agent_source_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_source_time ON executions(agent_id, source, executed_at DESC)`);
+  await safeQuery("executions.legacy unique index", `DROP INDEX IF EXISTS ux_executions_slug_day`);
+  await safeQuery("trades.source column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT`);
+
+  await safeQuery("autopilot policy tables", `
+    CREATE TABLE IF NOT EXISTS autopilot_policies (
+      agent_id TEXT PRIMARY KEY,
+      cadence_minutes INTEGER,
+      cooldown_minutes INTEGER,
+      max_trades_per_day INTEGER,
+      max_bet_usdc REAL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS autopilot_decisions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      user_id TEXT,
+      slug TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      size_usdc REAL,
+      scanned_at BIGINT NOT NULL,
+      policy_snapshot TEXT NOT NULL,
+      signal_snapshot TEXT NOT NULL,
+      error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_autopilot_decisions_agent_time ON autopilot_decisions(agent_id, scanned_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_autopilot_decisions_slug_time ON autopilot_decisions(slug, scanned_at DESC);
+  `);
 
   await safeQuery("backfill executions.agent_id", `
     UPDATE executions
@@ -607,6 +644,20 @@ export async function migratePg(): Promise<void> {
     FROM users
     WHERE executions.user_id = users.id AND executions.agent_id IS NULL
       AND users.agent_id IS NOT NULL
+  `);
+  await safeQuery("backfill executions.source from autopilot decisions", `
+    UPDATE executions
+       SET source = 'autopilot'
+     WHERE source IS NULL
+       AND agent_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+           FROM autopilot_decisions d
+          WHERE d.agent_id = executions.agent_id
+            AND d.slug = executions.slug
+            AND d.decision = 'executed'
+            AND ABS(d.scanned_at - executions.executed_at) <= 1800000
+       )
   `);
 
   // ── Versions / Changelog ──────────────────────────────────────────────────

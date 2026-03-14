@@ -3,13 +3,13 @@ import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runClause } from "../clause/index";
 import { runAura } from "../aura/index";
-import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
-import { getSettings } from "../db/queries";
-import { loadSingleAutopilotExecutionContext } from "../utils/linkedAgent";
-import { insertExecutionRecord } from "../utils/executions";
+import { loadAutopilotExecutionContexts, type AutopilotExecutionContext } from "../utils/linkedAgent";
 import { getWalletFundingSnapshot } from "../utils/balances";
-import { emitAgentAlert, emitTradeExecuted, emitAutopilotStatus } from "../infra/socket";
+import { emitAgentAlert, emitAutopilotStatus } from "../infra/socket";
+import { loadAgentWalletContext } from "../utils/agentKey";
+import { executeManagedTrade, type ManagedTradeDirection } from "../services/tradeExecution";
+import { getAutopilotPolicyEnvelope, insertAutopilotDecision } from "../services/autopilotPolicy";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -29,6 +29,7 @@ export interface ScanResult {
   tokenId?: string;
   noTokenId?: string;
   yesPrice?: number;
+  endDate?: string;
   scannedAt: number;
   sigmaConfidence: number;
   kellyFraction: number;
@@ -60,10 +61,17 @@ interface AgentBundle {
   edge_agent: { fractional_kelly: number; position_size: number; direction: string; kelly_recommended?: number };
   sigma: { confidence: number; decision: string; thesis: string };
   clause: { riskLevel: string; resolutionCriteria: string; veto: boolean; urgent: boolean; ambiguityScore?: number };
+  aura?: { sentimentDelta: number; confidence: number; dataSufficiency: number };
 }
 const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
 const AGENT_CACHE_TTL = 8 * 60 * 1000;
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:3001";
+const DEFAULT_AUTOPILOT_MIN_TRADE_USDC = 1;
+
+function getAutopilotMinTradeUsdc(): number {
+  const parsed = Number(process.env.AUTOPILOT_MIN_TRADE_USDC ?? DEFAULT_AUTOPILOT_MIN_TRADE_USDC);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AUTOPILOT_MIN_TRADE_USDC;
+}
 
 async function fetchWithTimeout(url: string, ms = 8000): Promise<any> {
   const ctrl = new AbortController();
@@ -168,7 +176,17 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
     thesis: `Oracle(pipeline)=${trueProbEstimate.toFixed(2)} market=${yesPrice.toFixed(2)} kelly=${(kellyFrac*100).toFixed(1)}% aura_sentiment=${sentimentDelta.toFixed(2)}. ${clauseData.veto ? "VETOED." : sigmaDecision}`,
   };
 
-  const bundle: AgentBundle = { oracle, edge_agent: edgeData, sigma: sigmaData, clause: clauseData };
+  const bundle: AgentBundle = {
+    oracle,
+    edge_agent: edgeData,
+    sigma: sigmaData,
+    clause: clauseData,
+    aura: {
+      sentimentDelta,
+      confidence: auraConfidence,
+      dataSufficiency: auraDataSufficiency,
+    },
+  };
   agentCache.set(slug, { ts: Date.now(), data: bundle });
 
   return {
@@ -250,6 +268,92 @@ function buildPipelineResult(slug: string, yesPrice: number): {
   };
 }
 
+function getUtcDayStart(ts = Date.now()): number {
+  const day = new Date(ts);
+  day.setUTCHours(0, 0, 0, 0);
+  return day.getTime();
+}
+
+function toManagedDirection(recommendation: ScanResult["recommendation"]): ManagedTradeDirection | null {
+  if (recommendation === "BET_YES") return "YES";
+  if (recommendation === "BET_NO") return "NO";
+  return null;
+}
+
+function getExecutionSignalMetrics(
+  result: ScanResult,
+  useAuraSentiment: boolean
+): { direction: ManagedTradeDirection | null; sigmaConfidence: number } {
+  const pipeline = result.pipelineResult as AgentBundle | undefined;
+  const auraDelta = pipeline?.aura?.sentimentDelta ?? 0;
+  const edgeDirection = pipeline?.edge_agent?.direction === "NO" ? "NO" : "YES";
+  const recommendationDirection = toManagedDirection(result.recommendation);
+  const direction = useAuraSentiment ? recommendationDirection : edgeDirection;
+  const sigmaConfidence = useAuraSentiment
+    ? result.sigmaConfidence
+    : Math.max(0, result.sigmaConfidence - Math.abs(auraDelta) * 0.15);
+  return { direction, sigmaConfidence };
+}
+
+function computeTradeSizeUsdc(
+  availableUsdc: number,
+  kellyFraction: number,
+  maxBetUsdc: number,
+  maxPositionFraction: number,
+  kellyMultiplier: number
+): number {
+  if (!Number.isFinite(availableUsdc) || availableUsdc <= 0) return 0;
+  if (!Number.isFinite(kellyFraction) || kellyFraction <= 0) return 0;
+  const rawSize = availableUsdc * kellyFraction * kellyMultiplier;
+  const maxAllowed = Math.min(maxBetUsdc, availableUsdc * maxPositionFraction, availableUsdc);
+  if (!Number.isFinite(maxAllowed) || maxAllowed <= 0) return 0;
+  const minTradeUsdc = Math.min(getAutopilotMinTradeUsdc(), maxAllowed);
+  return Math.round(Math.min(maxAllowed, Math.max(rawSize, minTradeUsdc)) * 100) / 100;
+}
+
+function buildSignalSnapshot(result: ScanResult, question: string, sigmaConfidence: number, direction: ManagedTradeDirection | null) {
+  return {
+    slug: result.slug,
+    question,
+    recommendation: result.recommendation,
+    direction,
+    sigmaConfidence,
+    kellyFraction: result.kellyFraction,
+    probability: result.probability,
+    yesPrice: result.yesPrice ?? null,
+    tokenId: result.tokenId ?? null,
+    noTokenId: result.noTokenId ?? null,
+    pipelineResult: result.pipelineResult,
+  };
+}
+
+async function logAutopilotDecision(
+  executionContext: AutopilotExecutionContext,
+  result: ScanResult,
+  direction: ManagedTradeDirection,
+  question: string,
+  reasonCode: string,
+  decision: "executed" | "skipped" | "failed",
+  policySnapshot: Awaited<ReturnType<typeof getAutopilotPolicyEnvelope>>,
+  signalSigma: number,
+  sizeUsdc: number | null,
+  error?: string | null
+): Promise<void> {
+  await insertAutopilotDecision({
+    agentId: executionContext.agentId,
+    userId: executionContext.userId,
+    slug: result.slug,
+    direction,
+    decision,
+    reasonCode,
+    sizeUsdc,
+    scannedAt: result.scannedAt,
+    policySnapshot,
+    signalSnapshot: buildSignalSnapshot(result, question, signalSigma, direction),
+    error,
+  });
+}
+
 // ── Scanner class ──────────────────────────────────────────────
 
 export class MarketScanner {
@@ -327,6 +431,7 @@ export class MarketScanner {
           batch.map(async (m) => {
             try {
               const result = await this.runPipelineForMarket(m.slug, m.yesPrice, m.tokenId, m.question, m.noTokenId ?? "");
+              result.endDate = m.endDate || undefined;
               await this.storeScanResult(result, m.question);
               scannedToday++;
               console.log(`[Scanner] ${m.slug}: σ=${result.sigmaConfidence.toFixed(2)} Kelly=${result.kellyFraction.toFixed(2)} rec=${result.recommendation} shouldAlert=${result.shouldAlert}`);
@@ -623,320 +728,299 @@ export class MarketScanner {
 
   async autoExecute(result: ScanResult, question: string): Promise<void> {
     const db = getDb();
-    const settings = getSettings();
-    const paperMode = settings.paper_mode;
-    const maxBet = parseFloat(process.env.MAX_BET_USDC ?? "10");
-    const maxPerDay = parseInt(process.env.MAX_TRADES_PER_DAY ?? "50", 10);
-    const dailyLossLimit = parseFloat(process.env.DAILY_LOSS_LIMIT_USDC ?? "25");
-    const executionContext = await loadSingleAutopilotExecutionContext();
+    const executionContexts = await loadAutopilotExecutionContexts();
 
-    if (!executionContext) {
-      console.log(`[autoExecute] No single linked owner/agent context resolved — skipping ${result.slug}`);
+    if (executionContexts.length === 0) {
+      console.log(`[autoExecute] No active autopilot execution contexts resolved for ${result.slug}`);
       return;
     }
 
-    if (!executionContext.autopilotEnabled) {
-      console.log(`[autoExecute] Autopilot disabled for ${executionContext.agentId} — skipping ${result.slug}`);
-      return;
-    }
+    for (const executionContext of executionContexts) {
+      const policy = await getAutopilotPolicyEnvelope({
+        agentId: executionContext.agentId,
+        personality: executionContext.personality,
+        decision_style: executionContext.decisionStyle,
+        trading_instinct: executionContext.tradingInstinct,
+        time_patience: executionContext.timePatience,
+        money_approach: executionContext.moneyApproach,
+        protection_mindset: executionContext.protectionMindset,
+        market_sense: executionContext.marketSense,
+      });
+      const signalMetrics = getExecutionSignalMetrics(result, policy.effective.useAuraSentiment);
+      const direction = signalMetrics.direction;
 
-    if (executionContext.status !== "active") {
-      console.log(`[autoExecute] Agent ${executionContext.agentId} is ${executionContext.status} — skipping ${result.slug}`);
-      return;
-    }
+      if (!direction) {
+        continue;
+      }
 
-    // Emit signal alert immediately — frontend components update before execution starts
-    emitAgentAlert(executionContext.userId, {
-      type: "signal",
-      title: `${result.recommendation}: ${question.slice(0, 60)}`,
-      message: `Confidence ${(result.sigmaConfidence * 100).toFixed(0)}% · Kelly ${(result.kellyFraction * 100).toFixed(1)}%`,
-      slug: result.slug,
-      confidence: result.sigmaConfidence,
-      timestamp: Date.now(),
-    });
+      emitAgentAlert(executionContext.userId, {
+        type: "signal",
+        title: `${result.recommendation}: ${question.slice(0, 60)}`,
+        message: `Confidence ${(signalMetrics.sigmaConfidence * 100).toFixed(0)}% · Kelly ${(result.kellyFraction * 100).toFixed(1)}%`,
+        slug: result.slug,
+        confidence: signalMetrics.sigmaConfidence,
+        timestamp: Date.now(),
+      });
 
-    const funding = await getWalletFundingSnapshot(executionContext.walletAddress);
-    if (!funding.ready) {
-      console.log(`[autoExecute] Funding check blocked ${result.slug}: ${funding.fundingMessage}`);
-      return;
-    }
+      const walletContext = await loadAgentWalletContext(executionContext.agentId).catch(() => null);
+      const funding = await getWalletFundingSnapshot(executionContext.walletAddress, walletContext?.privateKey);
+      if (!funding.ready) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "funding",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null,
+          funding.fundingMessage
+        );
+        console.log(`[autoExecute] Funding check blocked ${result.slug} for ${executionContext.agentId}: ${funding.fundingMessage}`);
+        continue;
+      }
 
-    // Circuit breaker reads — fail closed on DB errors
-    let tradesRow: { cnt: number };
-    let pnlRow: { total: number };
-    let recent: unknown;
-    const today = new Date(); today.setHours(0,0,0,0);
-    const todayTs = today.getTime();
+      const todayTs = getUtcDayStart();
+      const now = Date.now();
+      const cadenceSince = now - policy.effective.cadenceMinutes * 60_000;
+      const cooldownSince = now - policy.effective.cooldownMinutes * 60_000;
 
-    try {
-      tradesRow = db.prepare(
-        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
+      const latestTrade = db.prepare(
+        "SELECT executed_at FROM executions WHERE agent_id = ? AND source = 'autopilot' AND status IN ('placed', 'paper') ORDER BY executed_at DESC LIMIT 1"
+      ).get(executionContext.agentId) as { executed_at: number } | undefined;
+      if (latestTrade && latestTrade.executed_at >= cadenceSince) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "cadence",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
+
+      const tradesRow = db.prepare(
+        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND source = 'autopilot' AND executed_at >= ? AND status IN ('placed', 'paper')"
       ).get(executionContext.agentId, todayTs) as { cnt: number };
-      pnlRow = db.prepare(
-        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
+      if (tradesRow.cnt >= policy.effective.maxTradesPerDay) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "daily_cap",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
+
+      const pnlRow = db.prepare(
+        "SELECT COALESCE(SUM(COALESCE(pnl, 0)), 0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
       ).get(executionContext.agentId, todayTs) as { total: number };
-      const sixHAgo = Date.now() - 2 * 60 * 60 * 1000; // 2hr rate limit (was 6hr)
-      recent = db.prepare(
-        "SELECT id FROM executions WHERE agent_id = ? AND slug = ? AND executed_at >= ?"
-      ).get(executionContext.agentId, result.slug, sixHAgo);
-    } catch (e) {
-      console.error("[autoExecute] Circuit breaker DB read failed — fail closed:", e);
-      return;
-    }
+      const availableUsdc = funding.clobBalance > 0 ? funding.clobBalance : funding.onChainUsdc;
+      const dailyLossThreshold = availableUsdc * policy.effective.dailyLossLimitPct;
+      if (dailyLossThreshold > 0 && pnlRow.total <= -dailyLossThreshold) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "loss_cap",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
 
-    if (tradesRow.cnt >= maxPerDay) {
-      console.log(`[autoExecute] MAX_TRADES_PER_DAY (${maxPerDay}) reached — skipping ${result.slug}`);
-      return;
-    }
+      const slugRecent = db.prepare(
+        "SELECT executed_at FROM executions WHERE agent_id = ? AND source = 'autopilot' AND slug = ? AND status IN ('placed', 'paper') ORDER BY executed_at DESC LIMIT 1"
+      ).get(executionContext.agentId, result.slug) as { executed_at: number } | undefined;
+      if (slugRecent && slugRecent.executed_at >= cooldownSince) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "cooldown",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
 
-    if (pnlRow.total <= -dailyLossLimit) {
-      console.log(`[autoExecute] DAILY_LOSS_LIMIT hit ($${pnlRow.total.toFixed(2)}) — pausing`);
-      return;
-    }
+      if (signalMetrics.sigmaConfidence < policy.effective.minSigma) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "min_sigma",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
 
-    if (recent) {
-      console.log(`[autoExecute] Rate limit: already traded ${result.slug} in last 2h`);
-      return;
-    }
+      if (result.kellyFraction < policy.effective.minKelly) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "min_kelly",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null
+        );
+        continue;
+      }
 
-    // BET_YES: buy YES token (clobTokenIds[0]); BET_NO: buy NO token (clobTokenIds[1])
-    // Never sell tokens we don't own — always BUY with USDC.e collateral
-    const clobSide = "buy";
+      const amount = computeTradeSizeUsdc(
+        availableUsdc,
+        result.kellyFraction,
+        policy.effective.maxBetUsdc,
+        policy.effective.maxPositionFraction,
+        policy.effective.kellyMultiplier
+      );
+      if (!Number.isFinite(amount) || amount < getAutopilotMinTradeUsdc() || availableUsdc < amount) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "balance",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          amount > 0 ? amount : null
+        );
+        continue;
+      }
 
-    // Kelly amount: NO edge = NO trade. Kelly=0 means skip, not default to $10.
-    // A $10 floor on a zero-edge signal is just gambling — remove it.
-    const portfolioUsdc = parseFloat(process.env.PORTFOLIO_USDC ?? process.env.PORTFOLIO_USDC_FALLBACK ?? "1000");
-    if (result.kellyFraction <= 0) {
-      console.log(`[autoExecute] Kelly=0 on ${result.slug} — no edge, skipping (not gambling)`);
-      return;
-    }
-    const kellyAmount = result.kellyFraction * portfolioUsdc;
-    const amount = Math.max(5, Math.min(kellyAmount, maxBet)); // floor $5 only when kelly > 0
-
-    // Flux liquidity gate: check orderbook depth before CLOB — prevents FOK failures on illiquid markets
-    // FIXED F1: pass the correct tokenId for direction (NO token for BET_NO, YES token for BET_YES)
-    if (!paperMode) {
+      const fluxTokenId = direction === "NO" ? (result.noTokenId || result.tokenId || "") : (result.tokenId || "");
       try {
-        const fluxIsBetNo = result.recommendation === "BET_NO";
-        const fluxTokenId = fluxIsBetNo ? (result.noTokenId || result.tokenId || "") : (result.tokenId || "");
         const fluxUrl = fluxTokenId
           ? `${BACKEND_URL}/api/flux/${result.slug}?tokenId=${encodeURIComponent(fluxTokenId)}`
           : `${BACKEND_URL}/api/flux/${result.slug}`;
         const fluxCheck = await fetch(fluxUrl, { signal: AbortSignal.timeout(8000) });
         if (fluxCheck.ok) {
           const fluxData = await fluxCheck.json() as Record<string, unknown>;
-          if (fluxData?.soft_veto === true) {
-            console.log(`[autoExecute] FLUX soft_veto triggered for ${result.slug} — insufficient liquidity, skipping CLOB`);
-            await insertExecutionRecord({
-              userId: executionContext.userId,
-              agentId: executionContext.agentId,
-              slug: result.slug,
-              side: clobSide,
-              amount,
-              executedAt: Date.now(),
-              status: "skipped_flux",
-            });
-            return;
+          if (fluxData.soft_veto === true) {
+            await logAutopilotDecision(
+              executionContext,
+              result,
+              direction,
+              question,
+              "liquidity",
+              "skipped",
+              policy,
+              signalMetrics.sigmaConfidence,
+              amount
+            );
+            continue;
           }
-          console.log(`[autoExecute] Flux OK for ${result.slug} — liquidity sufficient`);
         }
-      } catch (e) {
-        console.warn(`[autoExecute] Flux check failed — proceeding with caution:`, (e as Error).message);
+      } catch (err) {
+        console.warn(`[autoExecute] Flux check failed for ${result.slug}:`, err instanceof Error ? err.message : err);
       }
-    }
 
-
-
-    if (paperMode) {
-      // Paper mode — log only
-      const entryPrice = Math.max(0.01, Math.min(0.99, result.probability || 0.5));
-      await insertExecutionRecord({
-        userId: executionContext.userId,
-        agentId: executionContext.agentId,
-        slug: result.slug,
-        side: clobSide,
-        amount,
-        executedAt: Date.now(),
-        status: "paper",
-        fillPrice: entryPrice,
-      });
-      console.log(`[autoExecute] PAPER trade: ${result.slug} ${clobSide} $${amount.toFixed(2)}`);
-      const pnlRowP = db.prepare(
-        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
-      ).get(executionContext.agentId, todayTs) as { total: number };
-      const tradeRowP = db.prepare(
-        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
-      ).get(executionContext.agentId, todayTs) as { cnt: number };
-      const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({
-        id: result.slug,
-        slug: result.slug,
-        question,
-        recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
-        sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
-        kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
-        kelly_amount: amount,
-        oracle_prob: isNaN(result.probability) ? 0 : result.probability,
-        market_price: isNaN(result.yesPrice ?? NaN) ? (isNaN(result.probability) ? 0 : result.probability) : result.yesPrice!,
-        edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
-        sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
-        clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
-        clause_summary: "",
-        orderId: "PAPER-MODE",
-        executionStatus: "paper",
-        pnlToday: pnlRowP.total,
-        tradesToday: tradeRowP.cnt,
-      } as any);
-      emitTradeExecuted(executionContext.userId, {
-        orderId: "PAPER-MODE",
-        slug: result.slug,
-        direction: result.recommendation === "BET_YES" ? "BUY_YES" : "BUY_NO",
-        size: amount,
-        price: entryPrice,
-        status: "paper",
-        paper: true,
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
-    // Pre-execution dedup: reject if this slug was already successfully traded today
-    const alreadyTraded = db.prepare(
-      "SELECT id FROM executions WHERE agent_id = ? AND slug = ? AND executed_at >= ? AND status IN ('placed','paper')"
-    ).get(executionContext.agentId, result.slug, todayTs);
-    if (alreadyTraded) {
-      console.log(`[autoExecute] Slug ${result.slug} already traded today — skipping (dedup)`);
-      return;
-    }
-
-    // Live balance guard: check on-chain USDC.e before every order
-    // Prevents spending non-existent balance and burning gas on doomed orders
-    if (!paperMode) {
       try {
-        const balRes = await fetch(`${BACKEND_URL}/api/clob/balance`, { signal: AbortSignal.timeout(5000) });
-        if (balRes.ok) {
-          const balData = await balRes.json() as any;
-          const onChainBalance = parseFloat(balData?.data?.balance ?? "0");
-          if (onChainBalance < amount + 2) { // require balance > bet + $2 buffer
-            console.log(`[autoExecute] Insufficient on-chain balance $${onChainBalance.toFixed(2)} for $${amount.toFixed(2)} bet on ${result.slug} — pausing trading`);
-            return;
-          }
-          console.log(`[autoExecute] Balance check: $${onChainBalance.toFixed(2)} on-chain — OK for $${amount.toFixed(2)} bet`);
+        const tradeResult = await executeManagedTrade({
+          userId: executionContext.userId,
+          agentId: executionContext.agentId,
+          marketSlug: result.slug,
+          direction,
+          source: "autopilot",
+          sizeUsdc: amount,
+          requestedTokenId: direction === "NO" ? (result.noTokenId ?? result.tokenId ?? null) : (result.tokenId ?? null),
+          quotedPrice: direction === "YES"
+            ? (result.yesPrice ?? result.probability ?? null)
+            : (result.yesPrice == null && result.probability == null ? null : 1 - (result.yesPrice ?? result.probability ?? 0.5)),
+          netEv: result.kellyFraction * result.probability,
+          evGrade: signalMetrics.sigmaConfidence >= 0.7 ? "A" : signalMetrics.sigmaConfidence >= 0.5 ? "B" : "C",
+          walletPrivateKey: walletContext?.privateKey ?? null,
+          emitUserId: executionContext.userId,
+        });
+
+        if (!tradeResult.ok) {
+          await logAutopilotDecision(
+            executionContext,
+            result,
+            direction,
+            question,
+            tradeResult.error ? "cli_error" : "balance",
+            "failed",
+            policy,
+            signalMetrics.sigmaConfidence,
+            amount,
+            tradeResult.error ?? null
+          );
+          continue;
         }
-      } catch (e) {
-        console.warn(`[autoExecute] Balance check failed — proceeding with caution:`, (e as Error).message);
-      }
-    }
 
-    // Live execution via polymarket CLI — market orders (FOK, fills immediately at best ask)
-    const { runCli } = await import("../cli");
-    // For BET_YES: buy YES token; for BET_NO: buy NO token (clobTokenIds[1])
-    const isBetYes = result.recommendation === "BET_YES";
-    const yesTokenId = result.tokenId || result.slug;
-    const noTokenId = result.noTokenId || "";
-    const clobTokenId = isBetYes ? yesTokenId : (noTokenId || yesTokenId);
-    // market-order: --amount is USDC for buys (no --price or --size needed)
-    try {
-      const cliArgs = ["clob", "market-order",
-        "--token", clobTokenId,
-        "--side", clobSide,
-        "--amount", amount.toFixed(2),
-        "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa"
-      ];
-      const output = await runCli(cliArgs) as Record<string, unknown>;
-      const orderId = String((output as any)?.id ?? (output as any)?.order_id ?? "unknown");
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "executed",
+          "executed",
+          policy,
+          signalMetrics.sigmaConfidence,
+          amount
+        );
 
-      // Store the ACTUAL token price as fill_price (not oracle prob)
-      // For BET_NO: fill_price = NO token price = 1 - yesPrice
-      // For BET_YES: fill_price = YES token price = yesPrice
-      const yesMarketPrice = result.yesPrice ?? result.probability ?? 0.5;
-      const actualFillPrice = isBetYes
-        ? Math.max(0.01, Math.min(0.99, yesMarketPrice))       // YES token price
-        : Math.max(0.01, Math.min(0.99, 1 - yesMarketPrice));  // NO token price
-      await insertExecutionRecord({
-        userId: executionContext.userId,
-        agentId: executionContext.agentId,
-        slug: result.slug,
-        side: clobSide,
-        amount,
-        executedAt: Date.now(),
-        status: "placed",
-        orderId,
-        fillPrice: actualFillPrice,
-      });
-      console.log(`[autoExecute] LIVE trade placed: ${result.slug} ${clobSide} $${amount.toFixed(2)} orderId=${orderId}`);
-
-      const pnlRow2 = db.prepare(
-        "SELECT COALESCE(SUM(pnl),0) as total FROM executions WHERE agent_id = ? AND executed_at >= ?"
-      ).get(executionContext.agentId, todayTs) as { total: number };
-      const tradeRow2 = db.prepare(
-        "SELECT COUNT(*) as cnt FROM executions WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'"
-      ).get(executionContext.agentId, todayTs) as { cnt: number };
-
-      const { sendSignalAlert } = await import("../alerts/telegramAlert");
-      await sendSignalAlert({
-        id: result.slug,
-        slug: result.slug,
-        question,
-        recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
-        sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
-        kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
-        kelly_amount: amount,
-        oracle_prob: isNaN(result.probability) ? 0 : result.probability,
-        market_price: isNaN(result.yesPrice ?? NaN) ? (isNaN(result.probability) ? 0 : result.probability) : result.yesPrice!,
-        edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
-        sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
-        clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
-        clause_summary: "",
-        orderId,
-        executionStatus: "placed",
-        pnlToday: pnlRow2.total,
-        tradesToday: tradeRow2.cnt,
-      } as any);
-      emitTradeExecuted(executionContext.userId, {
-        orderId,
-        slug: result.slug,
-        direction: result.recommendation === "BET_YES" ? "BUY_YES" : "BUY_NO",
-        size: amount,
-        price: actualFillPrice,
-        status: "placed",
-        paper: false,
-        timestamp: Date.now(),
-      });
-    } catch (err) {
-      await insertExecutionRecord({
-        userId: executionContext.userId,
-        agentId: executionContext.agentId,
-        slug: result.slug,
-        side: clobSide,
-        amount,
-        executedAt: Date.now(),
-        status: "failed",
-      });
-      console.error(`[autoExecute] LIVE trade FAILED for ${result.slug}:`, err);
-      // Still send FYI alert so Carlos knows a signal fired (even though execution failed)
-      try {
         const { sendSignalAlert } = await import("../alerts/telegramAlert");
         await sendSignalAlert({
           id: result.slug,
           slug: result.slug,
           question,
-          recommendation: result.recommendation === "BET_YES" ? "BET YES" : "BET NO",
-          sigma_confidence: isNaN(result.sigmaConfidence) ? 0 : result.sigmaConfidence,
-          kelly_fraction: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
+          recommendation: direction === "YES" ? "BET YES" : "BET NO",
+          sigma_confidence: signalMetrics.sigmaConfidence,
+          kelly_fraction: result.kellyFraction,
           kelly_amount: amount,
-          oracle_prob: isNaN(result.probability) ? 0 : result.probability,
-          market_price: isNaN(result.probability) ? 0 : result.probability,
-          edge: isNaN(result.kellyFraction) ? 0 : result.kellyFraction,
-          sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation} @ ${(result.probability * 100).toFixed(0)}%`,
+          oracle_prob: result.probability,
+          market_price: result.yesPrice ?? result.probability,
+          edge: result.kellyFraction,
+          sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation}`,
           clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
           clause_summary: "",
-          orderId: "FAILED",
-          executionStatus: "failed",
+          orderId: tradeResult.orderId ?? (tradeResult.paper ? "PAPER-MODE" : "UNKNOWN"),
+          executionStatus: tradeResult.status,
           pnlToday: pnlRow.total,
-          tradesToday: tradesRow.cnt,
+          tradesToday: tradesRow.cnt + 1,
         } as any);
-      } catch {}
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "cli_error",
+          "failed",
+          policy,
+          signalMetrics.sigmaConfidence,
+          amount,
+          errorMessage
+        );
+        console.error(`[autoExecute] LIVE trade FAILED for ${result.slug} on ${executionContext.agentId}:`, err);
+      }
     }
   }
 }

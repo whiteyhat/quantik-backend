@@ -1,33 +1,34 @@
 import { Router, Request, Response } from "express";
-import { runCli, runCliWithWallet, CliError } from "../cli";
-import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
+import { runCliWithWallet, CliError } from "../cli";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQueryOne } from "../db/postgres";
-import { decrypt } from "../infra/encryption";
-import { v4 as uuid } from "uuid";
 import { tradeRateLimit } from "../infra/rateLimit";
-import { emitTradeExecuted } from "../infra/socket";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import { loadAgentWalletContext } from "../utils/agentKey";
 import { insertExecutionRecord } from "../utils/executions";
+import { executeManagedTrade } from "../services/tradeExecution";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+  normalizeExecutionDirection,
+} from "../utils/executionDirection";
 
-async function loadAgentPrivateKey(agentId: string): Promise<string | null> {
-  let encryptedKey: string | null = null;
-  if (isPgEnabled()) {
-    const row = await pgQueryOne<{ encrypted_private_key: string | null }>(
-      `SELECT encrypted_private_key FROM agents WHERE id = $1`,
-      [agentId]
-    );
-    encryptedKey = row?.encrypted_private_key ?? null;
-  } else {
-    const db = getDb();
-    const row = db
-      .prepare(`SELECT encrypted_private_key FROM agents WHERE id = ?`)
-      .get(agentId) as { encrypted_private_key: string | null } | undefined;
-    encryptedKey = row?.encrypted_private_key ?? null;
-  }
-  if (!encryptedKey) return null;
-  try { return decrypt(encryptedKey); } catch { return null; }
+type TradeDirection = "YES" | "NO";
+
+function toFiniteNumber(value: unknown): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function resolveRequestedDirection(body: Record<string, unknown>): TradeDirection | null {
+  const explicitDirection = normalizeExecutionDirection(body["direction"]);
+  if (explicitDirection) return explicitDirection;
+
+  const side = typeof body["side"] === "string" ? body["side"].trim().toLowerCase() : null;
+  if (side === "sell") return "NO";
+  if (side === "buy") return "YES";
+  return null;
 }
 
 const router = Router();
@@ -44,39 +45,38 @@ router.get("/", async (req: Request, res: Response) => {
     const executions = linkedAgent
       ? db.prepare("SELECT * FROM executions WHERE agent_id = ? ORDER BY executed_at DESC LIMIT 500").all(linkedAgent.agentId)
       : db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
-    
+
     const priceRows = db.prepare(
       `SELECT s.slug, s.probability FROM scanner_results s
        INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
        ON s.slug = t.slug AND s.scanned_at = t.latest`
     ).all() as any[];
     const livePrice = new Map(priceRows.map(r => [r.slug, r.probability]));
+    const scannerDirections = getLatestScannerDirectionMap();
 
-    const tradeList = executions.map(e => {
-      const fillPrice = e.fill_price ?? 0.5;
-      const isLiveNoBet = e.side === "sell" && e.status !== "paper";
-      const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
-      const currentYes = livePrice.get(e.slug) ?? entryYes;
-      const pnl = e.side === "buy"
-        ? (currentYes - entryYes) * (e.amount / Math.max(0.01, entryYes))
-        : (entryYes - currentYes) * (e.amount / Math.max(0.01, 1 - entryYes));
-      
+    const tradeList = executions.map((execution) => {
+      const scannerDirection = scannerDirections.get(execution.slug);
+      const entryYes = getEntryYesPrice(execution, scannerDirection);
+      const currentYes = livePrice.get(execution.slug) ?? entryYes;
+      const metrics = calculateOpenExecutionMetrics(execution, currentYes, scannerDirection);
+
       let outcome = "OPEN";
-      if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
-      else if (e.status === "failed") outcome = "LOSS";
+      if (execution.pnl !== null) outcome = execution.pnl > 0 ? "WIN" : "LOSS";
+      else if (execution.status === "failed") outcome = "LOSS";
 
       return {
-        id: e.id,
-        slug: e.slug,
-        market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
-        direction: e.side === "buy" ? "YES" : "NO",
-        size: e.amount,
+        id: execution.id,
+        slug: execution.slug,
+        market: execution.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+        direction: metrics.direction,
+        source: execution.source === "autopilot" ? "autopilot" : "manual",
+        size: execution.amount,
         price: entryYes,
         outcome,
-        timestamp: e.executed_at,
-        pnl: e.pnl ?? pnl,
-        orderId: e.order_id,
-        mode: e.status,
+        timestamp: execution.executed_at,
+        pnl: execution.pnl ?? metrics.pnl,
+        orderId: execution.order_id,
+        mode: execution.status,
       };
     });
 
@@ -96,165 +96,71 @@ router.post("/execute", async (req: Request, res: Response) => {
   const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
 
   try {
-    const { tokenId, side, price, size } = req.body as Record<string, unknown>;
-
-    if (
-      tokenId == null ||
-      side == null ||
-      price == null ||
-      size == null
-    ) {
-      res
-        .status(400)
-        .json({ error: "Missing required fields: tokenId, side, price, size" });
-      return;
-    }
-
-    const settings = getSettings();
-
-    if (settings.paper_mode) {
-      // ── Paper trade ────────────────────────────────────────
-      const paperId = `PAPER-${uuid()}`;
-
-      insertPaperTrade({
-        id: paperId,
-        market_id: String(tokenId),
-        side: String(side),
-        size: Number(size),
-        price: Number(price),
-        status: "submitted",
-        created_at: Date.now(),
-        settled_at: null,
-        pnl: null,
-      });
-
-      await insertExecutionRecord({
-        userId,
-        agentId: linkedAgent?.agentId ?? null,
-        slug: typeof req.body["marketSlug"] === "string" ? String(req.body["marketSlug"]) : String(tokenId),
-        side: String(side),
-        amount: Number(size),
-        executedAt: Date.now(),
-        status: "paper",
-        orderId: paperId,
-        fillPrice: Number(price),
-      });
-
-      const paperResult = {
-        orderId: paperId,
-        status: "submitted",
-        paper: true,
-        tokenId,
-        side,
-        price: Number(price),
-        size: Number(size),
-      };
-
-      emitTradeExecuted(getUserId(req), {
-        orderId: paperId,
-        slug: String(tokenId),
-        direction: String(side),
-        size: Number(size),
-        price: Number(price),
-        status: "submitted",
-        paper: true,
-        timestamp: Date.now(),
-      });
-
-      res.json(paperResult);
-      return;
-    }
-
-    // ── Real trade ─────────────────────────────────────────
-    const agentPrivKey = linkedAgent ? await loadAgentPrivateKey(linkedAgent.agentId) : null;
-    const cliArgs = [
-      "clob",
-      "create-order",
-      "--token-id", String(tokenId),
-      "--side", String(side),
-      "--price", String(price),
-      "--size", String(size),
-    ];
-    const rawData = agentPrivKey
-      ? await runCliWithWallet(cliArgs, agentPrivKey)
-      : await runCli(cliArgs);
-
-    const data =
-      rawData !== null && typeof rawData === "object"
-        ? (rawData as Record<string, unknown>)
-        : {};
-
-    const orderId =
-      typeof data["orderID"] === "string"
-        ? data["orderID"]
-        : typeof data["order_id"] === "string"
-        ? data["order_id"]
-        : null;
-
     const body = req.body as Record<string, unknown>;
+    const requestedDirection = resolveRequestedDirection(body);
+    const requestedTokenId =
+      typeof body["tokenId"] === "string" && body["tokenId"].trim()
+        ? body["tokenId"].trim()
+        : null;
+    const requestedSlug =
+      typeof body["marketSlug"] === "string" && body["marketSlug"].trim()
+        ? body["marketSlug"].trim()
+        : null;
+    const size = toFiniteNumber(body["size"]);
 
-    insertTrade({
-      id: uuid(),
-      order_id: orderId,
-      market_slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : "",
-      direction: String(side),
-      size: Number(size),
-      price: Number(price),
-      net_ev:
-        typeof body["netEv"] === "number" ? body["netEv"] : null,
-      ev_grade:
-        typeof body["evGrade"] === "string" ? body["evGrade"] : null,
-      status: "submitted",
-      created_at: Date.now(),
-      pipeline_run_id:
-        typeof body["pipelineRunId"] === "string"
-          ? body["pipelineRunId"]
-          : null,
-    });
-
-    await insertExecutionRecord({
+    if (requestedDirection == null || size == null || size <= 0 || (!requestedTokenId && !requestedSlug)) {
+      res.status(400).json({
+        error: "Missing required fields: size and one of tokenId/marketSlug, plus direction (or legacy side)",
+      });
+      return;
+    }
+    const walletContext = linkedAgent ? await loadAgentWalletContext(linkedAgent.agentId).catch(() => null) : null;
+    const tradeSlug = requestedSlug ?? requestedTokenId ?? "";
+    const result = await executeManagedTrade({
       userId,
       agentId: linkedAgent?.agentId ?? null,
-      slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : String(tokenId),
-      side: String(side),
-      amount: Number(size),
-      executedAt: Date.now(),
-      status: "placed",
-      orderId,
-      fillPrice: Number(price),
+      marketSlug: tradeSlug,
+      direction: requestedDirection,
+      source: "manual",
+      sizeUsdc: size,
+      requestedTokenId,
+      quotedPrice: toFiniteNumber(body["price"]),
+      netEv: typeof body["netEv"] === "number" ? body["netEv"] : null,
+      evGrade: typeof body["evGrade"] === "string" ? body["evGrade"] : null,
+      pipelineRunId: typeof body["pipelineRunId"] === "string" ? body["pipelineRunId"] : null,
+      walletPrivateKey: walletContext?.privateKey ?? null,
+      emitUserId: getUserId(req),
     });
 
-    emitTradeExecuted(getUserId(req), {
-      orderId: orderId ?? "",
-      slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : "",
-      direction: String(side),
-      size: Number(size),
-      price: Number(price),
-      status: "submitted",
-      paper: false,
-      timestamp: Date.now(),
-    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error ?? "Trade execution failed" });
+      return;
+    }
 
-    res.json(rawData);
+    res.json(result.rawData);
   } catch (err: unknown) {
     if (req.body && typeof req.body === "object") {
       const body = req.body as Record<string, unknown>;
+      const requestedDirection = resolveRequestedDirection(body);
+      const requestedSize = toFiniteNumber(body["size"]);
       const tokenId = body["tokenId"];
-      const side = body["side"];
-      const size = body["size"];
-      if (tokenId != null && side != null && size != null) {
+      if ((tokenId != null || body["marketSlug"] != null) && requestedDirection != null && requestedSize != null && requestedSize > 0) {
         try {
           await insertExecutionRecord({
             userId,
             agentId: linkedAgent?.agentId ?? null,
             slug: typeof body["marketSlug"] === "string" ? body["marketSlug"] : String(tokenId),
-            side: String(side),
-            amount: Number(size),
+            side: "buy",
+            direction: requestedDirection,
+            source: "manual",
+            amount: requestedSize,
             executedAt: Date.now(),
             status: "failed",
-            fillPrice: typeof body["price"] === "number" ? body["price"] : Number(body["price"] ?? 0),
+            fillPrice: toFiniteNumber(body["price"]) ?? 0.5,
           });
-        } catch {}
+        } catch {
+          // Do not mask the original trade error.
+        }
       }
     }
     handleCliError(res, err);
@@ -272,10 +178,12 @@ router.post("/cancel", async (req: Request, res: Response) => {
     }
     const userId = await getUserIdAsync(req);
     const linked = userId ? await loadLinkedAgentForUser(userId) : null;
-    const privKey = linked ? await loadAgentPrivateKey(linked.agentId) : null;
-    const data = privKey
-      ? await runCliWithWallet(["clob", "cancel", String(orderId)], privKey)
-      : await runCli(["clob", "cancel", String(orderId)]);
+    const walletContext = linked ? await loadAgentWalletContext(linked.agentId).catch(() => null) : null;
+    if (!walletContext?.privateKey) {
+      res.status(400).json({ error: "No wallet configured." });
+      return;
+    }
+    const data = await runCliWithWallet(["clob", "cancel", String(orderId)], walletContext.privateKey);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);
@@ -287,10 +195,12 @@ router.post("/cancel-all", async (req: Request, res: Response) => {
   try {
     const userId = await getUserIdAsync(req);
     const linked = userId ? await loadLinkedAgentForUser(userId) : null;
-    const privKey = linked ? await loadAgentPrivateKey(linked.agentId) : null;
-    const data = privKey
-      ? await runCliWithWallet(["clob", "cancel-all"], privKey)
-      : await runCli(["clob", "cancel-all"]);
+    const walletContext = linked ? await loadAgentWalletContext(linked.agentId).catch(() => null) : null;
+    if (!walletContext?.privateKey) {
+      res.status(400).json({ error: "No wallet configured." });
+      return;
+    }
+    const data = await runCliWithWallet(["clob", "cancel-all"], walletContext.privateKey);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);

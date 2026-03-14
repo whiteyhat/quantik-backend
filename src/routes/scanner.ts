@@ -3,6 +3,7 @@ import { MarketScanner, getScannerStatus } from "../scanner/marketScanner";
 import { getDb } from "../db/schema";
 import { getCircuitBreaker, getPortfolioManager } from "../risk";
 import { getSettings } from "../db/queries";
+import { getLatestScannerDirectionMap, resolveExecutionDirection } from "../utils/executionDirection";
 
 const router = Router();
 const scanner = new MarketScanner();
@@ -57,13 +58,14 @@ router.get("/results", (req: Request, res: Response) => {
   // When ?executed=true, return data from executions table for the Execution Log
   if (executedOnly) {
     const execRows = db.prepare(
-      "SELECT id, slug, side, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
+      "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
     ).all(since, limit) as any[];
+    const scannerDirections = getLatestScannerDirectionMap();
 
     const results = execRows.map((e: any) => ({
       id: String(e.id),
       slug: e.slug,
-      direction: e.side === "buy" ? "YES" : "NO",
+      direction: resolveExecutionDirection(e, scannerDirections.get(e.slug)).direction,
       amount: e.amount,
       confidence: null, // executions table doesn't store confidence
       status: (e.status ?? "").toUpperCase(),

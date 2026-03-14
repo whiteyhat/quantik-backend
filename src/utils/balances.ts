@@ -164,7 +164,10 @@ export async function getPolBalanceSnapshot(address: string | null | undefined):
   }
 }
 
-export async function getWalletFundingSnapshot(address: string | null | undefined): Promise<WalletFundingSnapshot> {
+export async function getWalletFundingSnapshot(
+  address: string | null | undefined,
+  privateKey?: string | null
+): Promise<WalletFundingSnapshot> {
   if (!address) {
     return {
       address: null,
@@ -179,11 +182,15 @@ export async function getWalletFundingSnapshot(address: string | null | undefine
     };
   }
 
-  const agentCtx = await tryLoadActiveAgentContext();
+  const hasExplicitPrivateKey = privateKey !== undefined;
   const [usdc, pol, clobBalance] = await Promise.all([
     getUsdcBalanceSnapshot(address),
     getPolBalanceSnapshot(address),
-    getClobBalance(agentCtx?.privateKey).catch(() => 0),
+    getClobBalance(privateKey ?? undefined).catch(async () => {
+      if (hasExplicitPrivateKey) return 0;
+      const agentCtx = await tryLoadActiveAgentContext();
+      return getClobBalance(agentCtx?.privateKey).catch(() => 0);
+    }),
   ]);
 
   if (usdc.status !== "live" || pol.status !== "live") {

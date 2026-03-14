@@ -1,9 +1,15 @@
 import { getDb } from "../db/schema";
+import {
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+  resolveExecutionDirection,
+} from "../utils/executionDirection";
 
 interface ExecutionRow {
   id: number;
   slug: string;
   side: string;
+  direction: string | null;
   amount: number;
   executed_at: number;
   status: string;
@@ -21,6 +27,7 @@ export async function settle(): Promise<void> {
   try {
     const db = getDb();
     const rows = db.prepare(`SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`).all() as ExecutionRow[];
+    const scannerDirections = getLatestScannerDirectionMap();
 
     if (rows.length === 0) return;
     console.log(`[pnlSettler] Checking ${rows.length} open positions`);
@@ -37,6 +44,8 @@ export async function settle(): Promise<void> {
         if (!market.resolved) continue;
 
         const resolutionPrice = parseFloat(market.resolutionPrice ?? "0");
+        const scannerDirection = scannerDirections.get(row.slug);
+        const resolvedDirection = resolveExecutionDirection(row, scannerDirection).direction;
 
         // Voided market (resolution price is not 0 or 1)
         if (resolutionPrice !== 0 && resolutionPrice !== 1) {
@@ -55,9 +64,10 @@ export async function settle(): Promise<void> {
             if (Array.isArray(mkt) && mkt[0]) {
               try {
                 const prices = JSON.parse(mkt[0].outcomePrices || "[]");
-                const yesPrice = Number(prices[0] ?? 0.5);
-                // Approximate fill price: if it was a NO bet, fillPrice ≈ 1 - yesPrice at resolution
-                fillPrice = yesPrice < 0.5 ? (1 - yesPrice) : yesPrice;
+                const yesPrice = Number(prices[1] ?? prices[0] ?? 0.5);
+                fillPrice = resolvedDirection === "YES"
+                  ? yesPrice
+                  : (1 - yesPrice);
               } catch { fillPrice = 0.5; }
             }
           }
@@ -68,16 +78,14 @@ export async function settle(): Promise<void> {
           continue;
         }
 
-        // FIXED PS1: Correct PnL using recommendation from scanner_results for direction
-        // For both YES and NO bets: shares = amount / fillPrice; payout = shares * 1.0 when winning
-        const scanRec = db.prepare("SELECT recommendation FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1").get(row.slug) as { recommendation: string } | undefined;
-        const isBetNo = (scanRec?.recommendation === "BET_NO"); // use recommendation as direction source
-        // Fallback direction heuristic: fillPrice > 0.5 → NO token (when oracle prob stored)
-        const isBetNoFallback = !scanRec ? fillPrice > 0.5 : isBetNo;
-        // Win condition: NO bet wins when YES resolves false (resolutionPrice=0); YES bet wins when resolutionPrice=1
-        const weWon = isBetNoFallback ? resolutionPrice === 0 : resolutionPrice === 1;
-        const shares = row.amount / fillPrice;
-        const pnl = weWon ? shares * (1 - fillPrice) : -row.amount;
+        const fillRow = { ...row, fill_price: fillPrice };
+        const entryYesPrice = getEntryYesPrice(fillRow, scannerDirection);
+        const entryTokenPrice = resolvedDirection === "YES"
+          ? entryYesPrice
+          : Math.max(0.01, Math.min(0.99, 1 - entryYesPrice));
+        const weWon = resolvedDirection === "NO" ? resolutionPrice === 0 : resolutionPrice === 1;
+        const shares = row.amount / entryTokenPrice;
+        const pnl = weWon ? shares * (1 - entryTokenPrice) : -row.amount;
 
         db.prepare(`UPDATE executions SET pnl = ?, status = 'settled' WHERE id = ?`).run(pnl, row.id);
         db.prepare(`UPDATE oracle_results SET resolved_correctly = ? WHERE market_slug = ?`).run(pnl > 0 ? 1 : 0, row.slug);

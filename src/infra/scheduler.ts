@@ -6,6 +6,11 @@ import { ResolutionMonitor } from "../monitoring/resolution";
 import { checkByoHealth } from "../monitoring/byoHealth";
 import { getDb } from "../db/schema";
 import { emitPositionUpdate } from "./socket";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 // ── Position Update Emitter ───────────────────────────────────────────────────
 // Periodically computes current P&L for open positions and emits Socket.IO
@@ -15,8 +20,8 @@ async function emitPositionUpdates(): Promise<void> {
   try {
     const db = getDb();
     const positions = db.prepare(
-      "SELECT slug, side, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
-    ).all() as { slug: string; side: string; amount: number; fill_price: number | null }[];
+      "SELECT slug, side, direction, status, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
+    ).all() as { slug: string; side: string; direction: string | null; status: string; amount: number; fill_price: number | null }[];
 
     if (positions.length === 0) return;
 
@@ -26,19 +31,19 @@ async function emitPositionUpdates(): Promise<void> {
        ON s.slug = t.slug AND s.scanned_at = t.latest`
     ).all() as { slug: string; probability: number }[];
     const priceMap = new Map(priceRows.map(r => [r.slug, r.probability]));
+    const scannerDirections = getLatestScannerDirectionMap();
 
     const now = Date.now();
     for (const pos of positions) {
-      const current = priceMap.get(pos.slug) ?? pos.fill_price ?? 0.5;
-      const entry = pos.fill_price ?? 0.5;
-      const shares = entry > 0 ? pos.amount / entry : 0;
-      const pnl = pos.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
-      const pnlPct = pos.amount > 0 ? pnl / pos.amount : 0;
+      const scannerDirection = scannerDirections.get(pos.slug);
+      const currentYes = priceMap.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
+      const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
+      const pnlPct = pos.amount > 0 ? metrics.pnl / pos.amount : 0;
 
       emitPositionUpdate(null, {
         slug: pos.slug,
-        currentPrice: current,
-        pnl,
+        currentPrice: metrics.currentTokenPrice,
+        pnl: metrics.pnl,
         pnlPct,
         timestamp: now,
       });

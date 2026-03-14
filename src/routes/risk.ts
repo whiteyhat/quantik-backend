@@ -1,8 +1,14 @@
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
-import { runCli } from "../cli";
+import { runCliWithWallet } from "../cli";
+import { tryLoadActiveAgentContext } from "../utils/agentKey";
 import { emitAutopilotStatus, emitToAll } from "../infra/socket";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 const router = Router();
 
@@ -260,12 +266,13 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
   });
 
   // 2. Read open positions before we close them
-  const openPositions = db.prepare<[], { id: string; slug: string; side: string; amount: number; fill_price: number | null; order_id: string | null; status: string }>(
-    "SELECT id, slug, side, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+  const openPositions = db.prepare<[], { id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; order_id: string | null; status: string }>(
+    "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
   ).all();
 
   const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
   const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
+  const scannerDirections = getLatestScannerDirectionMap();
 
   const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
 
@@ -278,8 +285,11 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
 
     // Cancel live orders via CLI (best-effort — circuit breaker already tripped above)
     try {
-      await runCli(["clob", "cancel-all"]);
-      cancelledCount += 1; // CLI doesn't return individual count
+      const agentCtx = await tryLoadActiveAgentContext();
+      if (agentCtx) {
+        await runCliWithWallet(["clob", "cancel-all"], agentCtx.privateKey);
+        cancelledCount += 1;
+      }
     } catch (cliErr) {
       console.error("[PANIC] clob cancel-all failed:", cliErr);
       // Do NOT abort — circuit breaker and autopilot disable already took effect
@@ -320,16 +330,12 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
   let totalPnl = 0;
 
   for (const pos of openPositions) {
-    const fillPrice = pos.fill_price ?? 0.5;
-    const isLiveNoBet = pos.side === "sell" && pos.status !== "paper";
-    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
-    const currentYes = currentPrices.get(pos.slug) ?? entryYes;
-    const pnl = pos.side === "buy"
-      ? (currentYes - entryYes) * (pos.amount / Math.max(0.01, entryYes))
-      : (entryYes - currentYes) * (pos.amount / Math.max(0.01, 1 - entryYes));
-    const realizedValue = currentYes * (pos.amount / Math.max(0.01, entryYes));
+    const scannerDirection = scannerDirections.get(pos.slug);
+    const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
+    const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
+    const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
 
-    const direction = pos.side === "buy" ? "YES" : "NO";
+    const direction = metrics.direction;
     const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
     insertItem.run(
@@ -337,20 +343,20 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
       reportId,
       `${pos.slug.toUpperCase()}-${direction}`,
       `${label} — ${direction}`,
-      currentYes,
-      entryYes,
-      pos.amount / Math.max(0.01, entryYes),
+      metrics.currentTokenPrice,
+      metrics.entryTokenPrice,
+      pos.amount / Math.max(0.01, metrics.entryTokenPrice),
       "shares",
-      parseFloat(pnl.toFixed(2))
+      parseFloat(metrics.pnl.toFixed(2))
     );
 
     // Mark position as liquidated with realized PnL
     if (liquidatePositions) {
-      closeExecution.run(parseFloat(pnl.toFixed(2)), pos.id);
+      closeExecution.run(parseFloat(metrics.pnl.toFixed(2)), pos.id);
     }
 
     totalRealizedValue += realizedValue;
-    totalPnl += pnl;
+    totalPnl += metrics.pnl;
   }
 
   // 7. Finalize report

@@ -30,6 +30,7 @@ export interface AuraResult {
   confidence: number;
   sourcesUsed: string[];
   sourceStatus: Record<string, "ok" | "unavailable" | "timeout">;
+  summary: string;
   error?: string;
 }
 
@@ -88,16 +89,31 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
 // Small stagger between API calls to reduce concurrent rate-limit hits
 const stagger = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function fetchAllNews(
-  query: string
-): Promise<{ title: string; publishedAt: string; source?: string; description?: string; url?: string }[]> {
+type NewsArticle = { title: string; publishedAt: string; source?: string; description?: string; url?: string };
+
+interface FetchAllNewsResult {
+  articles: NewsArticle[];
+  perSource: { gnews: "ok" | "empty" | "error"; guardian: "ok" | "empty" | "error"; nyt: "ok" | "empty" | "error" };
+}
+
+// Simple in-memory news cache: query → {articles, perSource, ts}
+const newsCache = new Map<string, { data: FetchAllNewsResult; ts: number }>();
+const NEWS_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+async function fetchAllNews(query: string): Promise<FetchAllNewsResult> {
+  const cacheKey = query.toLowerCase().trim();
+  const cached = newsCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < NEWS_CACHE_TTL) {
+    return cached.data;
+  }
+
   const [gnews, guardian, nyt] = await Promise.allSettled([
     fetchGNews(query, { maxResults: 10, periodDays: 7 }),
     stagger(300).then(() => fetchGuardian(query, { maxResults: 10, daysBack: 7 })),
     stagger(600).then(() => fetchNYT(query, { maxResults: 10, daysBack: 7 })),
   ]);
 
-  const articles: { title: string; publishedAt: string; source?: string; description?: string; url?: string }[] = [];
+  const articles: NewsArticle[] = [];
   const seen = new Set<string>();
 
   const add = (items: { title: string; publishedAt: string; source?: string; description?: string; snippet?: string; url?: string }[]) => {
@@ -116,11 +132,23 @@ async function fetchAllNews(
     }
   };
 
+  const status = (r: PromiseSettledResult<{ title: string }[]>): "ok" | "empty" | "error" =>
+    r.status === "rejected" ? "error" : r.value.length > 0 ? "ok" : "empty";
+
   if (gnews.status === "fulfilled") add(gnews.value);
   if (guardian.status === "fulfilled") add(guardian.value);
   if (nyt.status === "fulfilled") add(nyt.value);
 
-  return articles;
+  const result: FetchAllNewsResult = {
+    articles,
+    perSource: { gnews: status(gnews), guardian: status(guardian), nyt: status(nyt) },
+  };
+
+  if (articles.length > 0) {
+    newsCache.set(cacheKey, { data: result, ts: Date.now() });
+  }
+
+  return result;
 }
 
 export async function runAura(market: { slug: string; question: string; category?: string }): Promise<AuraResult> {
@@ -152,32 +180,40 @@ export async function runAura(market: { slug: string; question: string; category
   };
 
   // --- News: GNews + Guardian + NYT ---
-  let sharedArticles: { title: string; publishedAt: string; source?: string; description?: string; url?: string }[] = [];
+  let sharedArticles: NewsArticle[] = [];
+  let newsPerSource: FetchAllNewsResult["perSource"] = { gnews: "error", guardian: "error", nyt: "error" };
   try {
-    sharedArticles = await runWithTimeout(fetchAllNews(market.question));
+    const newsResult = await runWithTimeout(fetchAllNews(market.question));
+    sharedArticles = newsResult.articles;
+    newsPerSource = newsResult.perSource;
     if (sharedArticles.length === 0) {
       const shortQuery = market.question.split(" ").filter((w) => w.length > 3).slice(0, 3).join(" ");
-      if (shortQuery) sharedArticles = await runWithTimeout(fetchAllNews(shortQuery));
+      if (shortQuery) {
+        const retry = await runWithTimeout(fetchAllNews(shortQuery));
+        sharedArticles = retry.articles;
+        // Merge per-source: upgrade "empty" → "ok" if retry found data
+        if (retry.perSource.gnews === "ok") newsPerSource.gnews = "ok";
+        if (retry.perSource.guardian === "ok") newsPerSource.guardian = "ok";
+        if (retry.perSource.nyt === "ok") newsPerSource.nyt = "ok";
+      }
     }
   } catch {
-    // timeout — sharedArticles stays empty
+    // timeout — sharedArticles stays empty, perSource stays "error"
   }
 
   const fetchNewsData = async () => {
-    if (sharedArticles.length > 0) {
-      // Track which news sources contributed
-      const newsSources = new Set(sharedArticles.map((a) => a.source).filter(Boolean));
-      if (newsSources.has("The Guardian")) { sourceStatus["guardian"] = "ok"; sourcesUsed.push("guardian"); }
-      if (newsSources.has("The New York Times")) { sourceStatus["nyt"] = "ok"; sourcesUsed.push("nyt"); }
-      const hasGNews = sharedArticles.some((a) => !a.source || a.source === "");
-      if (hasGNews || newsSources.size > 0) { sourceStatus["gnews"] = "ok"; if (!sourcesUsed.includes("gnews")) sourcesUsed.push("gnews"); }
-      sourceStatus["news"] = "ok";
-    } else {
-      sourceStatus["guardian"] = "unavailable";
-      sourceStatus["nyt"] = "unavailable";
-      sourceStatus["gnews"] = "unavailable";
-      sourceStatus["news"] = "unavailable";
-    }
+    // Track per-source status from the actual API calls
+    const mapStatus = (s: "ok" | "empty" | "error"): "ok" | "unavailable" | "timeout" =>
+      s === "ok" ? "ok" : s === "empty" ? "unavailable" : "timeout";
+
+    sourceStatus["gnews"] = mapStatus(newsPerSource.gnews);
+    sourceStatus["guardian"] = mapStatus(newsPerSource.guardian);
+    sourceStatus["nyt"] = mapStatus(newsPerSource.nyt);
+
+    if (newsPerSource.gnews === "ok") { if (!sourcesUsed.includes("gnews")) sourcesUsed.push("gnews"); }
+    if (newsPerSource.guardian === "ok") { if (!sourcesUsed.includes("guardian")) sourcesUsed.push("guardian"); }
+    if (newsPerSource.nyt === "ok") { if (!sourcesUsed.includes("nyt")) sourcesUsed.push("nyt"); }
+
     return sharedArticles;
   };
 
@@ -353,7 +389,13 @@ export async function runAura(market: { slug: string; question: string; category
 
   const echoChamberRisk = Math.abs(twitterSentiment) > 0.7 ? 0.8 - dataSufficiency * 0.3 : 0.3;
 
-  const result: AuraResult = {
+  const mappedArticles = newsArticles.slice(0, 5).map((a) => ({
+    title: a.title,
+    url: a.url ?? "",
+    source: a.source ?? "",
+  }));
+
+  const partialResult: Omit<AuraResult, "summary"> = {
     marketSlug: market.slug,
     scoredAt: Date.now(),
     sentimentDelta,
@@ -367,11 +409,7 @@ export async function runAura(market: { slug: string; question: string; category
     telegramBias,
     breakingNews,
     newsHeadlines,
-    newsArticles: newsArticles.slice(0, 5).map((a) => ({
-      title: a.title,
-      url: a.url ?? "",
-      source: a.source ?? "",
-    })),
+    newsArticles: mappedArticles,
     searchTrendSpike,
     searchTrendValue,
     whalePosYesPct,
@@ -381,6 +419,11 @@ export async function runAura(market: { slug: string; question: string; category
     confidence,
     sourcesUsed,
     sourceStatus,
+  };
+
+  const result: AuraResult = {
+    ...partialResult,
+    summary: generateSummary(partialResult),
   };
 
   db.prepare(`
@@ -401,6 +444,57 @@ export async function runAura(market: { slug: string; question: string; category
   );
 
   return result;
+}
+
+function generateSummary(result: Omit<AuraResult, "summary">): string {
+  const parts: string[] = [];
+
+  // Sentiment direction
+  const delta = result.sentimentDelta;
+  if (delta >= 0.5) parts.push("Strong bullish sentiment detected");
+  else if (delta >= 0.15) parts.push("Moderately bullish sentiment detected");
+  else if (delta <= -0.5) parts.push("Strong bearish sentiment detected");
+  else if (delta <= -0.15) parts.push("Moderately bearish sentiment detected");
+  else parts.push("Neutral sentiment");
+
+  // News activity
+  const newsCount = result.newsArticles.length;
+  if (result.breakingNews && newsCount > 0) {
+    parts.push(`breaking news from ${newsCount} source${newsCount > 1 ? "s" : ""}`);
+  } else if (newsCount > 0) {
+    parts.push(`${newsCount} recent article${newsCount > 1 ? "s" : ""} found`);
+  } else {
+    parts.push("no recent news coverage");
+  }
+
+  // Social signals
+  if (result.twitterSentiment > 0.3) parts.push("social signals bullish");
+  else if (result.twitterSentiment < -0.3) parts.push("social signals bearish");
+
+  // Trend
+  if (result.searchTrendSpike) parts.push("search trend spiking");
+
+  // Shift dynamics
+  if (result.shiftDetected) {
+    parts.push(`shift ${result.shiftDirection.toLowerCase()} (${result.shiftTrend.toLowerCase()})`);
+  }
+
+  // Echo chamber warning
+  if (result.echoChamberRisk > 0.6) parts.push("echo chamber risk elevated");
+
+  // Whale positioning
+  if (result.whalePositioning !== "NEUTRAL") {
+    parts.push(`whales positioned ${result.whalePositioning.toLowerCase()}`);
+  }
+
+  // Data quality
+  if (result.dataSufficiency < 0.3) parts.push("limited data available");
+
+  // Confidence
+  parts.push(`confidence ${Math.round(result.confidence * 100)}%`);
+
+  // Join: first part is a sentence, rest are comma-separated clauses
+  return parts[0] + (parts.length > 1 ? " — " + parts.slice(1).join(", ") : "") + ".";
 }
 
 function computeDataSufficiency(socialCount: number, newsCount: number): number {
@@ -447,6 +541,7 @@ function getMockResult(slug: string): AuraResult {
       hackernews: "ok", cryptopanic: "ok", guardian: "ok", nyt: "ok",
       gnews: "ok", trends: "ok", leaderboard: "ok", telegram: "unavailable",
     },
+    summary: "Moderately bullish sentiment detected — breaking news from 2 sources, social signals bullish, search trend spiking, shift yes (accelerating), whales positioned long, confidence 85%.",
   };
 
   const db = getDb();

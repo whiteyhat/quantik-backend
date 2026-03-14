@@ -54,6 +54,7 @@ function migrate(db: Database.Database): void {
       order_id TEXT,
       market_slug TEXT,
       direction TEXT,
+      source TEXT,
       size REAL,
       price REAL,
       net_ev REAL,
@@ -423,6 +424,8 @@ function migrate(db: Database.Database): void {
       agent_id TEXT,
       slug TEXT NOT NULL,
       side TEXT NOT NULL,
+      direction TEXT,
+      source TEXT,
       amount REAL NOT NULL,
       executed_at INTEGER NOT NULL,
       status TEXT NOT NULL,
@@ -436,15 +439,62 @@ function migrate(db: Database.Database): void {
 
   addColumn(db, "ALTER TABLE executions ADD COLUMN user_id TEXT");
   addColumn(db, "ALTER TABLE executions ADD COLUMN agent_id TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN direction TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN source TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN resolution_date TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN source TEXT");
 
   // Create indexes after ensuring columns exist (addColumn above)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent_slug_time ON executions(agent_id, slug, executed_at DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent_source_time ON executions(agent_id, source, executed_at DESC)`);
 
-  // Dedup executions + unique index per slug per day
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS autopilot_policies (
+      agent_id TEXT PRIMARY KEY,
+      cadence_minutes INTEGER,
+      cooldown_minutes INTEGER,
+      max_trades_per_day INTEGER,
+      max_bet_usdc REAL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS autopilot_decisions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      user_id TEXT,
+      slug TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      size_usdc REAL,
+      scanned_at INTEGER NOT NULL,
+      policy_snapshot TEXT NOT NULL,
+      signal_snapshot TEXT NOT NULL,
+      error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_autopilot_decisions_agent_time ON autopilot_decisions(agent_id, scanned_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_autopilot_decisions_slug_time ON autopilot_decisions(slug, scanned_at DESC);
+  `);
+
+  db.exec(`
+    UPDATE executions
+       SET source = 'autopilot'
+     WHERE source IS NULL
+       AND agent_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+           FROM autopilot_decisions d
+          WHERE d.agent_id = executions.agent_id
+            AND d.slug = executions.slug
+            AND d.decision = 'executed'
+            AND ABS(d.scanned_at - executions.executed_at) <= 1800000
+       )
+  `);
+
+  // Legacy migration cleanup: executions must allow multiple rows per slug/day.
   try {
-    db.exec(`DELETE FROM executions WHERE rowid NOT IN (SELECT MIN(rowid) FROM executions GROUP BY slug, DATE(executed_at/1000, 'unixepoch'))`);
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_executions_slug_day ON executions (slug, DATE(executed_at/1000, 'unixepoch'))`);
+    db.exec(`DROP INDEX IF EXISTS ux_executions_slug_day`);
   } catch (e) { console.log("[schema] executions index:", e); }
 
   try {

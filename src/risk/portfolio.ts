@@ -1,6 +1,11 @@
 import { getDb } from "../db/schema";
 import { getUsdcBalance, getClobBalance } from "../utils/balances";
 import { tryLoadActiveAgentContext } from "../utils/agentKey";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -8,6 +13,7 @@ interface ExecutionRow {
   id: number;
   slug: string;
   side: string;
+  direction: string | null;
   amount: number;
   executed_at: number;
   status: string;
@@ -44,19 +50,19 @@ export class PortfolioManager {
     // Fetch current prices from scanner_results for open P&L
     const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
     const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
+    const scannerDirections = getLatestScannerDirectionMap();
 
     return rows.map((r) => {
-      const current = currentPrices.get(r.slug) ?? r.fill_price ?? 0.5;
-      const entry = r.fill_price ?? 0.5;
-      const shares = entry > 0 ? r.amount / entry : 0;
-      const pnl = r.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      const scannerDirection = scannerDirections.get(r.slug);
+      const currentYes = currentPrices.get(r.slug) ?? getEntryYesPrice(r, scannerDirection);
+      const metrics = calculateOpenExecutionMetrics(r, currentYes, scannerDirection);
 
       return {
         slug: r.slug,
-        direction: r.side === "buy" ? "YES" : "NO",
+        direction: metrics.direction,
         sizeUsdc: r.amount,
-        entryPrice: entry,
-        openPnl: pnl,
+        entryPrice: metrics.entryTokenPrice,
+        openPnl: metrics.pnl,
         createdAt: r.executed_at,
       };
     });

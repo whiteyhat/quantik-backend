@@ -60,6 +60,7 @@ export interface Trade {
   order_id: string | null;
   market_slug: string;
   direction: string;
+  source: "autopilot" | "manual";
   size: number;
   price: number;
   net_ev: number | null;
@@ -73,9 +74,9 @@ export function insertTrade(trade: Trade): void {
   const db = getDb();
   db.prepare(`
     INSERT INTO trades
-      (id, order_id, market_slug, direction, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
+      (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
     VALUES
-      (@id, @order_id, @market_slug, @direction, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id)
+      (@id, @order_id, @market_slug, @direction, @source, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id)
   `).run(trade);
 }
 

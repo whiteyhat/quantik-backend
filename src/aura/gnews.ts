@@ -72,12 +72,21 @@ function parseRssItems(xml: string, maxResults: number): GNewsArticle[] {
     const source = extractTag(item, "source");
 
     if (title) {
+      let sourceName = stripHtml(source);
+      // Google News titles often end with " - Source Name"; extract as fallback
+      if (!sourceName) {
+        const cleanTitle = stripHtml(title);
+        const dashIdx = cleanTitle.lastIndexOf(" - ");
+        if (dashIdx > 0 && cleanTitle.length - dashIdx < 60) {
+          sourceName = cleanTitle.slice(dashIdx + 3).trim();
+        }
+      }
       articles.push({
         title: stripHtml(title),
         description: stripHtml(description),
         url: link,
         publishedAt: pubDate,
-        source: stripHtml(source),
+        source: sourceName || "Google News",
       });
     }
   }

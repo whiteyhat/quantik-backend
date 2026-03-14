@@ -15,6 +15,11 @@ import {
   loadTradeHistorySnapshot,
   type ToolExecutionContext,
 } from "./snapshots";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -424,11 +429,11 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
 
   // Find the open execution for this slug belonging to this agent
   const execution = db.prepare(
-    `SELECT id, slug, side, amount, fill_price, status FROM executions
+    `SELECT id, slug, side, direction, amount, fill_price, status FROM executions
      WHERE slug = ? AND agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
      ORDER BY executed_at DESC LIMIT 1`
   ).get(args.slug, context.linkedAgentId) as {
-    id: string; slug: string; side: string; amount: number; fill_price: number | null; status: string;
+    id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; status: string;
   } | undefined;
 
   if (!execution) {
@@ -439,27 +444,25 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
   const priceRow = db.prepare(
     `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
   ).get(args.slug) as { probability: number } | undefined;
-
-  const fillPrice = execution.fill_price ?? 0.5;
-  const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
-  const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
-  const currentYes = priceRow?.probability ?? entryYes;
-  const pnl = execution.side === "buy"
-    ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
-    : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
+  const scannerDirection = getLatestScannerDirectionMap().get(args.slug);
+  const metrics = calculateOpenExecutionMetrics(
+    execution,
+    priceRow?.probability ?? getEntryYesPrice(execution, scannerDirection),
+    scannerDirection
+  );
 
   const now = Date.now();
   db.prepare(
     "UPDATE executions SET status = 'closed', pnl = ?, closed_at = ?, updated_at = ? WHERE id = ?"
-  ).run(Math.round(pnl * 100) / 100, now, now, execution.id);
+  ).run(Math.round(metrics.pnl * 100) / 100, now, now, execution.id);
 
   return {
     slug: args.slug,
-    direction: execution.side === "buy" ? "YES" : "NO",
+    direction: metrics.direction,
     size: execution.amount,
-    entry_price: entryYes,
-    exit_price: currentYes,
-    pnl: Math.round(pnl * 100) / 100,
+    entry_price: metrics.entryTokenPrice,
+    exit_price: metrics.currentTokenPrice,
+    pnl: Math.round(metrics.pnl * 100) / 100,
     status: "closed",
   };
 }

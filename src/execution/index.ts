@@ -94,12 +94,19 @@ export async function execute(
 
   const tokenId = signal.tokenId ?? signal.slug;
   const price = signal.price ?? 0.5;
+  // Polymarket CLOB tick size is 0.01 (max 2 decimal places)
+  const tickPrice = Math.round(price * 100) / 100;
+  // --size is share count, not USDC. Convert: shares = usdc / pricePerShare
+  const shareSize = tickPrice > 0
+    ? Math.floor((size / tickPrice) * 100) / 100
+    : size;
   const cliArgs = [
     "clob", "create-order",
-    "--token-id", tokenId,
-    "--side", signal.direction,
-    "--price", String(price),
-    "--size", String(size),
+    "--token", tokenId,
+    "--side", "buy",
+    "--price", String(tickPrice),
+    "--size", String(shareSize),
+    "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa",
   ];
 
   // Dry-run mode: log the command but don't execute

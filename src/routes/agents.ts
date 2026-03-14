@@ -11,6 +11,12 @@ import { generateWalletCredentials } from "../wallet/generate";
 import { encrypt } from "../infra/encryption";
 import { rateLimit } from "../infra/rateLimit";
 import { checkPolymarketBalance, runPolymarketApprovals } from "../services/polymarket-prep.service";
+import {
+  getAutopilotPolicyEnvelope,
+  listAutopilotDecisions,
+  upsertAutopilotPolicyOverrides,
+} from "../services/autopilotPolicy";
+import { loadAgentWalletContext } from "../utils/agentKey";
 
 const router = Router();
 
@@ -158,6 +164,24 @@ interface OwnedAgentContext extends OwnedAgentRecord {
   webhook_secret: string | null;
   autopilot_enabled: number | boolean | null;
   autopilot_updated_at: number | null;
+  personality: string | null;
+  decision_style: string | null;
+  trading_instinct: string | null;
+  time_patience: string | null;
+  money_approach: string | null;
+  protection_mindset: string | null;
+  market_sense: string | null;
+}
+
+interface AgentPolicySource {
+  id: string;
+  personality: string | null;
+  decision_style: string | null;
+  trading_instinct: string | null;
+  time_patience: string | null;
+  money_approach: string | null;
+  protection_mindset: string | null;
+  market_sense: string | null;
 }
 
 interface UsageStats {
@@ -232,7 +256,8 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   if (isPgEnabled()) {
     return await pgQueryOne<OwnedAgentContext>(
       `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
-              name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at
+              name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+              personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
        FROM agents WHERE id = $1 AND user_id = $2`,
       [agentId, userId]
     );
@@ -241,10 +266,24 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   const db = getDb();
   const agent = db.prepare(
     `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
-            name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at
+            name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+            personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
      FROM agents WHERE id = ? AND user_id = ?`
   ).get(agentId, userId) as OwnedAgentContext | undefined;
   return agent ?? null;
+}
+
+async function buildAutopilotPolicy(agent: AgentPolicySource) {
+  return getAutopilotPolicyEnvelope({
+    agentId: agent.id,
+    personality: agent.personality,
+    decision_style: agent.decision_style,
+    trading_instinct: agent.trading_instinct,
+    time_patience: agent.time_patience,
+    money_approach: agent.money_approach,
+    protection_mindset: agent.protection_mindset,
+    market_sense: agent.market_sense,
+  });
 }
 
 function normalizeAutopilotEnabled(value: number | boolean | null | undefined): boolean {
@@ -580,9 +619,6 @@ router.post("/agents", async (req: Request, res: Response) => {
       db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
     }
 
-    const derivedRisk = deriveRiskConfig(body);
-    applyDerivedRiskConfig(db, derivedRisk);
-
     // Also write to PG when enabled (primary persistent store)
     if (isPgEnabled()) {
       await pgExec(`
@@ -598,9 +634,18 @@ router.post("/agents", async (req: Request, res: Response) => {
       if (userId) {
         await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [id, userId]);
       }
-
-      await applyDerivedRiskConfigPg(derivedRisk);
     }
+
+    const autopilotPolicy = await getAutopilotPolicyEnvelope({
+      agentId: id,
+      personality: body.personality ?? "balanced",
+      decision_style: body.decisionStyle ?? "analyst",
+      trading_instinct: body.tradingInstinct ?? "reversal_spotter",
+      time_patience: body.timePatience ?? "swing",
+      money_approach: body.moneyApproach ?? "smart_scaling",
+      protection_mindset: body.protectionMindset ?? "flexible",
+      market_sense: body.marketSense ?? "fixed_rules",
+    });
 
     res.status(201).json({
       id,
@@ -636,6 +681,7 @@ router.post("/agents", async (req: Request, res: Response) => {
       created_at: now,
       updated_at: now,
       deployed_at: null,
+      autopilot_policy: autopilotPolicy,
     });
   } catch (err) {
     console.error("[agents] create error:", err);
@@ -901,6 +947,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
       (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
     );
+    (agent as Record<string, unknown>).autopilot_policy = await buildAutopilotPolicy(agent as unknown as AgentPolicySource);
 
     res.json(agent);
   } else {
@@ -936,6 +983,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
       (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
     );
+    (agent as Record<string, unknown>).autopilot_policy = await buildAutopilotPolicy(agent as unknown as AgentPolicySource);
 
     res.json(agent);
   }
@@ -1081,7 +1129,8 @@ router.patch("/agents/:id/autopilot", async (req: Request, res: Response) => {
 
   const now = Date.now();
   if (body.enabled) {
-    const funding = await getWalletFundingSnapshot(agent.wallet_address);
+    const walletContext = await loadAgentWalletContext(agentId).catch(() => null);
+    const funding = await getWalletFundingSnapshot(agent.wallet_address, walletContext?.privateKey);
     if (!funding.ready) {
       res.status(409).json({
         error: "AUTOPILOT_FUNDING_REQUIRED",
@@ -1108,6 +1157,76 @@ router.patch("/agents/:id/autopilot", async (req: Request, res: Response) => {
     autopilot_enabled: body.enabled,
     autopilot_updated_at: now,
   });
+});
+
+router.get("/agents/:id/autopilot-policy", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const policy = await buildAutopilotPolicy(agent);
+  res.json(policy);
+});
+
+router.patch("/agents/:id/autopilot-policy", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const body = req.body as {
+    cadenceMinutes?: number | null;
+    cooldownMinutes?: number | null;
+    maxTradesPerDay?: number | null;
+    maxBetUsdc?: number | null;
+  };
+
+  await upsertAutopilotPolicyOverrides(agentId, {
+    cadenceMinutes: body.cadenceMinutes ?? null,
+    cooldownMinutes: body.cooldownMinutes ?? null,
+    maxTradesPerDay: body.maxTradesPerDay ?? null,
+    maxBetUsdc: body.maxBetUsdc ?? null,
+  });
+
+  res.json(
+    await getAutopilotPolicyEnvelope({
+      agentId,
+      personality: agent.personality,
+      decision_style: agent.decision_style,
+      trading_instinct: agent.trading_instinct,
+      time_patience: agent.time_patience,
+      money_approach: agent.money_approach,
+      protection_mindset: agent.protection_mindset,
+      market_sense: agent.market_sense,
+    })
+  );
+});
+
+router.get("/agents/:id/autopilot-decisions", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgent(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+  const decisions = await listAutopilotDecisions(agentId, limit);
+  res.json({ decisions });
 });
 
 // ── POST /api/v1/agents/:id/pause — Pause agent ─────────────

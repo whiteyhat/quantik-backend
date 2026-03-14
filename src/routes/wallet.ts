@@ -4,6 +4,11 @@ import { getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { generateWalletCredentials } from "../wallet/generate";
 import { getUsdcBalanceSnapshot } from "../utils/balances";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 const router = Router();
 
@@ -57,7 +62,7 @@ router.post("/generate", async (req: Request, res: Response) => {
 router.get("/positions", async (_req, res) => {
   try {
     const db = getDb();
-    const rows = db.prepare("SELECT slug, side, amount, fill_price, executed_at FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL").all() as any[];
+    const rows = db.prepare("SELECT slug, side, direction, source, amount, fill_price, status, executed_at, resolution_date FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL").all() as any[];
 
     const priceRows = db.prepare(
       `SELECT s.slug, s.probability FROM scanner_results s
@@ -65,22 +70,24 @@ router.get("/positions", async (_req, res) => {
        ON s.slug = latest.slug AND s.scanned_at = latest.latest`
     ).all() as any[];
     const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
+    const scannerDirections = getLatestScannerDirectionMap();
 
     const positions = rows.map(e => {
-      const current = currentPrices.get(e.slug) ?? e.fill_price ?? 0.5;
-      const entry = e.fill_price ?? 0.5;
-      const shares = entry > 0 ? e.amount / entry : 0;
-      const pnl = e.side === "buy" ? (current - entry) * shares : (entry - current) * shares;
+      const scannerDirection = scannerDirections.get(e.slug);
+      const currentYes = currentPrices.get(e.slug) ?? getEntryYesPrice(e, scannerDirection);
+      const metrics = calculateOpenExecutionMetrics(e, currentYes, scannerDirection);
       return {
         id: `pos-${e.slug}-${e.executed_at}`,
         slug: e.slug,
         market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
-        direction: e.side === "buy" ? "YES" : "NO",
+        direction: metrics.direction,
         size: e.amount,
-        entryPrice: entry,
-        currentPrice: current,
-        pnl: pnl,
-        pnlPct: entry > 0 ? pnl / e.amount : 0
+        entryPrice: metrics.entryTokenPrice,
+        currentPrice: metrics.currentTokenPrice,
+        pnl: metrics.pnl,
+        pnlPct: e.amount > 0 ? metrics.pnl / e.amount : 0,
+        source: e.source === "autopilot" ? "autopilot" : "manual",
+        resolutionDate: e.resolution_date ?? null
       };
     });
 

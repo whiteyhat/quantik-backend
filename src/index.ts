@@ -150,8 +150,14 @@ app.use("/api", skillRouter);
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {
   try {
-    const { runCli } = await import("./cli");
-    const result = await runCli(["clob", "balance", "--asset-type", "collateral"]);
+    const { runCliWithWallet } = await import("./cli");
+    const { tryLoadActiveAgentContext } = await import("./utils/agentKey");
+    const agentCtx = await tryLoadActiveAgentContext();
+    if (!agentCtx) {
+      res.status(503).json({ ok: false, error: "No Polymarket-ready agent found" });
+      return;
+    }
+    const result = await runCliWithWallet(["clob", "balance", "--asset-type", "collateral"], agentCtx.privateKey);
     res.json({ ok: true, data: result });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

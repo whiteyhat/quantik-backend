@@ -34,6 +34,13 @@ export async function fetchCryptoPanic(
       return [];
     }
 
+    // Detect Cloudflare challenge / HTML response
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("json")) {
+      console.warn(`[CryptoPanic] Blocked by Cloudflare (content-type: ${contentType})`);
+      return [];
+    }
+
     const data = await res.json() as {
       results?: {
         title?: string;

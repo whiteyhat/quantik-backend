@@ -103,7 +103,7 @@ export class AttributionEngine {
                 (r.predicted < 0.5 && r.outcome === 0)
             ).length / recent.length
           : 0,
-        recommendation: "Insufficient data (need 10 resolved trades for decay detection).",
+        recommendation: "insufficient_data",
       };
     }
 
@@ -120,8 +120,8 @@ export class AttributionEngine {
       detected,
       rollingHitRate,
       recommendation: detected
-        ? "Alpha decay detected. Consider pausing trades, reviewing model calibration, and checking for market regime change."
-        : "No alpha decay detected. Model performance within acceptable range.",
+        ? "decay_detected"
+        : "no_decay",
     };
   }
 }

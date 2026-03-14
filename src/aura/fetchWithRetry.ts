@@ -20,8 +20,8 @@ export async function fetchWithRetry(
       // Respect Retry-After header, default to exponential backoff
       const retryAfter = res.headers.get("Retry-After");
       const waitMs = retryAfter
-        ? Math.min(parseInt(retryAfter, 10) * 1000 || 2000, 10000)
-        : (attempt + 1) * 2000; // 2s, 4s
+        ? Math.min(parseInt(retryAfter, 10) * 1000 || 3000, 15000)
+        : (attempt + 1) * 3000; // 3s, 6s
       await new Promise((r) => setTimeout(r, waitMs));
       continue;
     }

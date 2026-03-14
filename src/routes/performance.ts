@@ -7,6 +7,11 @@ import { ModelCalibration } from "../monitoring/calibration";
 import { getUserIdAsync } from "../middleware/auth";
 import { loadPortfolioSnapshot, loadToolExecutionContextByAgentId } from "../agents/snapshots";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+} from "../utils/executionDirection";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -56,15 +61,13 @@ router.get("/trades", async (req, res) => {
        ON s.slug = t.slug AND s.scanned_at = t.latest`
     ).all() as any[];
     const livePrice = new Map(priceRows2.map(r => [r.slug, r.probability]));
+    const scannerDirections = getLatestScannerDirectionMap();
 
     const tradeList = executions.map(e => {
-      const fillPrice = e.fill_price ?? 0.5;
-      const isLiveNoBet = e.side === "sell" && e.status !== "paper";
-      const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
+      const scannerDirection = scannerDirections.get(e.slug);
+      const entryYes = getEntryYesPrice(e, scannerDirection);
       const currentYes = livePrice.get(e.slug) ?? entryYes;
-      const pnl = e.side === "buy"
-        ? (currentYes - entryYes) * (e.amount / Math.max(0.01, entryYes))
-        : (entryYes - currentYes) * (e.amount / Math.max(0.01, 1 - entryYes));
+      const metrics = calculateOpenExecutionMetrics(e, currentYes, scannerDirection);
 
       let outcome = "OPEN";
       if (e.pnl !== null) outcome = e.pnl > 0 ? "WIN" : "LOSS";
@@ -74,12 +77,13 @@ router.get("/trades", async (req, res) => {
         id: e.id,
         slug: e.slug,
         market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
-        direction: e.side === "buy" ? "YES" : "NO",
+        direction: metrics.direction,
+        source: e.source === "autopilot" ? "autopilot" : "manual",
         size: e.amount,
         price: entryYes,
         outcome,
         timestamp: e.executed_at,
-        pnl: e.pnl ?? pnl,
+        pnl: e.pnl ?? metrics.pnl,
         orderId: e.order_id,
         mode: e.status,
       };

@@ -4,6 +4,12 @@ import { getCircuitBreaker, getCorrelationMonitor } from "../risk";
 import { getScannerStatus } from "../scanner/marketScanner";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  getLatestScannerDirectionMap,
+  resolveExecutionDirection,
+} from "../utils/executionDirection";
 
 export interface ToolExecutionContext {
   userId: string | null;
@@ -63,6 +69,7 @@ export interface PortfolioSnapshot {
     direction: "YES" | "NO";
     amount: number;
     status: string;
+    source: "autopilot" | "manual";
     executedAt: string;
   }>;
   metrics: {
@@ -363,12 +370,14 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
       agentName: null,
       lastHeartbeat: null,
       agentStatus: null,
+      polymarketReady: false,
     });
   }
 
   const db = getDb();
   const todayStart = new Date().setUTCHours(0, 0, 0, 0);
   const latestPrices = getLatestScannerPriceMap();
+  const scannerDirections = getLatestScannerDirectionMap();
 
   const { tradesToday } = db.prepare(
     `SELECT COUNT(*) AS tradesToday
@@ -383,7 +392,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   ).get(context.linkedAgentId, todayStart) as { realizedToday: number };
 
   const openExecutions = db.prepare(
-    `SELECT id, slug, side, amount, fill_price, status, executed_at
+    `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at
      FROM executions
      WHERE agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
      ORDER BY executed_at DESC`
@@ -391,6 +400,8 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     id: number;
     slug: string;
     side: string;
+    direction: string | null;
+    source: string | null;
     amount: number;
     fill_price: number | null;
     status: string;
@@ -399,26 +410,23 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
 
   let unrealizedToday = 0;
   const positions: PortfolioPositionSnapshot[] = openExecutions.map((execution) => {
-    const fillPrice = execution.fill_price ?? 0.5;
-    // Live NO bets store fill_price as NO token price (1 - yes_price).
-    // Paper NO bets and all YES bets store fill_price as YES probability.
-    // Normalise everything to YES-probability space before computing P&L.
-    const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
-    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
-    const currentYes = latestPrices.get(execution.slug) ?? entryYes;
-    const pnl = execution.side === "buy"
-      ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
-      : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
+    const scannerDirection = scannerDirections.get(execution.slug);
+    const currentYes = latestPrices.get(execution.slug) ?? getEntryYesPrice(execution, scannerDirection);
+    const metrics = calculateOpenExecutionMetrics(
+      execution,
+      currentYes,
+      scannerDirection
+    );
 
-    unrealizedToday += pnl;
+    unrealizedToday += metrics.pnl;
 
     return {
       slug: execution.slug,
-      direction: execution.side === "buy" ? "YES" : "NO",
+      direction: metrics.direction,
       size: round2(execution.amount),
-      entryPrice: round2(entryYes),
-      currentPrice: round2(currentYes),
-      pnl: round2(pnl),
+      entryPrice: round2(metrics.entryTokenPrice),
+      currentPrice: round2(metrics.currentTokenPrice),
+      pnl: round2(metrics.pnl),
     };
   });
 
@@ -452,7 +460,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   ).get(context.linkedAgentId) as { totalVolume: number };
 
   const recentTradeRows = db.prepare(
-    `SELECT id, slug, side, amount, status, executed_at
+    `SELECT id, slug, side, direction, source, amount, status, executed_at
      FROM executions
      WHERE agent_id = ? AND status != 'failed'
      ORDER BY executed_at DESC
@@ -461,6 +469,8 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     id: number;
     slug: string;
     side: string;
+    direction: string | null;
+    source: string | null;
     amount: number;
     status: string;
     executed_at: number;
@@ -469,9 +479,10 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   const recentTrades = recentTradeRows.map((execution) => ({
     id: execution.id,
     slug: execution.slug,
-    direction: execution.side === "buy" ? "YES" as const : "NO" as const,
+    direction: resolveExecutionDirection(execution, scannerDirections.get(execution.slug)).direction,
     amount: round2(execution.amount),
     status: String(execution.status ?? "").toUpperCase(),
+    source: execution.source === "autopilot" ? ("autopilot" as const) : ("manual" as const),
     executedAt: new Date(execution.executed_at).toISOString(),
   }));
 
@@ -639,8 +650,9 @@ export async function loadTradeHistorySnapshot(
   const db = getDb();
   const safeLimit = Math.min(Math.max(1, limit), 50);
   const livePrice = getLatestScannerPriceMap();
+  const scannerDirections = getLatestScannerDirectionMap();
   const executions = db.prepare(
-    `SELECT slug, side, amount, fill_price, status, pnl, executed_at
+    `SELECT slug, side, direction, amount, fill_price, status, pnl, executed_at
      FROM executions
      WHERE agent_id = ?
      ORDER BY executed_at DESC
@@ -648,6 +660,7 @@ export async function loadTradeHistorySnapshot(
   ).all(context.linkedAgentId, safeLimit) as Array<{
     slug: string;
     side: string;
+    direction: string | null;
     amount: number;
     fill_price: number | null;
     status: string;
@@ -656,13 +669,13 @@ export async function loadTradeHistorySnapshot(
   }>;
 
   const trades = executions.map((execution) => {
-    const fillPrice = execution.fill_price ?? 0.5;
-    const isLiveNoBet = execution.side === "sell" && execution.status !== "paper";
-    const entryYes = isLiveNoBet ? 1 - fillPrice : fillPrice;
-    const currentYes = livePrice.get(execution.slug) ?? entryYes;
-    const syntheticPnl = execution.side === "buy"
-      ? (currentYes - entryYes) * (execution.amount / Math.max(0.01, entryYes))
-      : (entryYes - currentYes) * (execution.amount / Math.max(0.01, 1 - entryYes));
+    const scannerDirection = scannerDirections.get(execution.slug);
+    const currentYes = livePrice.get(execution.slug) ?? getEntryYesPrice(execution, scannerDirection);
+    const metrics = calculateOpenExecutionMetrics(
+      execution,
+      currentYes,
+      scannerDirection
+    );
 
     let outcome: "WIN" | "LOSS" | "OPEN" = "OPEN";
     if (execution.pnl != null) outcome = execution.pnl > 0 ? "WIN" : "LOSS";
@@ -670,11 +683,11 @@ export async function loadTradeHistorySnapshot(
 
     return {
       slug: execution.slug,
-      direction: execution.side === "buy" ? "YES" as const : "NO" as const,
+      direction: metrics.direction,
       size: round2(execution.amount),
-      price: round2(entryYes),
+      price: round2(metrics.entryYesPrice),
       outcome,
-      pnl: round2(execution.pnl ?? syntheticPnl),
+      pnl: round2(execution.pnl ?? metrics.pnl),
       timestamp: execution.executed_at,
       mode: execution.status,
     };

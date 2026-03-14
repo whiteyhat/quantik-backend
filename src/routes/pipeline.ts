@@ -229,7 +229,8 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const resolution_date = String(marketRaw.endDateIso ?? marketRaw.endDate ?? new Date(Date.now() + 30*86400000).toISOString());
   const days_to_resolution = Math.max(1, Math.round((new Date(resolution_date).getTime() - Date.now()) / 86400000));
 
-  // clobTokenIds[0]=YES, [1]=NO — needed for both Flux and live execution
+  // Gamma outcomes order: ["No","Yes"] → clobTokenIds[0]=NO, [1]=YES
+  // token_id = first token (used for Flux/price queries), token_id_no = second token
   let token_id: string | undefined;
   let token_id_no: string | undefined;
   const rawTokenIds = marketRaw.clobTokenIds ?? marketRaw.tokenIds;
