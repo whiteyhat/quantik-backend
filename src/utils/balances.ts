@@ -194,6 +194,19 @@ export async function getWalletFundingSnapshot(
   ]);
 
   if (usdc.status !== "live" || pol.status !== "live") {
+    if (hasExplicitPrivateKey && clobBalance > 0) {
+      return {
+        address,
+        onChainUsdc: usdc.balance,
+        pol: pol.balance,
+        clobBalance,
+        usdcStatus: usdc.status,
+        polStatus: pol.status,
+        fundingStatus: "ready",
+        fundingMessage: "Using live Polymarket collateral balance while Polygon balance checks are temporarily unavailable.",
+        ready: true,
+      };
+    }
     return {
       address,
       onChainUsdc: usdc.balance,

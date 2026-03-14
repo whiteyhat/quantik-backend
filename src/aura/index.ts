@@ -3,6 +3,7 @@ import { extractMainKeyword } from "./keywords";
 import { fetchGNews } from "./gnews";
 import { fetchGuardian } from "./guardian";
 import { fetchNYT } from "./nyt";
+import { fetchCoinDesk } from "./coindesk";
 import { fetchHackerNews, scoreHNSentiment } from "./hackernews";
 import { fetchCryptoPanic, scoreCryptoPanic } from "./cryptopanic";
 
@@ -52,11 +53,17 @@ const WEIGHTS = {
   default: parseWeights(process.env.AURA_WEIGHTS_DEFAULT, { social: 1, cryptopanic: 1, news: 1, trends: 1 }),
 };
 
-const timeout = <T>(ms: number): Promise<T> =>
-  new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), ms));
-
 async function runWithTimeout<T>(promise: Promise<T>, ms: number = 20000): Promise<T> {
-  return Promise.race([promise, timeout<T>(ms)]);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("TIMEOUT")), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // Market data cache TTL: 10 mins
@@ -85,15 +92,21 @@ async function getMarketData(slug: string): Promise<{ yesProbability: number; vo
   }
 }
 
-// Aggregate news from GNews + Guardian + NYT in parallel, deduplicated
+// Aggregate news from GNews + Guardian + NYT + CoinDesk in parallel, deduplicated
 // Small stagger between API calls to reduce concurrent rate-limit hits
 const stagger = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type NewsArticle = { title: string; publishedAt: string; source?: string; description?: string; url?: string };
+type NewsSourceFetchStatus = "ok" | "empty" | "error";
 
 interface FetchAllNewsResult {
   articles: NewsArticle[];
-  perSource: { gnews: "ok" | "empty" | "error"; guardian: "ok" | "empty" | "error"; nyt: "ok" | "empty" | "error" };
+  perSource: {
+    gnews: NewsSourceFetchStatus;
+    guardian: NewsSourceFetchStatus;
+    nyt: NewsSourceFetchStatus;
+    coindesk: NewsSourceFetchStatus;
+  };
 }
 
 // Simple in-memory news cache: query → {articles, perSource, ts}
@@ -107,10 +120,11 @@ async function fetchAllNews(query: string): Promise<FetchAllNewsResult> {
     return cached.data;
   }
 
-  const [gnews, guardian, nyt] = await Promise.allSettled([
+  const [gnews, guardian, nyt, coindesk] = await Promise.allSettled([
     fetchGNews(query, { maxResults: 10, periodDays: 7 }),
     stagger(300).then(() => fetchGuardian(query, { maxResults: 10, daysBack: 7 })),
     stagger(600).then(() => fetchNYT(query, { maxResults: 10, daysBack: 7 })),
+    stagger(900).then(() => fetchCoinDesk(query, { maxResults: 10 })),
   ]);
 
   const articles: NewsArticle[] = [];
@@ -138,10 +152,16 @@ async function fetchAllNews(query: string): Promise<FetchAllNewsResult> {
   if (gnews.status === "fulfilled") add(gnews.value);
   if (guardian.status === "fulfilled") add(guardian.value);
   if (nyt.status === "fulfilled") add(nyt.value);
+  if (coindesk.status === "fulfilled") add(coindesk.value);
 
   const result: FetchAllNewsResult = {
     articles,
-    perSource: { gnews: status(gnews), guardian: status(guardian), nyt: status(nyt) },
+    perSource: {
+      gnews: status(gnews),
+      guardian: status(guardian),
+      nyt: status(nyt),
+      coindesk: status(coindesk),
+    },
   };
 
   if (articles.length > 0) {
@@ -179,9 +199,14 @@ export async function runAura(market: { slug: string; question: string; category
     return data;
   };
 
-  // --- News: GNews + Guardian + NYT ---
+  // --- News: GNews + Guardian + NYT + CoinDesk ---
   let sharedArticles: NewsArticle[] = [];
-  let newsPerSource: FetchAllNewsResult["perSource"] = { gnews: "error", guardian: "error", nyt: "error" };
+  let newsPerSource: FetchAllNewsResult["perSource"] = {
+    gnews: "error",
+    guardian: "error",
+    nyt: "error",
+    coindesk: "error",
+  };
   try {
     const newsResult = await runWithTimeout(fetchAllNews(market.question));
     sharedArticles = newsResult.articles;
@@ -195,6 +220,7 @@ export async function runAura(market: { slug: string; question: string; category
         if (retry.perSource.gnews === "ok") newsPerSource.gnews = "ok";
         if (retry.perSource.guardian === "ok") newsPerSource.guardian = "ok";
         if (retry.perSource.nyt === "ok") newsPerSource.nyt = "ok";
+        if (retry.perSource.coindesk === "ok") newsPerSource.coindesk = "ok";
       }
     }
   } catch {
@@ -209,10 +235,12 @@ export async function runAura(market: { slug: string; question: string; category
     sourceStatus["gnews"] = mapStatus(newsPerSource.gnews);
     sourceStatus["guardian"] = mapStatus(newsPerSource.guardian);
     sourceStatus["nyt"] = mapStatus(newsPerSource.nyt);
+    sourceStatus["coindesk"] = mapStatus(newsPerSource.coindesk);
 
     if (newsPerSource.gnews === "ok") { if (!sourcesUsed.includes("gnews")) sourcesUsed.push("gnews"); }
     if (newsPerSource.guardian === "ok") { if (!sourcesUsed.includes("guardian")) sourcesUsed.push("guardian"); }
     if (newsPerSource.nyt === "ok") { if (!sourcesUsed.includes("nyt")) sourcesUsed.push("nyt"); }
+    if (newsPerSource.coindesk === "ok") { if (!sourcesUsed.includes("coindesk")) sourcesUsed.push("coindesk"); }
 
     return sharedArticles;
   };
@@ -300,7 +328,13 @@ export async function runAura(market: { slug: string; question: string; category
   const trends = trendsRes.status === "fulfilled" ? trendsRes.value : { spike: false, value: 50 };
   const marketData = marketRes.status === "fulfilled" ? marketRes.value : { yesProbability: 0.5, volume24h: 0 };
 
-  if (newsRes.status === "rejected") { sourceStatus["guardian"] = "timeout"; sourceStatus["nyt"] = "timeout"; sourceStatus["gnews"] = "timeout"; sourceStatus["news"] = "timeout"; }
+  if (newsRes.status === "rejected") {
+    sourceStatus["guardian"] = "timeout";
+    sourceStatus["nyt"] = "timeout";
+    sourceStatus["gnews"] = "timeout";
+    sourceStatus["coindesk"] = "timeout";
+    sourceStatus["news"] = "timeout";
+  }
   if (hnRes.status === "rejected") sourceStatus["hackernews"] = "timeout";
   if (cpRes.status === "rejected") sourceStatus["cryptopanic"] = "timeout";
   if (trendsRes.status === "rejected") sourceStatus["trends"] = "timeout";
@@ -536,9 +570,10 @@ function getMockResult(slug: string): AuraResult {
     echoChamberRisk: 0.3,
     dataSufficiency: 0.9,
     confidence: 0.85,
-    sourcesUsed: ["hackernews", "cryptopanic", "guardian", "nyt", "gnews", "trends", "leaderboard"],
+    sourcesUsed: ["hackernews", "cryptopanic", "guardian", "nyt", "gnews", "coindesk", "trends", "leaderboard"],
     sourceStatus: {
       hackernews: "ok", cryptopanic: "ok", guardian: "ok", nyt: "ok",
+      coindesk: "ok",
       gnews: "ok", trends: "ok", leaderboard: "ok", telegram: "unavailable",
     },
     summary: "Moderately bullish sentiment detected — breaking news from 2 sources, social signals bullish, search trend spiking, shift yes (accelerating), whales positioned long, confidence 85%.",

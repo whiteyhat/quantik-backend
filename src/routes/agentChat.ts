@@ -68,6 +68,7 @@ interface ChatMessage {
 interface AgentChatRequestBody {
   message: string;
   sessionId?: string;
+  session_id?: string;
   slug?: string;
   locale?: string;
   pipelineData?: Record<string, unknown>;
@@ -1585,7 +1586,7 @@ router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: 
     safeEnd();
   }, 90_000);
 
-  const sessionId = body.sessionId ?? (req.headers["x-session-id"] as string) ?? uuidv4();
+  const sessionId = body.sessionId ?? body.session_id ?? (req.headers["x-session-id"] as string) ?? uuidv4();
 
   // Build messages
   const sessionMessages = getSession(sessionId);

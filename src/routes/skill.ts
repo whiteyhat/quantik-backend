@@ -1,10 +1,77 @@
 import { Router, Request, Response } from "express";
-import { TOOL_DECLARATIONS } from "../agents/tools";
+import {
+  BYO_ERROR_CODES,
+  BYO_RATE_LIMITS,
+  BYO_SCOPES,
+  LEGACY_RELAY_MANIFEST,
+  getPublicToolManifest,
+  type PublicToolManifestEntry,
+} from "../byo/toolManifest";
 import { getBaseUrl } from "../utils/baseUrl";
 
 const router = Router();
 
 // ── GET /api/skill.md — Public skills manifest for BYO agents ───────────────
+
+function toAbsolutePath(baseUrl: string, path: string): string {
+  return `${baseUrl}${path}`;
+}
+
+function renderParameters(tool: PublicToolManifestEntry): string {
+  const properties = tool.parameters.properties ?? {};
+  const propertyLines = Object.entries(properties).map(([name, schema]) => {
+    const enumHint = schema.enum?.length ? ` Allowed: ${schema.enum.join(", ")}.` : "";
+    return `- \`${name}\`: ${schema.description}${enumHint}`;
+  });
+
+  if (propertyLines.length === 0) return "";
+  return `\n\n**Parameters:**\n${propertyLines.join("\n")}`;
+}
+
+function renderToolRequest(tool: PublicToolManifestEntry, baseUrl: string): string {
+  if (tool.method === "GET") {
+    return `\`\`\`\nGET ${toAbsolutePath(baseUrl, tool.path)}\n\`\`\``;
+  }
+
+  const required = tool.parameters.required ?? [];
+  const properties = tool.parameters.properties ?? {};
+  const exampleBody = Object.fromEntries(
+    required.map((key) => {
+      const schema = properties[key];
+      if (schema?.enum?.length) return [key, schema.enum[0]];
+      if (schema?.type === "number") return [key, key === "size" ? 10 : 1];
+      return [key, key === "slug" ? "will-bitcoin-hit-100k" : "example"];
+    })
+  );
+
+  return `\`\`\`\nPOST ${toAbsolutePath(baseUrl, tool.path)}\nContent-Type: application/json\n\n${JSON.stringify(exampleBody, null, 2)}\n\`\`\``;
+}
+
+function generateToolDocs(baseUrl: string): string {
+  return getPublicToolManifest()
+    .filter((tool) => tool.path.startsWith("/api/v1/tools/") && !tool.deprecated)
+    .map((tool) => {
+      const scopeLine = tool.scope ? `\n\n**Requires scope:** \`${tool.scope}\`` : "";
+      return [
+        `### ${tool.name}`,
+        renderToolRequest(tool, baseUrl),
+        tool.description,
+        renderParameters(tool),
+        scopeLine,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function generateLegacyDocs(baseUrl: string): string {
+  const legacy = LEGACY_RELAY_MANIFEST;
+  return [
+    `### ${legacy.name}`,
+    renderToolRequest(legacy, baseUrl),
+    legacy.description,
+    legacy.successorPath ? `\n\nUse \`${legacy.successorPath}\` for all new clients.` : "",
+  ].join("\n");
+}
 
 function generateSkillMd(baseUrl: string): string {
   return `# Quantik Skill Specification
@@ -74,219 +141,7 @@ ${baseUrl}
 \`\`\`
 
 ## Available Tools
-
-### get_portfolio
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_portfolio
-\`\`\`
-Returns your current portfolio: balance, active positions, total P&L, and exposure percentage.
-
-**Example Response:**
-\`\`\`json
-{
-  "success": true,
-  "data": {
-    "totalCapital": 1000.00,
-    "deployedCapital": 250.00,
-    "availableCapital": 750.00,
-    "exposurePct": 25.00,
-    "dailyPnl": 12.50,
-    "positionCount": 2,
-    "positions": [
-      { "slug": "will-btc-hit-100k", "direction": "YES", "size": 150, "entryPrice": 0.45, "currentPrice": 0.52, "pnl": 23.33 }
-    ]
-  }
-}
-\`\`\`
-
-### get_risk_status
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_risk_status
-\`\`\`
-Returns circuit breaker state, drawdown percentage, daily P&L, and risk configuration.
-
-### get_trade_history
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_trade_history?limit=10
-\`\`\`
-Returns recent trades with outcomes (WIN/LOSS/OPEN), P&L, and overall win rate.
-- \`limit\`: Number of trades to return (default 10, max 50)
-
-### search_markets
-\`\`\`
-GET ${baseUrl}/api/v1/tools/search_markets?query=bitcoin&category=crypto
-\`\`\`
-Search for available prediction markets on Polymarket.
-- \`query\`: Search term (optional)
-- \`category\`: Filter by category — \`crypto\`, \`politics\`, \`sports\`, \`pop-culture\`, \`science\`, \`world\`, \`business\` (optional)
-
-Results include volume, liquidity, and YES/NO prices sourced live from Polymarket.
-
-### run_analysis
-\`\`\`
-POST ${baseUrl}/api/v1/tools/run_analysis
-Content-Type: application/json
-
-{ "slug": "will-bitcoin-hit-100k" }
-\`\`\`
-Triggers a full 7-agent pipeline analysis on a specific market.
-Returns decision (BUY/SELL/HOLD), confidence percentage, and run ID.
-
-**Requires scope:** \`analysis\`
-
-### place_trade
-\`\`\`
-POST ${baseUrl}/api/v1/tools/place_trade
-Content-Type: application/json
-
-{ "slug": "will-bitcoin-hit-100k", "direction": "YES", "size": 10 }
-\`\`\`
-Execute a trade on a prediction market. **Fully autonomous — no confirmation needed.**
-- \`slug\`: Market slug
-- \`direction\`: \`"YES"\` or \`"NO"\`
-- \`size\`: Trade size in USDC (max 10,000)
-
-**Requires scope:** \`trade\`
-
-### get_scanner_signals
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_scanner_signals?alerts_only=true
-\`\`\`
-Get recent high-confidence market opportunities detected by the automated scanner.
-- \`alerts_only\`: Set to \`"true"\` to filter to high-confidence alerts only (sigma >= 0.70, kelly >= 0.40)
-
-Each signal includes: slug, direction, confidence, sigma score, kelly fraction, volume, liquidity, and market question.
-
-### get_pipeline_history
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_pipeline_history?limit=5
-\`\`\`
-Get recent pipeline run history with decisions and confidence scores.
-- \`limit\`: Number of runs to return (default 5, max 20)
-
-### get_agent_status
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_agent_status
-\`\`\`
-Get your agent's current status, wallet address, configuration, and connection info.
-
-### heartbeat
-\`\`\`
-POST ${baseUrl}/api/v1/tools/heartbeat
-\`\`\`
-Send a heartbeat to maintain "connected" status. **Call every ~5 minutes.**
-If no heartbeat for 30 minutes with open positions, the owner gets alerted.
-
-### close_position
-\`\`\`
-POST ${baseUrl}/api/v1/tools/close_position
-Content-Type: application/json
-
-{ "slug": "will-bitcoin-hit-100k" }
-\`\`\`
-Close an open position. Computes P&L from current market price and marks the position as closed.
-
-**Requires scope:** \`trade\`
-
-### get_market_price
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_market_price?slug=will-bitcoin-hit-100k
-\`\`\`
-Get current market price for a specific market. Returns YES/NO prices, volume, and liquidity from Polymarket.
-
-### get_risk_config
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_risk_config
-\`\`\`
-Get current risk configuration: drawdown limit, max position size, kelly multiplier, and agent VaR thresholds.
-
-### update_risk_config
-\`\`\`
-POST ${baseUrl}/api/v1/tools/update_risk_config
-Content-Type: application/json
-
-{ "max_position_size": 0.10, "drawdown_limit": 0.15, "kelly_multiplier": 0.25 }
-\`\`\`
-Update risk parameters. All fields are optional — only provided fields are updated.
-Values must be between 0.01 and 1.0.
-
-**Requires scope:** \`config\`
-
-### trigger_scanner
-\`\`\`
-POST ${baseUrl}/api/v1/tools/trigger_scanner
-\`\`\`
-Trigger the orchestrator market scanner to find new trading opportunities.
-Returns number of markets scanned and candidates found.
-
-**Requires scope:** \`analysis\`
-
-### get_pipeline_output
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_pipeline_output?run_id=UUID
-\`\`\`
-Get the full output from all 7 agents in a specific pipeline run.
-Returns detailed analysis from AURA, FLUX, CLAUSE, ORACLE, EDGE, LUCIFER, and SIGMA.
-
-### update_webhook_config
-\`\`\`
-POST ${baseUrl}/api/v1/tools/update_webhook_config
-Content-Type: application/json
-
-{ "endpoint_url": "https://your-server.com/webhook", "webhook_events": ["trade:executed", "agent:alert"] }
-\`\`\`
-Update your webhook endpoint URL and/or event subscriptions.
-Use \`["*"]\` for all events. URL must be HTTPS.
-
-**Requires scope:** \`config\`
-
-### get_health_score
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_health_score
-\`\`\`
-Get your agent's health score (0-100) with grade (A-F) and component breakdown:
-uptime (40%), error rate (30%), latency (20%), connection status (10%).
-
-### get_polymarket_status
-\`\`\`
-GET ${baseUrl}/api/v1/tools/get_polymarket_status
-\`\`\`
-Check the agent's Polymarket wallet readiness. Returns:
-- \`polymarket_status\`: \`"pending_funding"\` | \`"funding_detected"\` | \`"approving"\` | \`"approval_failed"\` | \`"ready"\`
-- \`polymarket_ready\`: boolean — \`true\` only when all 6 approvals have passed
-- Current wallet balances (POL gas + USDC.e)
-- Minimum requirements: 3 POL (gas) + 10 USDC.e (trading capital)
-
-Use this to check readiness before triggering approvals or placing trades.
-
-### run_polymarket_approvals
-\`\`\`
-POST ${baseUrl}/api/v1/tools/run_polymarket_approvals
-\`\`\`
-Submit the 6 required on-chain USDC.e approval transactions to Polymarket's CTF Exchange and Neg-Risk contracts. This is a **write operation that signs and broadcasts real blockchain transactions**.
-
-- Wallet must be funded (3 POL + 10 USDC.e minimum) before calling this
-- Idempotent — safe to retry; already-approved contracts are skipped
-- Takes ~15-30 seconds to confirm all 6 transactions
-- Returns final \`polymarket_status\`: \`"ready"\` on success
-
-**Requires scope:** \`config\`
-
-> **Via agent chat:** Calling \`run_polymarket_approvals\` in the conversational interface returns a \`polymarket_confirm\` SSE event instead of executing — the agent must confirm by calling this REST endpoint explicitly.
-
-### usage
-\`\`\`
-GET ${baseUrl}/api/v1/tools/usage
-\`\`\`
-Get API usage statistics for your agent (60-second server-side cache).
-
-**Response includes:**
-- \`total_requests_24h\` — total API calls in last 24 hours
-- \`requests_last_hour\` — calls in the last 60 minutes
-- \`error_count_24h\` / \`error_rate_24h\` — failed request count and percentage
-- \`by_tool[]\` — per-tool breakdown: request count, avg_latency_ms, error count
-- \`daily_breakdown[]\` — 7-day daily totals with error counts
-- \`recent_errors[]\` — last 10 errors with tool name, status_code, message, timestamp
+${generateToolDocs(baseUrl)}
 
 ## Conversational Interface (SSE)
 
@@ -340,6 +195,10 @@ with requests.post(
             elif evt.get("type") == "done":
                 break
 \`\`\`
+
+## Legacy Compatibility
+
+${generateLegacyDocs(baseUrl)}
 
 ## Scopes
 
@@ -483,6 +342,20 @@ The owner can filter which events are delivered via the \`webhook_events\` setti
 }
 
 function generateSkillJson(baseUrl: string) {
+  const tools = getPublicToolManifest().map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    method: tool.method,
+    path: tool.path,
+    parameters: tool.parameters,
+    scope: tool.scope,
+    rate_limit_bucket: tool.rateLimitBucket,
+    ...(tool.streaming ? { streaming: true } : {}),
+    ...(tool.responseFormat ? { response_format: tool.responseFormat } : {}),
+    ...(tool.deprecated ? { deprecated: true } : {}),
+    ...(tool.successorPath ? { successor_path: tool.successorPath } : {}),
+  }));
+
   return {
     name: "quantik",
     version: "1.0.0",
@@ -501,71 +374,10 @@ function generateSkillJson(baseUrl: string) {
       prefix: "qk_live_",
       header: "Authorization",
     },
-    tools: [
-      ...TOOL_DECLARATIONS.map(t => ({
-        name: t.name,
-        description: t.description,
-        method: ["run_analysis", "place_trade", "heartbeat", "close_position", "update_risk_config", "trigger_scanner", "update_webhook_config"].includes(t.name) ? "POST" : "GET",
-        path: `/api/v1/tools/${t.name}`,
-        parameters: t.parameters,
-        scope: ["place_trade", "close_position"].includes(t.name) ? "trade" :
-               ["run_analysis", "trigger_scanner"].includes(t.name) ? "analysis" :
-               ["update_risk_config", "update_webhook_config"].includes(t.name) ? "config" : "read",
-      })),
-      {
-        name: "get_polymarket_status",
-        description: "Check Polymarket wallet readiness: funding status (POL + USDC balances), approval status, and polymarket_ready flag.",
-        method: "GET",
-        path: "/api/v1/tools/get_polymarket_status",
-        parameters: {},
-        scope: "read",
-      },
-      {
-        name: "run_polymarket_approvals",
-        description: "Submit the 6 on-chain USDC.e approval transactions to Polymarket CTF and Neg-Risk contracts. Requires wallet to be funded. In chat flow, returns a polymarket_confirm event — confirm via this REST endpoint explicitly.",
-        method: "POST",
-        path: "/api/v1/tools/run_polymarket_approvals",
-        parameters: {},
-        scope: "config",
-      },
-      {
-        name: "usage",
-        description: "Get API usage statistics for this agent: 24h totals, per-tool breakdown with avg latency, 7-day daily history, and last 10 errors. Results are cached for 60 seconds.",
-        method: "GET",
-        path: "/api/v1/tools/usage",
-        parameters: {},
-        scope: "read",
-      },
-      {
-        name: "agent_chat",
-        description: "SSE streaming conversational relay. POST a natural-language message and receive a streamed response grounded in live portfolio, scanner, risk, and pipeline data. Emits heartbeat/trace/context/token/trade_confirmation/done/error events. 90s timeout, 30-min session memory.",
-        method: "POST",
-        path: "/api/v1/agent/chat",
-        parameters: {
-          type: "object",
-          properties: {
-            message: { type: "string", description: "Natural language message or query" },
-            session_id: { type: "string", description: "Optional session UUID for conversation memory continuity" },
-          },
-          required: ["message"],
-        },
-        scope: "read",
-        streaming: true,
-        response_format: "text/event-stream",
-      },
-    ],
-    rate_limits: {
-      read: { max: 120, window_ms: 60000 },
-      analysis: { max: 5, window_ms: 60000 },
-      trade: { max: 10, window_ms: 60000 },
-      config: { max: 10, window_ms: 60000 },
-    },
-    scopes: ["read", "trade", "analysis", "config"],
-    error_codes: [
-      "UNAUTHORIZED", "RATE_LIMITED", "SCOPE_DENIED",
-      "CIRCUIT_BREAKER", "AGENT_PAUSED", "AGENT_TERMINATED",
-      "INVALID_PARAMS", "INTERNAL_ERROR", "TIMEOUT",
-    ],
+    tools,
+    rate_limits: BYO_RATE_LIMITS,
+    scopes: BYO_SCOPES,
+    error_codes: [...BYO_ERROR_CODES],
   };
 }
 

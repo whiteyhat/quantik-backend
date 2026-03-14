@@ -14,6 +14,7 @@ const readRateLimit = rateLimit({ windowMs: 60_000, max: 120, keyPrefix: "byo-re
 const tradeToolRateLimit = rateLimit({ windowMs: 60_000, max: 10, keyPrefix: "byo-trade" });
 const analysisRateLimit = rateLimit({ windowMs: 60_000, max: 5, keyPrefix: "byo-analysis" });
 const heartbeatRateLimit = rateLimit({ windowMs: 60_000, max: 60, keyPrefix: "byo-heartbeat" });
+const configRateLimit = rateLimit({ windowMs: 60_000, max: 10, keyPrefix: "byo-config" });
 
 // ── Slug validation ─────────────────────────────────────────────────────────
 
@@ -204,7 +205,7 @@ router.get("/get_risk_config", requireApiKey, requireScope("read"), readRateLimi
   callTool(req, res, "get_risk_config", {});
 });
 
-router.post("/update_risk_config", requireApiKey, requireScope("config"), tradeToolRateLimit, (req: Request, res: Response) => {
+router.post("/update_risk_config", requireApiKey, requireScope("config"), configRateLimit, (req: Request, res: Response) => {
   const { max_position_size, drawdown_limit, kelly_multiplier } = req.body as {
     max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number;
   };
@@ -229,7 +230,7 @@ router.get("/get_pipeline_output", requireApiKey, requireScope("read"), readRate
   callTool(req, res, "get_pipeline_output", { run_id: runId });
 });
 
-router.post("/update_webhook_config", requireApiKey, requireScope("config"), readRateLimit, (req: Request, res: Response) => {
+router.post("/update_webhook_config", requireApiKey, requireScope("config"), configRateLimit, (req: Request, res: Response) => {
   const { endpoint_url, webhook_events } = req.body as { endpoint_url?: string; webhook_events?: string[] };
   // Convert webhook_events array to JSON string for the executor
   const eventsStr = webhook_events ? JSON.stringify(webhook_events) : undefined;
@@ -250,7 +251,7 @@ interface UsageCacheEntry {
 const usageCache = new Map<string, UsageCacheEntry>();
 const USAGE_CACHE_TTL_MS = 60_000; // 60 seconds
 
-router.get("/usage", requireApiKey, readRateLimit, (req: Request, res: Response) => {
+router.get("/usage", requireApiKey, requireScope("read"), readRateLimit, (req: Request, res: Response) => {
   try {
     const agentId = req.apiKeyAgent!.agentId;
     const now = Date.now();
@@ -339,7 +340,7 @@ router.get("/get_polymarket_status", requireApiKey, requireScope("read"), readRa
 // POST /run_polymarket_approvals — directly executes the 6 on-chain approval txns.
 // Unlike the chat tool (which returns a confirmation request), calling this REST endpoint
 // is considered explicit consent — the agent has deliberately invoked it with config scope.
-router.post("/run_polymarket_approvals", requireApiKey, requireScope("config"), tradeToolRateLimit, async (req: Request, res: Response) => {
+router.post("/run_polymarket_approvals", requireApiKey, requireScope("config"), configRateLimit, async (req: Request, res: Response) => {
   const { agentId, userId } = req.apiKeyAgent!;
   const start = Date.now();
   try {

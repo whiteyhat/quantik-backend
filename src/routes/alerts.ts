@@ -43,23 +43,43 @@ router.post("/telegram/callback", async (req: Request, res: Response) => {
 });
 
 // ── GET /api/alerts/status ────────────────────────────────────────────────
-router.get("/status", (_req: Request, res: Response) => {
+router.get("/status", (req: Request, res: Response) => {
   try {
     const db   = getDb();
-    const rows = db.prepare(`
-      SELECT pr.id, pr.market_slug AS slug, pr.market_question AS question,
-             pr.confidence, pr.signal_state, pr.alert_sent, pr.created_at
-      FROM pipeline_runs pr
-      WHERE pr.alert_sent != 0
-      ORDER BY pr.created_at DESC
-      LIMIT 25
-    `).all();
+    const slug = typeof req.query.slug === "string" ? req.query.slug : null;
+
+    let rows;
+    if (slug) {
+      rows = db.prepare(`
+        SELECT pr.id, pr.market_slug AS slug, pr.market_question AS question,
+               pr.confidence, pr.signal_state, pr.alert_sent, pr.created_at
+        FROM pipeline_runs pr
+        WHERE pr.alert_sent != 0 AND pr.market_slug = ?
+        ORDER BY pr.created_at DESC
+        LIMIT 1
+      `).all(slug);
+    } else {
+      rows = db.prepare(`
+        SELECT pr.id, pr.market_slug AS slug, pr.market_question AS question,
+               pr.confidence, pr.signal_state, pr.alert_sent, pr.created_at
+        FROM pipeline_runs pr
+        WHERE pr.alert_sent != 0
+        ORDER BY pr.created_at DESC
+        LIMIT 25
+      `).all();
+    }
 
     const muteRow   = db.prepare("SELECT value FROM settings_kv WHERE key = 'mute_until'").get() as { value: string } | undefined;
     const mutedUntil = muteRow ? parseInt(muteRow.value, 10) : 0;
     const isMuted    = mutedUntil > Date.now();
 
-    res.json({ alerts: rows, muted: isMuted, mutedUntil: isMuted ? mutedUntil : null });
+    // Check if Telegram is configured
+    const tgRows = db.prepare("SELECT key, value FROM settings_kv WHERE key IN ('telegram_chat_id', 'telegram_bot_token')").all() as { key: string; value: string }[];
+    const tgSettings: Record<string, string> = {};
+    tgRows.forEach(r => tgSettings[r.key] = r.value);
+    const telegramConfigured = !!(tgSettings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN);
+
+    res.json({ alerts: rows, muted: isMuted, mutedUntil: isMuted ? mutedUntil : null, telegramConfigured });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

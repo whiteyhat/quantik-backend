@@ -3,6 +3,14 @@ import { v4 as uuidv4 } from "uuid";
 
 const router = Router();
 
+const LEGACY_RELAY_SUNSET = "Tue, 30 Jun 2026 00:00:00 GMT";
+
+function setLegacyRelayHeaders(res: Response) {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Sunset", LEGACY_RELAY_SUNSET);
+  res.setHeader("Link", '</api/v1/agent/chat>; rel="successor-version"');
+}
+
 // ── Types ──────────────────────────────────────────────────────
 
 interface OllamaMessage {
@@ -269,6 +277,7 @@ async function fetchAgentData(
 // ── POST /api/relay/chat ───────────────────────────────────────
 
 router.post("/chat", async (req: Request, res: Response) => {
+  setLegacyRelayHeaders(res);
   const start = Date.now();
   const body = req.body as RelayRequestBody;
 
@@ -339,6 +348,7 @@ router.post("/chat", async (req: Request, res: Response) => {
 // ── POST /api/relay/stream ─────────────────────────────────────
 
 router.post("/stream", async (req: Request, res: Response) => {
+  setLegacyRelayHeaders(res);
   const start = Date.now();
   const body = req.body as RelayRequestBody;
 

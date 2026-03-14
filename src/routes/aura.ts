@@ -5,23 +5,32 @@ import { fetchMarketBySlug, withTimeout } from "../utils/market-fetch";
 
 export const auraRouter = Router();
 
-auraRouter.get("/status", (req, res) => {
+function getAuraSourceAvailability() {
+  return {
+    hackernews: !!process.env.ALGOLIA_HN_API_KEY,
+    guardian: !!process.env.GUARDIAN_API_KEY,
+    nyt: !!process.env.NYT_API_KEY,
+    cryptopanic: !!process.env.CRYPTOPANIC_API_KEY,
+    coindesk: !!process.env.COINDESK_API_KEY,
+    gnews: true, // no key required
+    newsApiLegacy: !!process.env.NEWS_API_KEY,
+  };
+}
+
+export function buildAuraStatusResponse() {
   const db = getDb();
   const totalRuns = db.prepare("SELECT COUNT(*) as c FROM aura_results").get() as { c: number };
   const lastRun = db.prepare("SELECT scored_at FROM aura_results ORDER BY scored_at DESC LIMIT 1").get() as { scored_at: number } | undefined;
 
-  res.json({
-    sources: {
-      hackernews: !!process.env.ALGOLIA_HN_API_KEY,
-      guardian: !!process.env.GUARDIAN_API_KEY,
-      nyt: !!process.env.NYT_API_KEY,
-      cryptopanic: !!process.env.CRYPTOPANIC_API_KEY,
-      gnews: true, // no key required
-      newsApiLegacy: !!process.env.NEWS_API_KEY,
-    },
+  return {
+    sources: getAuraSourceAvailability(),
     lastRunAt: lastRun?.scored_at || null,
     totalRuns: totalRuns.c || 0,
-  });
+  };
+}
+
+auraRouter.get("/status", (req, res) => {
+  res.json(buildAuraStatusResponse());
 });
 
 auraRouter.post("/run", (req, res) => {
