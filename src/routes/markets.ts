@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
 
 const router = Router();
 
@@ -26,8 +27,16 @@ function cacheKey(category: string | undefined): string {
   return `markets:${category ?? "all"}`;
 }
 
-function readCache(key: string): { data: unknown[]; cachedAt: number } | null {
+async function readCache(key: string): Promise<{ data: unknown[]; cachedAt: number } | null> {
   try {
+    if (isPgEnabled()) {
+      const row = await pgQueryOne<MarketsCacheRow>(
+        "SELECT * FROM markets_cache WHERE key = $1", [key]
+      );
+      if (!row) return null;
+      const data = JSON.parse(row.data) as unknown[];
+      return { data, cachedAt: row.cached_at };
+    }
     const db = getDb();
     const row = db
       .prepare<[string], MarketsCacheRow>(
@@ -42,8 +51,15 @@ function readCache(key: string): { data: unknown[]; cachedAt: number } | null {
   }
 }
 
-function writeCache(key: string, data: unknown[]): void {
+async function writeCache(key: string, data: unknown[]): Promise<void> {
   try {
+    if (isPgEnabled()) {
+      await pgExec(
+        "INSERT INTO markets_cache (key, data, cached_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, cached_at = EXCLUDED.cached_at",
+        [key, JSON.stringify(data), Date.now()]
+      );
+      return;
+    }
     const db = getDb();
     db.prepare(
       `INSERT OR REPLACE INTO markets_cache (key, data, cached_at) VALUES (?, ?, ?)`
@@ -199,8 +215,26 @@ interface GammaMarketRaw {
   question?: string;
   outcomePrices?: string;
   volume24hr?: number;
+  volume?: number;
   liquidity?: number;
+  endDate?: string;
+  endDateIso?: string;
+  end_date_iso?: string;
+  category?: string;
+  tags?: GammaTag[];
+  eventTags?: GammaTag[];
   [key: string]: unknown;
+}
+
+function inferCategory(raw: GammaMarketRaw): string {
+  if (typeof raw.category === "string" && raw.category.trim()) {
+    return raw.category.trim();
+  }
+
+  const tags = [...(raw.tags ?? []), ...(raw.eventTags ?? [])]
+    .map((tag) => tag.label || tag.slug)
+    .filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0);
+  return tags[0] ?? "All";
 }
 
 /** Gamma returns clobTokenIds as either an array or a JSON-encoded string.
@@ -238,17 +272,25 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
     liquidity > 50000 ? "A" : liquidity > 10000 ? "B" : liquidity > 1000 ? "C" : "D";
 
   const tokens = parseClobTokenIds(raw.clobTokenIds);
+  const resolutionDate = raw.endDate || raw.endDateIso || raw.end_date_iso || "";
+  const tags = [...(raw.tags ?? []), ...(raw.eventTags ?? [])]
+    .map((tag) => tag.label || tag.slug)
+    .filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0);
   return {
     slug: raw.slug ?? raw.conditionId ?? "",
     question: raw.question ?? "",
     yesPrice: outcomePrices[1] ?? 0,
     noPrice: outcomePrices[0] ?? 0,
-    volume: raw.volume24hr ?? 0,
+    volume: raw.volume24hr ?? raw.volume ?? 0,
     liquidity,
     liquidityGrade,
+    resolutionDate,
     tokenId: tokens.noTokenId ?? raw.conditionId ?? "",
     yesTokenId: tokens.yesTokenId ?? raw.conditionId ?? "",
     noTokenId: tokens.noTokenId ?? raw.conditionId ?? "",
+    probability: outcomePrices[1] ?? 0,
+    category: inferCategory(raw),
+    tags,
   };
 }
 
@@ -298,41 +340,56 @@ router.get("/", async (req: Request, res: Response) => {
     100
   );
   const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
+  const search =
+    typeof req.query.search === "string" && req.query.search.trim()
+      ? req.query.search.trim().toLowerCase()
+      : undefined;
   const category =
     typeof req.query.category === "string" && req.query.category
       ? req.query.category.toLowerCase()
       : undefined;
 
-  const key = cacheKey(category);
+  const key = cacheKey([category, search].filter(Boolean).join(":") || undefined);
 
   try {
-    let markets: unknown[];
+    let markets: Record<string, unknown>[];
     let hasMore: boolean;
     let total: number;
 
-    if (category) {
+    if (category || search) {
       // Client-side filtering: fetchGammaMarkets returns the full filtered pool.
       // We paginate here after receiving all matching markets.
-      const allMatching = await fetchGammaMarkets(limit, offset, category);
+      const allMatching = (await fetchGammaMarkets(search ? 300 : limit, search ? 0 : offset, category))
+        .map((market) => transformTrendingMarket(market as GammaMarketRaw) as Record<string, unknown>)
+        .filter((market) => {
+          if (!search) return true;
+          const question = String(market.question ?? "").toLowerCase();
+          const slug = String(market.slug ?? "").toLowerCase();
+          const tags = Array.isArray(market.tags)
+            ? market.tags.map((tag) => String(tag).toLowerCase())
+            : [];
+          return question.includes(search) || slug.includes(search) || tags.some((tag) => tag.includes(search));
+        });
       hasMore = allMatching.length > offset + limit;
       markets = allMatching.slice(offset, offset + limit);
       total = allMatching.length;
       // Cache the full pool so stale fallback has complete data
-      writeCache(key, allMatching);
+      await writeCache(key, allMatching);
     } else {
       // API-side pagination: fetch limit+1 to detect hasMore
-      const probe = await fetchGammaMarkets(limit + 1, offset, undefined);
+      const probe = (await fetchGammaMarkets(limit + 1, offset, undefined))
+        .map((market) => transformTrendingMarket(market as GammaMarketRaw) as Record<string, unknown>);
       hasMore = probe.length > limit;
       markets = probe.slice(0, limit);
       total = offset + markets.length + (hasMore ? 1 : 0);
-      writeCache(key, probe);
+      await writeCache(key, probe);
     }
 
     const response: MarketsListResponse = { markets, total, hasMore };
     res.json(response);
   } catch (err) {
     // Gamma API failed — attempt stale cache fallback
-    const cached = readCache(key);
+    const cached = await readCache(key);
     if (cached) {
       const hasMore = cached.data.length > offset + limit;
       const markets = cached.data.slice(offset, offset + limit);

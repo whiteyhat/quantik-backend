@@ -1,4 +1,5 @@
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQuery, pgExec } from "../db/postgres";
 import {
   getEntryYesPrice,
   getLatestScannerDirectionMap,
@@ -26,8 +27,16 @@ interface GammaMarket {
 export async function settle(): Promise<void> {
   try {
     const db = getDb();
-    const rows = db.prepare(`SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`).all() as ExecutionRow[];
-    const scannerDirections = getLatestScannerDirectionMap();
+    let rows: ExecutionRow[];
+    if (isPgEnabled()) {
+      rows = await pgQuery<ExecutionRow>(
+        `SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`,
+        []
+      );
+    } else {
+      rows = db.prepare(`SELECT * FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL`).all() as ExecutionRow[];
+    }
+    const scannerDirections = await getLatestScannerDirectionMap();
 
     if (rows.length === 0) return;
     console.log(`[pnlSettler] Checking ${rows.length} open positions`);
@@ -49,7 +58,11 @@ export async function settle(): Promise<void> {
 
         // Voided market (resolution price is not 0 or 1)
         if (resolutionPrice !== 0 && resolutionPrice !== 1) {
-          db.prepare(`UPDATE executions SET status = 'voided', pnl = 0 WHERE id = ?`).run(row.id);
+          if (isPgEnabled()) {
+            await pgExec(`UPDATE executions SET status = 'voided', pnl = 0 WHERE id = $1`, [row.id]);
+          } else {
+            db.prepare(`UPDATE executions SET status = 'voided', pnl = 0 WHERE id = ?`).run(row.id);
+          }
           console.log(`[pnlSettler] Voided: ${row.slug}`);
           continue;
         }
@@ -87,8 +100,13 @@ export async function settle(): Promise<void> {
         const shares = row.amount / entryTokenPrice;
         const pnl = weWon ? shares * (1 - entryTokenPrice) : -row.amount;
 
-        db.prepare(`UPDATE executions SET pnl = ?, status = 'settled' WHERE id = ?`).run(pnl, row.id);
-        db.prepare(`UPDATE oracle_results SET resolved_correctly = ? WHERE market_slug = ?`).run(pnl > 0 ? 1 : 0, row.slug);
+        if (isPgEnabled()) {
+          await pgExec(`UPDATE executions SET pnl = $1, status = 'settled' WHERE id = $2`, [pnl, row.id]);
+          await pgExec(`UPDATE oracle_results SET resolved_correctly = $1 WHERE market_slug = $2`, [pnl > 0 ? 1 : 0, row.slug]);
+        } else {
+          db.prepare(`UPDATE executions SET pnl = ?, status = 'settled' WHERE id = ?`).run(pnl, row.id);
+          db.prepare(`UPDATE oracle_results SET resolved_correctly = ? WHERE market_slug = ?`).run(pnl > 0 ? 1 : 0, row.slug);
+        }
 
         console.log(`[pnlSettler] Settled ${row.slug}: pnl=$${pnl.toFixed(2)}`);
       } catch (err) {

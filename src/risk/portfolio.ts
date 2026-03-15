@@ -39,7 +39,7 @@ const MAX_EXPOSURE_PCT = 0.50;   // 50% total deployed
 
 export class PortfolioManager {
   /** All open/submitted positions from executions table (unsettled trades) */
-  getOpenPositions(): Position[] {
+  async getOpenPositions(): Promise<Position[]> {
     const db = getDb();
     const rows = db
       .prepare<[], ExecutionRow>(
@@ -50,7 +50,7 @@ export class PortfolioManager {
     // Fetch current prices from scanner_results for open P&L
     const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
     const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
-    const scannerDirections = getLatestScannerDirectionMap();
+    const scannerDirections = await getLatestScannerDirectionMap();
 
     return rows.map((r) => {
       const scannerDirection = scannerDirections.get(r.slug);
@@ -75,8 +75,8 @@ export class PortfolioManager {
       getUsdcBalance(agentCtx?.walletAddress),
       getClobBalance(agentCtx?.privateKey),
     ]);
-    const deployed = this.getDeployedCapital();
-    const openPnl = this.getOpenPositions().reduce((sum, p) => sum + p.openPnl, 0);
+    const deployed = await this.getDeployedCapital();
+    const openPnl = (await this.getOpenPositions()).reduce((sum, p) => sum + p.openPnl, 0);
 
     const total = onChain + clob + deployed + openPnl;
     if (total <= 0) {
@@ -96,8 +96,8 @@ export class PortfolioManager {
   }
 
   /** Total USDC currently in open positions */
-  getDeployedCapital(): number {
-    const positions = this.getOpenPositions();
+  async getDeployedCapital(): Promise<number> {
+    const positions = await this.getOpenPositions();
     return positions.reduce((sum, p) => sum + p.sizeUsdc, 0);
   }
 
@@ -105,7 +105,7 @@ export class PortfolioManager {
   async checkPositionLimit(slug: string, sizeUsdc: number): Promise<boolean> {
     const total = await this.getTotalCapital();
     const maxSize = total * MAX_POSITION_PCT;
-    const existing = this.getOpenPositions()
+    const existing = (await this.getOpenPositions())
       .filter((p) => p.slug === slug)
       .reduce((sum, p) => sum + p.sizeUsdc, 0);
     return (existing + sizeUsdc) <= maxSize;
@@ -115,12 +115,12 @@ export class PortfolioManager {
   async checkExposureLimit(additionalUsdc: number = 0): Promise<boolean> {
     const total = await this.getTotalCapital();
     const maxExposure = total * MAX_EXPOSURE_PCT;
-    const deployed = this.getDeployedCapital();
+    const deployed = await this.getDeployedCapital();
     return (deployed + additionalUsdc) <= maxExposure;
   }
 
   /** Daily P&L from realized trades closed today + unrealized on ALL open positions */
-  getDailyPnL(): number {
+  async getDailyPnL(): Promise<number> {
     const db = getDb();
     const todayStart = new Date().setUTCHours(0, 0, 0, 0);
 
@@ -128,7 +128,7 @@ export class PortfolioManager {
     const { realized } = db.prepare("SELECT COALESCE(SUM(pnl), 0) as realized FROM executions WHERE executed_at >= ? AND pnl IS NOT NULL").get(todayStart) as { realized: number };
 
     // Unrealized: ALL open positions (not just today's), since price moves affect daily P&L
-    const openPositions = this.getOpenPositions();
+    const openPositions = await this.getOpenPositions();
     const unrealized = openPositions.reduce((sum, p) => sum + p.openPnl, 0);
 
     return realized + unrealized;

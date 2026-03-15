@@ -3,6 +3,7 @@ import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runClause } from "../clause/index";
 import { runAura } from "../aura/index";
+import { runFlux } from "../flux/index";
 import { getDb } from "../db/schema";
 import { loadAutopilotExecutionContexts, type AutopilotExecutionContext } from "../utils/linkedAgent";
 import { getWalletFundingSnapshot } from "../utils/balances";
@@ -57,11 +58,14 @@ export interface ScanResult {
 // ── Real Agent Pipeline ───────────────────────────────────────
 
 interface AgentBundle {
-  oracle: { confidence: number; estimated_true_prob?: number };
+  oracle: { confidence: number; estimated_true_prob?: number; market_implied?: number };
+  flux?: Record<string, unknown>;
+  edge?: Record<string, unknown>;
   edge_agent: { fractional_kelly: number; position_size: number; direction: string; kelly_recommended?: number };
   sigma: { confidence: number; decision: string; thesis: string };
   clause: { riskLevel: string; resolutionCriteria: string; veto: boolean; urgent: boolean; ambiguityScore?: number };
   aura?: { sentimentDelta: number; confidence: number; dataSufficiency: number };
+  lucifer?: Record<string, unknown>;
 }
 const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
 const AGENT_CACHE_TTL = 8 * 60 * 1000;
@@ -84,7 +88,49 @@ async function fetchWithTimeout(url: string, ms = 8000): Promise<any> {
   finally { clearTimeout(timer); }
 }
 
-async function runRealPipeline(slug: string, yesPrice: number, question: string = slug): Promise<{
+function buildScannerLuciferPayload(
+  slug: string,
+  clauseData: { veto: boolean; riskLevel: string; ambiguityScore?: number },
+  edgeData: { fractional_kelly: number; position_size: number; direction: string; kelly_recommended?: number },
+  auraData: { sentimentDelta: number; confidence: number; dataSufficiency: number }
+): Record<string, unknown> {
+  const ambiguityScore = Number(clauseData.ambiguityScore ?? 0.4);
+  const veto = clauseData.veto;
+  const sentimentDelta = Number(auraData.sentimentDelta ?? 0);
+  const kellyFraction = Number(edgeData.fractional_kelly ?? edgeData.kelly_recommended ?? 0);
+  const biasFlags: string[] = [];
+
+  if (ambiguityScore > 0.5) biasFlags.push(`Resolution ambiguity remains elevated at ${ambiguityScore.toFixed(2)}`);
+  if (kellyFraction > 0.3) biasFlags.push("Position sizing looks aggressive for a scanner-derived signal");
+  if (Math.abs(sentimentDelta) > 0.1) biasFlags.push("Sentiment moved sharply, so crowd chasing is a real risk");
+  if (clauseData.riskLevel === "HIGH") biasFlags.push("Clause marked this market as high-risk for dispute");
+  if (biasFlags.length === 0) biasFlags.push("No dominant adversarial flag, but the edge still needs confirmation");
+
+  const adversarialScore = Math.min(
+    0.9,
+    0.25 + ambiguityScore * 0.4 + (veto ? 0.3 : 0) + (Math.abs(sentimentDelta) > 0.2 ? 0.05 : 0)
+  );
+
+  return {
+    devils_advocate_score: Number(adversarialScore.toFixed(2)),
+    bias_flags: biasFlags,
+    counter_thesis: veto
+      ? "Resolution risk dominates the setup, so the directional edge is not trustworthy."
+      : ambiguityScore > 0.5
+        ? "Even a correct directional call can still lose if settlement turns subjective."
+        : "The edge is modest enough that a fast repricing or noisy sentiment reversal could erase it.",
+    worst_case: veto
+      ? "Full loss with contract dispute risk"
+      : "Full loss if the edge is noise and the market reprices quickly",
+    adjusted_confidence: Number((veto ? -0.2 : ambiguityScore > 0.6 ? -0.1 : -0.03).toFixed(3)),
+    pass: !veto && ambiguityScore < 0.7,
+    slug,
+    riskLevel: clauseData.riskLevel,
+    ambiguityScore,
+  };
+}
+
+async function runRealPipeline(slug: string, yesPrice: number, question: string = slug, tokenId: string = ""): Promise<{
   sigma: { confidence: number; decision: string; thesis: string };
   edge: { kelly_fraction: number; estimated_true_prob: number; kelly_amount: number };
   clause: { veto: boolean; risk_level: string; summary: string };
@@ -107,22 +153,26 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
   // BUG FIX: call runAura() directly instead of HTTP self-request.
   // The HTTP path went through /api/aura/:slug which re-fetched from Gamma (redundant + fragile),
   // and on any failure returned sentimentDelta=0, silently killing the Aura signal.
-  const [oracleRes, clauseRes, auraRes] = await Promise.allSettled([
+  const [oracleRes, clauseRes, auraRes, fluxRes] = await Promise.allSettled([
     runOracle({ slug, question, yesPrice, tokenId: '' }),
     runClause({ slug, question, description: question, days_to_resolution: 7 }),
     runAura({ slug, question }),
+    runFlux({ slug, token_id: tokenId }),
   ]);
 
   // Extract Oracle result
   const rawOracle = (oracleRes.status === "fulfilled" && oracleRes.value) ? oracleRes.value as any : null;
   const trueProbEstimate = rawOracle?.calibrated_prob ?? rawOracle?.p_yes ?? yesPrice;
   const oracleConf = rawOracle?.confidence ?? (Math.abs(yesPrice - 0.5) > 0.05 ? 0.55 : 0.40);
-  const oracle = { confidence: oracleConf, estimated_true_prob: trueProbEstimate };
+  const oracle = { confidence: oracleConf, estimated_true_prob: trueProbEstimate, market_implied: yesPrice };
   // Extract Aura sentiment delta (positive = bullish, negative = bearish)
   const rawAura = (auraRes.status === "fulfilled" && auraRes.value) ? auraRes.value as any : null;
   const sentimentDelta = rawAura?.sentimentDelta ?? rawAura?.sentiment_score ?? 0;
   const auraConfidence = rawAura?.confidence ?? 0;
   const auraDataSufficiency = rawAura?.dataSufficiency ?? 0;
+  const rawFlux = (fluxRes.status === "fulfilled" && fluxRes.value)
+    ? fluxRes.value as unknown as Record<string, unknown>
+    : null;
 
   console.log(`[Scanner] Oracle for ${slug}: calibrated_prob=${trueProbEstimate.toFixed(3)} conf=${oracleConf.toFixed(2)} aura_sentiment=${sentimentDelta.toFixed(3)} aura_conf=${auraConfidence.toFixed(2)} aura_data=${auraDataSufficiency.toFixed(2)} source=${rawOracle ? "live" : "fallback"}`);
 
@@ -140,6 +190,14 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
     direction: rawEdge?.direction ?? (yesPrice >= 0.5 ? "YES" : "NO"),
     kelly_recommended: rawEdge?.kelly_recommended ?? 0,
   };
+  const edgePayload = rawEdge ?? {
+    fractional_kelly: edgeData.fractional_kelly,
+    position_size: edgeData.position_size,
+    direction: edgeData.direction,
+    kelly_recommended: edgeData.kelly_recommended,
+    estimated_true_prob: trueProbEstimate,
+    market_price: yesPrice,
+  };
 
   // Normalize Clause — returns riskLevel (camelCase), resolutionCriteria, veto, urgent
   const rawClause = (clauseRes.status === "fulfilled" && clauseRes.value) ? clauseRes.value as any : null;
@@ -150,6 +208,16 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
     urgent: rawClause?.urgent ?? false,
     ambiguityScore: rawClause?.ambiguityScore ?? 0,
   };
+  const luciferData = buildScannerLuciferPayload(
+    slug,
+    clauseData,
+    edgeData,
+    {
+      sentimentDelta,
+      confidence: auraConfidence,
+      dataSufficiency: auraDataSufficiency,
+    }
+  );
 
   // Synthesize Sigma: Kelly edge + Aura sentiment amplifier + Clause veto
   const kellyFrac = edgeData.fractional_kelly;
@@ -178,6 +246,8 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
 
   const bundle: AgentBundle = {
     oracle,
+    ...(rawFlux ? { flux: rawFlux } : {}),
+    edge: edgePayload,
     edge_agent: edgeData,
     sigma: sigmaData,
     clause: clauseData,
@@ -186,6 +256,7 @@ async function runRealPipeline(slug: string, yesPrice: number, question: string 
       confidence: auraConfidence,
       dataSufficiency: auraDataSufficiency,
     },
+    lucifer: luciferData,
   };
   agentCache.set(slug, { ts: Date.now(), data: bundle });
 
@@ -589,7 +660,7 @@ export class MarketScanner {
     let clause: { veto?: boolean; risk_level?: string; summary?: string } | undefined;
 
     try {
-      const real = await runRealPipeline(slug, yesPrice, question);
+      const real = await runRealPipeline(slug, yesPrice, question, tokenId);
       sigma = real.sigma;
       edge = real.edge;
       pipelineResult = real.pipelineResult;
@@ -661,8 +732,13 @@ export class MarketScanner {
     // If this market should alert, write a pipeline_runs entry so the alert poller catches it
     if (result.shouldAlert) {
       const pr = result.pipelineResult as Record<string, unknown>;
-      const edgeData = (pr["edge"] ?? {}) as Record<string, unknown>;
+      const auraData = (pr["aura"] ?? null) as Record<string, unknown> | null;
+      const fluxData = (pr["flux"] ?? null) as Record<string, unknown> | null;
+      const oracleData = (pr["oracle"] ?? null) as Record<string, unknown> | null;
+      const edgeData = ((pr["edge"] ?? pr["edge_agent"]) ?? {}) as Record<string, unknown>;
       const sigmaData = (pr["sigma"] ?? {}) as Record<string, unknown>;
+      const clauseData = (pr["clause"] ?? null) as Record<string, unknown> | null;
+      const luciferData = (pr["lucifer"] ?? null) as Record<string, unknown> | null;
       const runId = `scanner-${result.slug}-${result.scannedAt}`;
 
       // Only insert if not already present
@@ -671,8 +747,9 @@ export class MarketScanner {
         db.prepare(`
           INSERT INTO pipeline_runs
             (id, market_slug, market_question, created_at, completed_at, decision, confidence,
-             edge_output, sigma_output, alert_sent, signal_state)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'TRADE')
+             aura_output, flux_output, oracle_output, edge_output, sigma_output, clause_output, lucifer_output,
+             alert_sent, signal_state)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'TRADE')
         `).run(
           runId,
           result.slug,
@@ -681,7 +758,10 @@ export class MarketScanner {
           result.scannedAt,
           result.recommendation,
           result.sigmaConfidence,
-          JSON.stringify({
+          auraData ? JSON.stringify(auraData) : null,
+          fluxData ? JSON.stringify(fluxData) : null,
+          oracleData ? JSON.stringify(oracleData) : null,
+          JSON.stringify(Object.keys(edgeData).length > 0 ? edgeData : {
             net_edge: edgeData["kelly_fraction"] ?? 0,
             fractional_kelly: result.kellyFraction,
             position_size: result.kellyFraction * 10,
@@ -694,6 +774,8 @@ export class MarketScanner {
             thesis: (sigmaData["thesis"] as string) ?? `Scanner signal: ${result.recommendation} @ p=${result.probability.toFixed(2)}`,
             decision: result.recommendation,
           }),
+          clauseData ? JSON.stringify(clauseData) : null,
+          luciferData ? JSON.stringify(luciferData) : null,
         );
         console.log(`[Scanner] Wrote pipeline_runs entry for alert: ${result.slug}`);
       }

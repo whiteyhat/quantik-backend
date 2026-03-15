@@ -6,6 +6,9 @@ import { fetchNYT } from "./nyt";
 import { fetchCoinDesk } from "./coindesk";
 import { fetchHackerNews, scoreHNSentiment } from "./hackernews";
 import { fetchCryptoPanic, scoreCryptoPanic } from "./cryptopanic";
+import { fetchFred, scoreFredMacro } from "./fred";
+import { fetchBls, scoreBlsMacro } from "./bls";
+import { fetchMetaculusSentiment, scoreMetaculusCrowdTrend } from "./metaculus";
 
 export interface AuraResult {
   marketSlug: string;
@@ -47,10 +50,10 @@ function parseWeights(envVar: string | undefined, defaultWeights: Record<string,
 }
 
 const WEIGHTS = {
-  crypto: parseWeights(process.env.AURA_WEIGHTS_CRYPTO, { social: 2, cryptopanic: 3, news: 1, trends: 1 }),
-  political: parseWeights(process.env.AURA_WEIGHTS_POLITICAL, { social: 1, cryptopanic: 0, news: 2, trends: 1 }),
-  sports: parseWeights(process.env.AURA_WEIGHTS_SPORTS, { social: 1, cryptopanic: 0, news: 1, trends: 2 }),
-  default: parseWeights(process.env.AURA_WEIGHTS_DEFAULT, { social: 1, cryptopanic: 1, news: 1, trends: 1 }),
+  crypto: parseWeights(process.env.AURA_WEIGHTS_CRYPTO, { social: 2, cryptopanic: 3, news: 1, trends: 1, macro: 0.5, crowd: 1 }),
+  political: parseWeights(process.env.AURA_WEIGHTS_POLITICAL, { social: 1, cryptopanic: 0, news: 2, trends: 1, macro: 2, crowd: 1.5 }),
+  sports: parseWeights(process.env.AURA_WEIGHTS_SPORTS, { social: 1, cryptopanic: 0, news: 1, trends: 2, macro: 0, crowd: 0.5 }),
+  default: parseWeights(process.env.AURA_WEIGHTS_DEFAULT, { social: 1, cryptopanic: 1, news: 1, trends: 1, macro: 1, crowd: 1 }),
 };
 
 async function runWithTimeout<T>(promise: Promise<T>, ms: number = 20000): Promise<T> {
@@ -312,14 +315,60 @@ export async function runAura(market: { slug: string; question: string; category
     }
   };
 
+  // --- Macro data: FRED + BLS combined ---
+  const fetchMacroData = async () => {
+    const [fredObs, blsData] = await Promise.allSettled([fetchFred(), fetchBls()]);
+
+    const fred = fredObs.status === "fulfilled" ? fredObs.value : [];
+    const bls = blsData.status === "fulfilled" ? blsData.value : [];
+
+    const fredScore = scoreFredMacro(fred);
+    const blsScore = scoreBlsMacro(bls);
+
+    if (fredScore.resultCount > 0) {
+      sourceStatus["fred"] = "ok";
+      sourcesUsed.push("fred");
+    } else {
+      sourceStatus["fred"] = fredObs.status === "rejected" ? "timeout" : "unavailable";
+    }
+
+    if (blsScore.resultCount > 0) {
+      sourceStatus["bls"] = "ok";
+      sourcesUsed.push("bls");
+    } else {
+      sourceStatus["bls"] = blsData.status === "rejected" ? "timeout" : "unavailable";
+    }
+
+    const scores = [fredScore, blsScore].filter((s) => s.resultCount > 0);
+    if (scores.length === 0) return { score: 0, resultCount: 0 };
+    const avgScore = scores.reduce((sum, s) => sum + s.score, 0) / scores.length;
+    return { score: avgScore, resultCount: scores.reduce((sum, s) => sum + s.resultCount, 0) };
+  };
+
+  // --- Metaculus crowd sentiment ---
+  const fetchMetaculusCrowd = async () => {
+    const keyword = market.question.split(" ").filter((w) => w.length > 3).slice(0, 4).join(" ");
+    const data = await fetchMetaculusSentiment(keyword);
+    const result = scoreMetaculusCrowdTrend(data);
+    if (result.resultCount > 0) {
+      sourceStatus["metaculus"] = "ok";
+      sourcesUsed.push("metaculus");
+    } else {
+      sourceStatus["metaculus"] = "unavailable";
+    }
+    return result;
+  };
+
   sourceStatus["telegram"] = "unavailable";
 
-  const [newsRes, hnRes, cpRes, trendsRes, marketRes] = await Promise.allSettled([
+  const [newsRes, hnRes, cpRes, trendsRes, marketRes, macroRes, metaculusRes] = await Promise.allSettled([
     runWithTimeout(fetchNewsData()),
     runWithTimeout(fetchHNSentiment()),
     runWithTimeout(fetchCPSentiment()),
     runWithTimeout(fetchTrends()),
     runWithTimeout(fetchMarketDataCached()),
+    runWithTimeout(fetchMacroData()),
+    runWithTimeout(fetchMetaculusCrowd()),
   ]);
 
   const newsArticles = newsRes.status === "fulfilled" ? newsRes.value : [];
@@ -327,6 +376,8 @@ export async function runAura(market: { slug: string; question: string; category
   const cp = cpRes.status === "fulfilled" ? cpRes.value : { score: 0, resultCount: 0 };
   const trends = trendsRes.status === "fulfilled" ? trendsRes.value : { spike: false, value: 50 };
   const marketData = marketRes.status === "fulfilled" ? marketRes.value : { yesProbability: 0.5, volume24h: 0 };
+  const macro = macroRes.status === "fulfilled" ? macroRes.value : { score: 0, resultCount: 0 };
+  const metaculusCrowd = metaculusRes.status === "fulfilled" ? metaculusRes.value : { score: 0, resultCount: 0 };
 
   if (newsRes.status === "rejected") {
     sourceStatus["guardian"] = "timeout";
@@ -339,6 +390,11 @@ export async function runAura(market: { slug: string; question: string; category
   if (cpRes.status === "rejected") sourceStatus["cryptopanic"] = "timeout";
   if (trendsRes.status === "rejected") sourceStatus["trends"] = "timeout";
   if (marketRes.status === "rejected") sourceStatus["leaderboard"] = "timeout";
+  if (macroRes.status === "rejected") {
+    sourceStatus["fred"] = "timeout";
+    sourceStatus["bls"] = "timeout";
+  }
+  if (metaculusRes.status === "rejected") sourceStatus["metaculus"] = "timeout";
 
   // --- Social sentiment: weighted HN + CryptoPanic ---
   const weights = WEIGHTS[cat as keyof typeof WEIGHTS] || WEIGHTS.default;
@@ -369,7 +425,7 @@ export async function runAura(market: { slug: string; question: string; category
     whalePosYesPct > 60 ? "LONG" : whalePosYesPct < 40 ? "SHORT" : "NEUTRAL";
 
   const socialCount = hn.resultCount + cp.resultCount;
-  const dataSufficiency = computeDataSufficiency(socialCount, newsArticles.length);
+  const dataSufficiency = computeDataSufficiency(socialCount, newsArticles.length, macro.resultCount, metaculusCrowd.resultCount);
 
   let confidence = Math.min(0.40 + dataSufficiency * 0.45, dataSufficiency + 0.15);
   if (socialCount < 3) confidence = Math.min(confidence, 0.35);
@@ -379,12 +435,16 @@ export async function runAura(market: { slug: string; question: string; category
   const trScore = searchTrendSpike ? 0.5 : 0;
   const newsWeight = weights.news ?? 1;
   const trendsWeight = weights.trends ?? 1;
-  const totalWeight = hnWeight + cpWeight + newsWeight + trendsWeight;
+  const macroWeight = weights.macro ?? 0;
+  const crowdWeight = weights.crowd ?? 0;
+  const totalWeight = hnWeight + cpWeight + newsWeight + trendsWeight + macroWeight + crowdWeight;
 
   const sentimentDelta = (
     (twitterSentiment * (hnWeight + cpWeight)) +
     (nScore * newsWeight) +
-    (trScore * trendsWeight)
+    (trScore * trendsWeight) +
+    (macro.score * macroWeight) +
+    (metaculusCrowd.score * crowdWeight)
   ) / totalWeight;
 
   const shiftDetected = Math.abs(sentimentDelta) > 0.15;
@@ -505,6 +565,13 @@ function generateSummary(result: Omit<AuraResult, "summary">): string {
   if (result.twitterSentiment > 0.3) parts.push("social signals bullish");
   else if (result.twitterSentiment < -0.3) parts.push("social signals bearish");
 
+  // Macro signals
+  const hasMacro = result.sourcesUsed.includes("fred") || result.sourcesUsed.includes("bls");
+  if (hasMacro) parts.push("macro data factored in");
+
+  // Crowd wisdom
+  if (result.sourcesUsed.includes("metaculus")) parts.push("crowd predictions tracked");
+
   // Trend
   if (result.searchTrendSpike) parts.push("search trend spiking");
 
@@ -531,15 +598,27 @@ function generateSummary(result: Omit<AuraResult, "summary">): string {
   return parts[0] + (parts.length > 1 ? " — " + parts.slice(1).join(", ") : "") + ".";
 }
 
-function computeDataSufficiency(socialCount: number, newsCount: number): number {
+function computeDataSufficiency(socialCount: number, newsCount: number, macroCount: number = 0, crowdCount: number = 0): number {
   let score = 0;
-  if (socialCount >= 10) score += 0.4;
-  else if (socialCount >= 3) score += 0.25;
-  else if (socialCount > 0) score += 0.1;
 
-  if (newsCount >= 5) score += 0.4;
-  else if (newsCount >= 2) score += 0.25;
-  else if (newsCount > 0) score += 0.15;
+  // Social (max 0.3)
+  if (socialCount >= 10) score += 0.3;
+  else if (socialCount >= 3) score += 0.2;
+  else if (socialCount > 0) score += 0.08;
+
+  // News (max 0.3)
+  if (newsCount >= 5) score += 0.3;
+  else if (newsCount >= 2) score += 0.2;
+  else if (newsCount > 0) score += 0.1;
+
+  // Macro — FRED + BLS (max 0.2)
+  if (macroCount >= 4) score += 0.2;
+  else if (macroCount >= 2) score += 0.12;
+  else if (macroCount > 0) score += 0.06;
+
+  // Crowd — Metaculus (max 0.2)
+  if (crowdCount >= 3) score += 0.2;
+  else if (crowdCount >= 1) score += 0.1;
 
   return Math.min(score, 1.0);
 }
@@ -570,11 +649,11 @@ function getMockResult(slug: string): AuraResult {
     echoChamberRisk: 0.3,
     dataSufficiency: 0.9,
     confidence: 0.85,
-    sourcesUsed: ["hackernews", "cryptopanic", "guardian", "nyt", "gnews", "coindesk", "trends", "leaderboard"],
+    sourcesUsed: ["hackernews", "cryptopanic", "guardian", "nyt", "gnews", "coindesk", "trends", "leaderboard", "fred", "bls", "metaculus"],
     sourceStatus: {
       hackernews: "ok", cryptopanic: "ok", guardian: "ok", nyt: "ok",
-      coindesk: "ok",
-      gnews: "ok", trends: "ok", leaderboard: "ok", telegram: "unavailable",
+      coindesk: "ok", gnews: "ok", trends: "ok", leaderboard: "ok",
+      fred: "ok", bls: "ok", metaculus: "ok", telegram: "unavailable",
     },
     summary: "Moderately bullish sentiment detected — breaking news from 2 sources, social signals bullish, search trend spiking, shift yes (accelerating), whales positioned long, confidence 85%.",
   };

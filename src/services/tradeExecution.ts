@@ -85,7 +85,7 @@ function resolveQuotedPrice(direction: ManagedTradeDirection, quotedPrice: numbe
 }
 
 export async function executeManagedTrade(input: ManagedTradeRequest): Promise<ManagedTradeResult> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const marketData = await fetchMarketBySlug(input.marketSlug).catch(() => null);
   const resolutionDate = marketData?.resolution_date ?? null;
 
@@ -122,7 +122,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
   if (settings.paper_mode) {
     const paperId = `PAPER-${uuid()}`;
 
-    insertPaperTrade({
+    await insertPaperTrade({
       id: paperId,
       market_id: resolvedTokenId,
       side: input.direction,
@@ -134,7 +134,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       pnl: null,
     });
 
-    insertTrade({
+    await insertTrade({
       id: uuid(),
       order_id: paperId,
       market_slug: input.marketSlug,
@@ -162,6 +162,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       orderId: paperId,
       fillPrice: quotedPrice,
       resolutionDate,
+      pipelineRunId: input.pipelineRunId ?? null,
     });
 
     emitTradeExecuted(socketUserId, {
@@ -243,6 +244,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       status: "failed",
       fillPrice: quotedPrice,
       resolutionDate,
+      pipelineRunId: input.pipelineRunId ?? null,
     });
 
     return {
@@ -263,7 +265,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
   const orderId = extractOrderId(data);
   const fillPrice = extractFillPrice(data) ?? quotedPrice;
 
-  insertTrade({
+  await insertTrade({
     id: uuid(),
     order_id: orderId,
     market_slug: input.marketSlug,
@@ -291,6 +293,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
     orderId,
     fillPrice,
     resolutionDate,
+    pipelineRunId: input.pipelineRunId ?? null,
   });
 
   emitTradeExecuted(socketUserId, {

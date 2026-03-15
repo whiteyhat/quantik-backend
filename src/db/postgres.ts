@@ -114,6 +114,53 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at ASC);
   `);
 
+  await safeQuery("operator inbox tables", `
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      user_id UUID,
+      level TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      category TEXT,
+      timestamp BIGINT NOT NULL,
+      read_at BIGINT,
+      action_label TEXT,
+      action_href TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user_time
+      ON notifications(user_id, timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS watchlists (
+      id TEXT PRIMARY KEY,
+      user_id UUID NOT NULL,
+      slug TEXT NOT NULL,
+      question TEXT,
+      created_at BIGINT NOT NULL,
+      UNIQUE(user_id, slug)
+    );
+    CREATE INDEX IF NOT EXISTS idx_watchlists_user_time
+      ON watchlists(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS market_alerts (
+      id TEXT PRIMARY KEY,
+      user_id UUID NOT NULL,
+      slug TEXT NOT NULL,
+      question TEXT,
+      direction TEXT NOT NULL,
+      threshold REAL NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_state TEXT,
+      last_triggered_at BIGINT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_market_alerts_user_time
+      ON market_alerts(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_market_alerts_slug_enabled
+      ON market_alerts(slug, enabled);
+  `);
+
   await safeQuery("agents columns", `
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'created';
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS endpoint_url TEXT;
@@ -231,6 +278,22 @@ export async function migratePg(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_pipeline_runs_user ON pipeline_runs(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_pipeline_runs_slug ON pipeline_runs(market_slug, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS pipeline_run_steps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+      step_order INTEGER NOT NULL,
+      step TEXT NOT NULL,
+      agent TEXT,
+      status TEXT NOT NULL,
+      started_at BIGINT,
+      completed_at BIGINT,
+      data JSONB,
+      error TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_run_steps_run_order
+      ON pipeline_run_steps(run_id, step_order, created_at);
+
     -- Trades
     CREATE TABLE IF NOT EXISTS trades (
       id TEXT PRIMARY KEY,
@@ -288,9 +351,12 @@ export async function migratePg(): Promise<void> {
       user_id UUID,
       request_code TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
+      reason TEXT,
       pending_orders_count INTEGER NOT NULL DEFAULT 0,
       active_positions_count INTEGER NOT NULL DEFAULT 0,
       estimated_total_value REAL NOT NULL DEFAULT 0,
+      cooldown_until BIGINT,
+      rearmed_at BIGINT,
       initiated_at BIGINT NOT NULL,
       completed_at BIGINT
     );
@@ -405,6 +471,12 @@ export async function migratePg(): Promise<void> {
       snapshot_at BIGINT NOT NULL,
       PRIMARY KEY (slug, snapshot_at)
     );
+  `);
+
+  await safeQuery("panic_mode_events columns", `
+    ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS reason TEXT;
+    ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS cooldown_until BIGINT;
+    ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS rearmed_at BIGINT;
   `);
 
   // ── Agent result tables ─────────────────────────────────────────────────────
@@ -593,7 +665,10 @@ export async function migratePg(): Promise<void> {
       order_id TEXT,
       fill_price REAL,
       pnl REAL,
-      resolution_date TEXT
+      resolution_date TEXT,
+      closed_at BIGINT,
+      updated_at BIGINT,
+      pipeline_run_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
@@ -605,9 +680,13 @@ export async function migratePg(): Promise<void> {
   await safeQuery("executions.direction column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS direction TEXT`);
   await safeQuery("executions.source column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS source TEXT`);
   await safeQuery("executions.resolution_date column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS resolution_date TEXT`);
+  await safeQuery("executions.closed_at column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS closed_at BIGINT`);
+  await safeQuery("executions.updated_at column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS updated_at BIGINT`);
+  await safeQuery("executions.pipeline_run_id column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS pipeline_run_id TEXT`);
   await safeQuery("executions.agent_id index", `CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
   await safeQuery("executions.agent_slug_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_slug_time ON executions(agent_id, slug, executed_at DESC)`);
   await safeQuery("executions.agent_source_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_source_time ON executions(agent_id, source, executed_at DESC)`);
+  await safeQuery("executions.pipeline_run_id index", `CREATE INDEX IF NOT EXISTS idx_executions_pipeline_run ON executions(pipeline_run_id, executed_at DESC)`);
   await safeQuery("executions.legacy unique index", `DROP INDEX IF EXISTS ux_executions_slug_day`);
   await safeQuery("trades.source column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT`);
 
@@ -658,6 +737,20 @@ export async function migratePg(): Promise<void> {
             AND d.decision = 'executed'
             AND ABS(d.scanned_at - executions.executed_at) <= 1800000
        )
+  `);
+  await safeQuery("backfill executions.updated_at", `
+    UPDATE executions
+       SET updated_at = COALESCE(updated_at, executed_at)
+     WHERE updated_at IS NULL
+  `);
+  await safeQuery("backfill executions.pipeline_run_id", `
+    UPDATE executions
+       SET pipeline_run_id = trades.pipeline_run_id
+      FROM trades
+     WHERE executions.pipeline_run_id IS NULL
+       AND executions.order_id IS NOT NULL
+       AND trades.order_id = executions.order_id
+       AND trades.pipeline_run_id IS NOT NULL
   `);
 
   // ── Versions / Changelog ──────────────────────────────────────────────────

@@ -58,7 +58,7 @@ export async function approvePosition(
   if (!(await portfolio.checkPositionLimit(slug, sizeUsdc))) {
     const totalCapital = await portfolio.getTotalCapital();
     const maxSize = totalCapital * 0.05;
-    const existing = portfolio.getOpenPositions()
+    const existing = (await portfolio.getOpenPositions())
       .filter((p) => p.slug === slug)
       .reduce((sum, p) => sum + p.sizeUsdc, 0);
     const adjustedSize = Math.max(maxSize - existing, 0);

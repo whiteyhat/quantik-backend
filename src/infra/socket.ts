@@ -5,6 +5,9 @@
 //   - agent:alert — proactive agent insights
 //   - autopilot:status — scanner/autopilot state changes
 //   - position:update — position P&L changes
+//   - prices:update — batched live price changes
+//   - notification:new — operator-facing system notifications
+//   - panic:cooldown — panic mode cooldown / re-arm status
 //
 // Each authenticated user joins a private room `user:{userId}`.
 // Falls back gracefully — if no clients are connected, emit is a no-op.
@@ -13,6 +16,7 @@ import { Server as HttpServer } from "http";
 import { Server, Socket } from "socket.io";
 import crypto from "crypto";
 import { getDb } from "../db/schema";
+import { persistNotification } from "../services/notificationInbox";
 
 let io: Server | null = null;
 
@@ -133,6 +137,35 @@ export interface PositionUpdateEvent {
   timestamp: number;
 }
 
+export interface PriceUpdateEventItem {
+  slug: string;
+  yes: number;
+  no: number;
+  timestamp: number;
+}
+
+export interface NotificationEvent {
+  id: string;
+  level: "info" | "success" | "warning" | "error";
+  title: string;
+  message: string;
+  category?: string;
+  timestamp: number;
+  action?: {
+    label: string;
+    href: string;
+  };
+}
+
+export interface PanicCooldownEvent {
+  active: boolean;
+  cooldownEndsAt: number | null;
+  canRearm: boolean;
+  reportId?: string | null;
+  reason?: string | null;
+  timestamp: number;
+}
+
 /** Emit to a specific user's room (+ bridge to BYO webhooks) */
 export function emitToUser(userId: string, event: string, data: unknown): void {
   io?.to(`user:${userId}`).emit(event, data);
@@ -148,6 +181,18 @@ export function emitToAll(event: string, data: unknown): void {
 
 /** Emit a trade execution event */
 export function emitTradeExecuted(userId: string | null, trade: TradeEvent): void {
+  emitNotification(userId, {
+    id: `trade-${trade.orderId}-${trade.timestamp}`,
+    level: "success",
+    title: trade.paper ? "Paper trade executed" : "Trade executed",
+    message: `${trade.direction} on ${trade.slug} for $${trade.size.toFixed(2)} at ${Math.round(trade.price * 100)}¢.`,
+    category: "trade",
+    timestamp: trade.timestamp,
+    action: {
+      label: "Open market",
+      href: `/market/${trade.slug}`,
+    },
+  });
   if (userId) {
     emitToUser(userId, "trade:executed", trade);
   } else {
@@ -157,6 +202,20 @@ export function emitTradeExecuted(userId: string | null, trade: TradeEvent): voi
 
 /** Emit a proactive agent alert */
 export function emitAgentAlert(userId: string | null, alert: AgentAlertEvent): void {
+  emitNotification(userId, {
+    id: `agent-alert-${alert.type}-${alert.timestamp}-${alert.slug ?? "global"}`,
+    level: alert.type === "risk" ? "warning" : "info",
+    title: alert.title,
+    message: alert.message,
+    category: alert.type,
+    timestamp: alert.timestamp,
+    action: alert.slug
+      ? {
+          label: "Open market",
+          href: `/market/${alert.slug}`,
+        }
+      : undefined,
+  });
   if (userId) {
     emitToUser(userId, "agent:alert", alert);
   } else {
@@ -176,4 +235,54 @@ export function emitPositionUpdate(userId: string | null, update: PositionUpdate
   } else {
     emitToAll("position:update", update);
   }
+}
+
+/** Emit batched live price updates */
+export function emitPriceUpdate(update: PriceUpdateEventItem[]): void {
+  emitToAll("prices:update", update);
+}
+
+/** Emit a system notification */
+export function emitNotification(userId: string | null, notification: NotificationEvent): void {
+  void persistNotification({
+    id: notification.id,
+    userId,
+    level: notification.level,
+    title: notification.title,
+    message: notification.message,
+    category: notification.category ?? null,
+    timestamp: notification.timestamp,
+    action: notification.action ?? null,
+  }).catch((err) => {
+    console.error("[notifications] persist failed:", err);
+  });
+  if (userId) {
+    emitToUser(userId, "notification:new", notification);
+  } else {
+    emitToAll("notification:new", notification);
+  }
+}
+
+/** Emit panic cooldown / re-arm status */
+export function emitPanicCooldown(status: PanicCooldownEvent): void {
+  const dedupeId = status.active
+    ? `panic-cooldown-${status.reportId ?? status.cooldownEndsAt ?? status.timestamp}`
+    : `panic-ready-${status.reportId ?? status.cooldownEndsAt ?? status.timestamp}`;
+  emitNotification(null, {
+    id: dedupeId,
+    level: status.active ? "warning" : "success",
+    title: status.active ? "Panic cooldown active" : "Panic control re-armed",
+    message: status.active
+      ? `Emergency controls cooling down${status.reason ? `: ${status.reason}` : ""}.`
+      : "Panic controls can be used again.",
+    category: "panic",
+    timestamp: status.timestamp,
+    action: status.reportId
+      ? {
+          label: "Open report",
+          href: `/reports/liquidation/${status.reportId}`,
+        }
+      : undefined,
+  });
+  emitToAll("panic:cooldown", status);
 }

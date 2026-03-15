@@ -248,6 +248,8 @@ const BRIDGED_EVENTS = [
   "agent:alert",
   "autopilot:status",
   "position:update",
+  "notification:new",
+  "panic:cooldown",
   "pipeline:complete",
   "market:signal",
   "risk:alert",

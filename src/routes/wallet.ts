@@ -1,9 +1,11 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/schema";
 import { getUserIdAsync } from "../middleware/auth";
-import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import { generateWalletCredentials } from "../wallet/generate";
 import { getUsdcBalanceSnapshot } from "../utils/balances";
+import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import { fetchMarketBySlug } from "../utils/market-fetch";
 import {
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
@@ -59,27 +61,106 @@ router.post("/generate", async (req: Request, res: Response) => {
   }
 });
 
-router.get("/positions", async (_req, res) => {
+router.get("/positions", async (req, res) => {
   try {
-    const db = getDb();
-    const rows = db.prepare("SELECT slug, side, direction, source, amount, fill_price, status, executed_at, resolution_date FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL").all() as any[];
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
 
-    const priceRows = db.prepare(
-      `SELECT s.slug, s.probability FROM scanner_results s
-       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) latest
-       ON s.slug = latest.slug AND s.scanned_at = latest.latest`
-    ).all() as any[];
+    const linkedAgent = await loadLinkedAgentForUser(userId);
+    if (!linkedAgent) {
+      res.json([]);
+      return;
+    }
+
+    type ExecutionPositionRow = {
+      id: number;
+      slug: string;
+      side: string | null;
+      direction: string | null;
+      source: string | null;
+      amount: number;
+      fill_price: number | null;
+      status: string;
+      executed_at: number;
+      resolution_date: string | null;
+    };
+
+    type ScannerPriceRow = {
+      slug: string;
+      probability: number;
+    };
+
+    let rows: ExecutionPositionRow[];
+    let priceRows: ScannerPriceRow[];
+
+    if (isPgEnabled()) {
+      rows = await pgQuery<ExecutionPositionRow>(
+        `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at, resolution_date
+           FROM executions
+          WHERE agent_id = $1
+            AND status IN ('placed', 'paper')
+            AND pnl IS NULL
+          ORDER BY executed_at DESC`,
+        [linkedAgent.agentId]
+      );
+      priceRows = await pgQuery<ScannerPriceRow>(
+        `SELECT s.slug, s.probability
+           FROM scanner_results s
+           INNER JOIN (
+             SELECT slug, MAX(scanned_at) AS latest
+               FROM scanner_results
+              GROUP BY slug
+           ) latest
+             ON s.slug = latest.slug
+            AND s.scanned_at = latest.latest`
+      );
+    } else {
+      const db = getDb();
+      rows = db.prepare(
+        `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at, resolution_date
+           FROM executions
+          WHERE agent_id = ?
+            AND status IN ('placed', 'paper')
+            AND pnl IS NULL
+          ORDER BY executed_at DESC`
+      ).all(linkedAgent.agentId) as ExecutionPositionRow[];
+      priceRows = db.prepare(
+        `SELECT s.slug, s.probability FROM scanner_results s
+         INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) latest
+         ON s.slug = latest.slug AND s.scanned_at = latest.latest`
+      ).all() as ScannerPriceRow[];
+    }
+
     const currentPrices = new Map(priceRows.map(r => [r.slug, r.probability]));
-    const scannerDirections = getLatestScannerDirectionMap();
+    const scannerDirections = await getLatestScannerDirectionMap();
+
+    const marketMeta = new Map<string, Awaited<ReturnType<typeof fetchMarketBySlug>> | null>();
+    await Promise.all(
+      rows.map(async (row) => {
+        if (marketMeta.has(row.slug)) return;
+        try {
+          marketMeta.set(row.slug, await fetchMarketBySlug(row.slug));
+        } catch {
+          marketMeta.set(row.slug, null);
+        }
+      })
+    );
 
     const positions = rows.map(e => {
       const scannerDirection = scannerDirections.get(e.slug);
       const currentYes = currentPrices.get(e.slug) ?? getEntryYesPrice(e, scannerDirection);
       const metrics = calculateOpenExecutionMetrics(e, currentYes, scannerDirection);
+      const meta = marketMeta.get(e.slug);
+      const fallbackMarket = e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
       return {
-        id: `pos-${e.slug}-${e.executed_at}`,
+        id: String(e.id),
+        executionId: e.id,
         slug: e.slug,
-        market: e.slug.split("-").map((w: any) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "),
+        market: meta?.question ?? fallbackMarket,
+        question: meta?.question ?? fallbackMarket,
+        tokenId: meta?.token_id ?? null,
+        yesTokenId: meta?.yes_token_id ?? null,
+        noTokenId: meta?.no_token_id ?? null,
         direction: metrics.direction,
         size: e.amount,
         entryPrice: metrics.entryTokenPrice,
@@ -87,7 +168,9 @@ router.get("/positions", async (_req, res) => {
         pnl: metrics.pnl,
         pnlPct: e.amount > 0 ? metrics.pnl / e.amount : 0,
         source: e.source === "autopilot" ? "autopilot" : "manual",
-        resolutionDate: e.resolution_date ?? null
+        resolutionDate: e.resolution_date ?? meta?.resolution_date ?? null,
+        executedAt: e.executed_at,
+        status: e.status,
       };
     });
 

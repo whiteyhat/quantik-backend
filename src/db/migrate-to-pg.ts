@@ -25,6 +25,7 @@ const DB_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH
 // Tables to migrate with their PG primary key for ON CONFLICT
 const TABLES: { name: string; conflict: string }[] = [
   { name: "pipeline_runs", conflict: "id" },
+  { name: "pipeline_run_steps", conflict: "id" },
   { name: "trades", conflict: "id" },
   { name: "risk_configurations", conflict: "id" },
   { name: "agent_thresholds", conflict: "id" },
@@ -91,7 +92,7 @@ async function migrateTable(
   const pg = getPgPool();
   const columns = Object.keys(rows[0]);
   const quotedColumns = columns.map(quoteCol);
-  const BATCH_SIZE = 100;
+  const BATCH_SIZE = 500;
   let inserted = 0;
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {

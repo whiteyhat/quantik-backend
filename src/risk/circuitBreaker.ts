@@ -106,7 +106,7 @@ export class CircuitBreaker {
   /** Check daily drawdown and auto-trip if thresholds exceeded */
   async checkAndTrip(): Promise<CircuitBreakerStatus> {
     const db = getDb();
-    const dailyPnl = this.portfolio.getDailyPnL();
+    const dailyPnl = await this.portfolio.getDailyPnL();
     const totalCapital = await this.portfolio.getTotalCapital();
     const drawdownPct = totalCapital > 0 ? Math.abs(Math.min(dailyPnl, 0)) / totalCapital : 0;
     const now = Date.now();

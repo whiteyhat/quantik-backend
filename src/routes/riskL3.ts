@@ -6,6 +6,7 @@ import {
   getCircuitBreaker,
 } from "../risk";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import { requireClerkAuth } from "../middleware/auth";
 
 const router = Router();
@@ -18,9 +19,9 @@ router.get("/status", async (_req: Request, res: Response) => {
   const cbStatus = await cb.checkAndTrip();
 
   const totalCapital = await portfolio.getTotalCapital();
-  const deployed = portfolio.getDeployedCapital();
+  const deployed = await portfolio.getDeployedCapital();
   const available = await portfolio.getAvailableCapital();
-  const dailyPnl = portfolio.getDailyPnL();
+  const dailyPnl = await portfolio.getDailyPnL();
 
   const themeExposure: Record<string, number> = {};
   for (const [theme, exposure] of correlation.getThemeExposure()) {
@@ -28,23 +29,43 @@ router.get("/status", async (_req: Request, res: Response) => {
   }
 
   // Fetch risk config from DB (real, not hardcoded)
-  const db = getDb();
-  const gcb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
-    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
-     FROM global_circuit_breakers gcb
-     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1 LIMIT 1`
-  ).get();
+  let gcb: { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number } | undefined;
+  let luciferRow: { var_threshold: number } | undefined;
+
+  if (isPgEnabled()) {
+    gcb = (await pgQueryOne<{ drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    )) ?? undefined;
+
+    luciferRow = (await pgQueryOne<{ var_threshold: number }>(
+      `SELECT at.var_threshold
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 AND at.agent_name = $1 LIMIT 1`,
+      ["lucifer"]
+    )) ?? undefined;
+  } else {
+    const db = getDb();
+    gcb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    ).get();
+
+    luciferRow = db.prepare<[], { var_threshold: number }>(
+      `SELECT at.var_threshold
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 AND at.agent_name = 'lucifer' LIMIT 1`
+    ).get();
+  }
 
   const rawMaxPos = gcb?.max_position_size_pct ?? 0.10;
   const maxPositionSizePct = rawMaxPos > 1 ? rawMaxPos / 100 : rawMaxPos;
-
-  const luciferRow = db.prepare<[], { var_threshold: number }>(
-    `SELECT at.var_threshold
-     FROM agent_thresholds at
-     JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1 AND at.agent_name = 'lucifer' LIMIT 1`
-  ).get();
 
   res.json({
     totalCapital,
@@ -56,7 +77,7 @@ router.get("/status", async (_req: Request, res: Response) => {
     circuitBreaker: cbStatus.state, // Frontend expects string: "ARMED" | "WARNING" | "TRIGGERED"
     circuitBreakerDetail: cbStatus,  // Full object for advanced consumers
     themeExposure,
-    positionCount: portfolio.getOpenPositions().length,
+    positionCount: (await portfolio.getOpenPositions()).length,
     // Risk configuration (live from DB)
     maxDrawdownPct: gcb?.drawdown_limit_pct ?? 0.15,
     maxPositionSizePct,
@@ -68,7 +89,7 @@ router.get("/status", async (_req: Request, res: Response) => {
 router.get("/positions", async (_req: Request, res: Response) => {
   const portfolio = getPortfolioManager();
   const correlation = getCorrelationMonitor();
-  const positions = portfolio.getOpenPositions();
+  const positions = await portfolio.getOpenPositions();
   const totalCapital = await portfolio.getTotalCapital();
 
   const enriched = positions.map((p) => ({
@@ -102,11 +123,44 @@ router.post("/circuit-breaker/reset", (_req: Request, res: Response) => {
 });
 
 // ── EMERGENCY RESET ───────────────────────────────────────────
-router.get("/emergency/reset-panic", requireClerkAuth, (_req: Request, res: Response) => {
-  const db = getDb();
+router.get("/emergency/reset-panic", requireClerkAuth, async (_req: Request, res: Response) => {
   try {
-    db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();
-    db.prepare("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1").run();
+    if (isPgEnabled()) {
+      const latestEvent = await pgQueryOne<{ id: string; cooldown_until: number | null }>(
+        "SELECT id, cooldown_until FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
+      );
+      if (latestEvent?.cooldown_until && latestEvent.cooldown_until > Date.now()) {
+        res.status(409).json({
+          success: false,
+          error: "Panic cooldown is still active. Use /api/v1/panic-mode/rearm after the cooldown expires.",
+          cooldownEndsAt: latestEvent.cooldown_until,
+        });
+        return;
+      }
+      await pgQuery("UPDATE global_circuit_breakers SET panic_mode_enabled = 0");
+      await pgQuery("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1");
+      if (latestEvent?.id) {
+        await pgQuery("UPDATE panic_mode_events SET rearmed_at = $1 WHERE id = $2", [Date.now(), latestEvent.id]);
+      }
+    } else {
+      const db = getDb();
+      const latestEvent = db.prepare(
+        "SELECT id, cooldown_until FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
+      ).get() as { id: string; cooldown_until: number | null } | undefined;
+      if (latestEvent?.cooldown_until && latestEvent.cooldown_until > Date.now()) {
+        res.status(409).json({
+          success: false,
+          error: "Panic cooldown is still active. Use /api/v1/panic-mode/rearm after the cooldown expires.",
+          cooldownEndsAt: latestEvent.cooldown_until,
+        });
+        return;
+      }
+      db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();
+      db.prepare("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1").run();
+      if (latestEvent?.id) {
+        db.prepare("UPDATE panic_mode_events SET rearmed_at = ? WHERE id = ?").run(Date.now(), latestEvent.id);
+      }
+    }
     res.json({ success: true, message: "Panic mode and circuit breaker reset successfully." });
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) });

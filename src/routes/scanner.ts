@@ -4,6 +4,7 @@ import { getDb } from "../db/schema";
 import { getCircuitBreaker, getPortfolioManager } from "../risk";
 import { getSettings } from "../db/queries";
 import { getLatestScannerDirectionMap, resolveExecutionDirection } from "../utils/executionDirection";
+import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 
 const router = Router();
 const scanner = new MarketScanner();
@@ -21,15 +22,26 @@ router.post("/run", async (_req: Request, res: Response) => {
 });
 
 // ── GET /api/scanner/status ────────────────────────────────────
-router.get("/status", (_req: Request, res: Response) => {
+router.get("/status", async (_req: Request, res: Response) => {
   const s = getScannerStatus();
   const cb = getCircuitBreaker().getStatus();
   const portfolio = getPortfolioManager();
-  const settings = getSettings();
-  
+  const settings = await getSettings();
+
   const todayStart = new Date().setUTCHours(0, 0, 0, 0);
-  const db = getDb();
-  const { tradesToday } = db.prepare("SELECT COUNT(*) AS tradesToday FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayStart) as any;
+
+  let tradesToday = 0;
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<{ tradestoday: string }>(
+      "SELECT COUNT(*) AS tradestoday FROM executions WHERE executed_at >= $1 AND status != 'failed'",
+      [todayStart]
+    );
+    tradesToday = row ? parseInt(row.tradestoday, 10) : 0;
+  } else {
+    const db = getDb();
+    const row = db.prepare("SELECT COUNT(*) AS tradesToday FROM executions WHERE executed_at >= ? AND status != 'failed'").get(todayStart) as any;
+    tradesToday = row?.tradesToday || 0;
+  }
 
   res.json({
     isRunning: s.running,
@@ -48,8 +60,7 @@ router.get("/status", (_req: Request, res: Response) => {
 // ?executed=true  → returns execution log from executions table
 // ?alerts=true    → returns high-confidence scanner signals only
 // default         → returns all scanner results
-router.get("/results", (req: Request, res: Response) => {
-  const db = getDb();
+router.get("/results", async (req: Request, res: Response) => {
   const limit = Math.min(Number(req.query["limit"] ?? 50), 200);
   const since = req.query["since"] ? Number(req.query["since"]) : 0;
   const alertsOnly = req.query["alerts"] === "true";
@@ -57,10 +68,19 @@ router.get("/results", (req: Request, res: Response) => {
 
   // When ?executed=true, return data from executions table for the Execution Log
   if (executedOnly) {
-    const execRows = db.prepare(
-      "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
-    ).all(since, limit) as any[];
-    const scannerDirections = getLatestScannerDirectionMap();
+    let execRows: any[];
+    if (isPgEnabled()) {
+      execRows = await pgQuery(
+        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > $1 ORDER BY executed_at DESC LIMIT $2",
+        [since, limit]
+      );
+    } else {
+      const db = getDb();
+      execRows = db.prepare(
+        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
+      ).all(since, limit) as any[];
+    }
+    const scannerDirections = await getLatestScannerDirectionMap();
 
     const results = execRows.map((e: any) => ({
       id: String(e.id),
@@ -90,15 +110,30 @@ router.get("/results", (req: Request, res: Response) => {
     pipeline_result: string;
   };
 
-  let query = "SELECT * FROM scanner_results WHERE scanned_at > ?";
-  const params: (number | string)[] = [since];
-  if (alertsOnly) {
-    query += " AND sigma_confidence >= 0.70 AND kelly_fraction >= 0.40";
-  }
-  query += " ORDER BY scanned_at DESC LIMIT ?";
-  params.push(limit);
+  let rows: Row[];
+  if (isPgEnabled()) {
+    let query = "SELECT * FROM scanner_results WHERE scanned_at > $1";
+    const params: (number | string)[] = [since];
+    let paramIdx = 2;
+    if (alertsOnly) {
+      query += " AND sigma_confidence >= 0.70 AND kelly_fraction >= 0.40";
+    }
+    query += ` ORDER BY scanned_at DESC LIMIT $${paramIdx}`;
+    params.push(limit);
 
-  const rows = db.prepare(query).all(...params) as Row[];
+    rows = await pgQuery<Row>(query, params);
+  } else {
+    const db = getDb();
+    let query = "SELECT * FROM scanner_results WHERE scanned_at > ?";
+    const params: (number | string)[] = [since];
+    if (alertsOnly) {
+      query += " AND sigma_confidence >= 0.70 AND kelly_fraction >= 0.40";
+    }
+    query += " ORDER BY scanned_at DESC LIMIT ?";
+    params.push(limit);
+
+    rows = db.prepare(query).all(...params) as Row[];
+  }
 
   const results = rows.map((r) => ({
     id: r.id,
@@ -120,8 +155,7 @@ router.get("/results", (req: Request, res: Response) => {
 });
 
 // ── GET /api/scanner/candidates ────────────────────────────────
-router.get("/candidates", (_req: Request, res: Response) => {
-  const db = getDb();
+router.get("/candidates", async (_req: Request, res: Response) => {
   const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
 
   type CandRow = {
@@ -133,16 +167,31 @@ router.get("/candidates", (_req: Request, res: Response) => {
     probability: number;
   };
 
-  const rows = db.prepare(`
-    SELECT slug, MAX(scanned_at) as scanned_at, sigma_confidence, kelly_fraction, recommendation, probability
-    FROM scanner_results
-    WHERE scanned_at > ?
-      AND sigma_confidence >= 0.70
-      AND kelly_fraction >= 0.40
-    GROUP BY slug
-    ORDER BY sigma_confidence DESC
-    LIMIT 20
-  `).all(oneDayAgo) as CandRow[];
+  let rows: CandRow[];
+  if (isPgEnabled()) {
+    rows = await pgQuery<CandRow>(`
+      SELECT slug, MAX(scanned_at) as scanned_at, sigma_confidence, kelly_fraction, recommendation, probability
+      FROM scanner_results
+      WHERE scanned_at > $1
+        AND sigma_confidence >= 0.70
+        AND kelly_fraction >= 0.40
+      GROUP BY slug, sigma_confidence, kelly_fraction, recommendation, probability
+      ORDER BY sigma_confidence DESC
+      LIMIT 20
+    `, [oneDayAgo]);
+  } else {
+    const db = getDb();
+    rows = db.prepare(`
+      SELECT slug, MAX(scanned_at) as scanned_at, sigma_confidence, kelly_fraction, recommendation, probability
+      FROM scanner_results
+      WHERE scanned_at > ?
+        AND sigma_confidence >= 0.70
+        AND kelly_fraction >= 0.40
+      GROUP BY slug
+      ORDER BY sigma_confidence DESC
+      LIMIT 20
+    `).all(oneDayAgo) as CandRow[];
+  }
 
   res.json({ ok: true, count: rows.length, candidates: rows });
 });

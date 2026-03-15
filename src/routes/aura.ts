@@ -13,6 +13,9 @@ function getAuraSourceAvailability() {
     cryptopanic: !!process.env.CRYPTOPANIC_API_KEY,
     coindesk: !!process.env.COINDESK_API_KEY,
     gnews: true, // no key required
+    fred: !!process.env.FRED_API_KEY,
+    bls: !!process.env.BLS_API_KEY,
+    metaculus: !!process.env.METACULUS_API_KEY,
     newsApiLegacy: !!process.env.NEWS_API_KEY,
   };
 }

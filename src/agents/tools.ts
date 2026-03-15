@@ -7,6 +7,7 @@
 // Tools are executed server-side — the LLM never gets raw DB access.
 
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
 import {
   loadOpsSnapshot,
   loadPortfolioSnapshot,
@@ -350,20 +351,28 @@ function executePlaceTrade(args: { slug: string; direction: string; size: number
   };
 }
 
-function executeGetScannerSignals(args: { alerts_only?: string }): unknown {
+async function executeGetScannerSignals(args: { alerts_only?: string }): Promise<unknown> {
   return loadScannerSnapshot({
     alertsOnly: args.alerts_only === "true",
     limit: 10,
   });
 }
 
-function executeGetPipelineHistory(args: { limit?: number }): unknown {
-  const db = getDb();
+async function executeGetPipelineHistory(args: { limit?: number }): Promise<unknown> {
   const limit = Math.min(Math.max(1, args.limit ?? 5), 20);
 
-  const runs = db.prepare(
-    "SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state FROM pipeline_runs ORDER BY created_at DESC LIMIT ?"
-  ).all(limit) as any[];
+  let runs: any[];
+  if (isPgEnabled()) {
+    runs = await pgQuery(
+      "SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state FROM pipeline_runs ORDER BY created_at DESC LIMIT $1",
+      [limit]
+    );
+  } else {
+    const db = getDb();
+    runs = db.prepare(
+      "SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state FROM pipeline_runs ORDER BY created_at DESC LIMIT ?"
+    ).all(limit) as any[];
+  }
 
   return {
     runs: runs.map((r: any) => ({
@@ -380,15 +389,25 @@ function executeGetPipelineHistory(args: { limit?: number }): unknown {
   };
 }
 
-function executeGetAgentStatus(context: ToolExecutionContext | null): unknown {
+async function executeGetAgentStatus(context: ToolExecutionContext | null): Promise<unknown> {
   if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
-  const db = getDb();
-  const agent = db.prepare(
-    `SELECT id, agent_code, status, name, avatar_emoji, agent_type, description,
-            wallet_address, connection_status, last_heartbeat, created_at, updated_at, deployed_at
-     FROM agents WHERE id = ?`
-  ).get(context.linkedAgentId) as any;
+  let agent: any;
+  if (isPgEnabled()) {
+    agent = await pgQueryOne(
+      `SELECT id, agent_code, status, name, avatar_emoji, agent_type, description,
+              wallet_address, connection_status, last_heartbeat, created_at, updated_at, deployed_at
+       FROM agents WHERE id = $1`,
+      [context.linkedAgentId]
+    );
+  } else {
+    const db = getDb();
+    agent = db.prepare(
+      `SELECT id, agent_code, status, name, avatar_emoji, agent_type, description,
+              wallet_address, connection_status, last_heartbeat, created_at, updated_at, deployed_at
+       FROM agents WHERE id = ?`
+    ).get(context.linkedAgentId) as any;
+  }
 
   if (!agent) return { error: "Agent not found" };
 
@@ -408,43 +427,74 @@ function executeGetAgentStatus(context: ToolExecutionContext | null): unknown {
   };
 }
 
-function executeHeartbeat(context: ToolExecutionContext | null): unknown {
+async function executeHeartbeat(context: ToolExecutionContext | null): Promise<unknown> {
   if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
   const now = Date.now();
-  const db = getDb();
-  db.prepare(
-    "UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?"
-  ).run(now, context.linkedAgentId);
+  if (isPgEnabled()) {
+    await pgExec(
+      "UPDATE agents SET last_heartbeat = $1, connection_status = 'connected' WHERE id = $2",
+      [now, context.linkedAgentId]
+    );
+  } else {
+    const db = getDb();
+    db.prepare(
+      "UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?"
+    ).run(now, context.linkedAgentId);
+  }
 
   return { status: "ok", server_time: now, your_status: "connected" };
 }
 
 // ── New Tool Executors (Phase 7 — Full Autonomy) ────────────────────────────
 
-function executeClosePosition(args: { slug: string }, context: ToolExecutionContext | null): unknown {
+async function executeClosePosition(args: { slug: string }, context: ToolExecutionContext | null): Promise<unknown> {
   if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
-  const db = getDb();
-
   // Find the open execution for this slug belonging to this agent
-  const execution = db.prepare(
-    `SELECT id, slug, side, direction, amount, fill_price, status FROM executions
-     WHERE slug = ? AND agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
-     ORDER BY executed_at DESC LIMIT 1`
-  ).get(args.slug, context.linkedAgentId) as {
+  let execution: {
     id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; status: string;
   } | undefined;
+
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<{
+      id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; status: string;
+    }>(
+      `SELECT id, slug, side, direction, amount, fill_price, status FROM executions
+       WHERE slug = $1 AND agent_id = $2 AND status IN ('placed', 'paper') AND pnl IS NULL
+       ORDER BY executed_at DESC LIMIT 1`,
+      [args.slug, context.linkedAgentId]
+    );
+    execution = row ?? undefined;
+  } else {
+    const db = getDb();
+    execution = db.prepare(
+      `SELECT id, slug, side, direction, amount, fill_price, status FROM executions
+       WHERE slug = ? AND agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
+       ORDER BY executed_at DESC LIMIT 1`
+    ).get(args.slug, context.linkedAgentId) as typeof execution;
+  }
 
   if (!execution) {
     return { error: `No open position found for slug: ${args.slug}` };
   }
 
   // Get current price for P&L calculation
-  const priceRow = db.prepare(
-    `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
-  ).get(args.slug) as { probability: number } | undefined;
-  const scannerDirection = getLatestScannerDirectionMap().get(args.slug);
+  let priceRow: { probability: number } | undefined;
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<{ probability: number }>(
+      `SELECT probability FROM scanner_results WHERE slug = $1 ORDER BY scanned_at DESC LIMIT 1`,
+      [args.slug]
+    );
+    priceRow = row ?? undefined;
+  } else {
+    const db = getDb();
+    priceRow = db.prepare(
+      `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
+    ).get(args.slug) as { probability: number } | undefined;
+  }
+
+  const scannerDirection = (await getLatestScannerDirectionMap()).get(args.slug);
   const metrics = calculateOpenExecutionMetrics(
     execution,
     priceRow?.probability ?? getEntryYesPrice(execution, scannerDirection),
@@ -452,9 +502,18 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
   );
 
   const now = Date.now();
-  db.prepare(
-    "UPDATE executions SET status = 'closed', pnl = ?, closed_at = ?, updated_at = ? WHERE id = ?"
-  ).run(Math.round(metrics.pnl * 100) / 100, now, now, execution.id);
+  const pnlRounded = Math.round(metrics.pnl * 100) / 100;
+  if (isPgEnabled()) {
+    await pgExec(
+      "UPDATE executions SET status = 'closed', pnl = $1, closed_at = $2, updated_at = $3 WHERE id = $4",
+      [pnlRounded, now, now, execution.id]
+    );
+  } else {
+    const db = getDb();
+    db.prepare(
+      "UPDATE executions SET status = 'closed', pnl = ?, closed_at = ?, updated_at = ? WHERE id = ?"
+    ).run(pnlRounded, now, now, execution.id);
+  }
 
   return {
     slug: args.slug,
@@ -462,7 +521,7 @@ function executeClosePosition(args: { slug: string }, context: ToolExecutionCont
     size: execution.amount,
     entry_price: metrics.entryTokenPrice,
     exit_price: metrics.currentTokenPrice,
-    pnl: Math.round(metrics.pnl * 100) / 100,
+    pnl: pnlRounded,
     status: "closed",
   };
 }
@@ -502,22 +561,41 @@ async function executeGetMarketPrice(args: { slug: string }): Promise<unknown> {
   }
 }
 
-function executeGetRiskConfig(): unknown {
-  const db = getDb();
+async function executeGetRiskConfig(): Promise<unknown> {
+  let cb: { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number } | undefined;
+  let thresholds: { agent_name: string; var_threshold: number; auto_exec_enabled: number }[];
 
-  const cb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
-    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
-     FROM global_circuit_breakers gcb
-     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1 LIMIT 1`
-  ).get();
+  if (isPgEnabled()) {
+    const cbRow = await pgQueryOne<{ drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    );
+    cb = cbRow ?? undefined;
 
-  const thresholds = db.prepare<[], { agent_name: string; var_threshold: number; auto_exec_enabled: number }>(
-    `SELECT at.agent_name, at.var_threshold, at.auto_exec_enabled
-     FROM agent_thresholds at
-     JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1`
-  ).all();
+    thresholds = await pgQuery<{ agent_name: string; var_threshold: number; auto_exec_enabled: number }>(
+      `SELECT at.agent_name, at.var_threshold, at.auto_exec_enabled
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1`
+    );
+  } else {
+    const db = getDb();
+    cb = db.prepare<[], { drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 LIMIT 1`
+    ).get();
+
+    thresholds = db.prepare<[], { agent_name: string; var_threshold: number; auto_exec_enabled: number }>(
+      `SELECT at.agent_name, at.var_threshold, at.auto_exec_enabled
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1`
+    ).all();
+  }
 
   const rawMaxPos = cb?.max_position_size_pct ?? 0.1;
   const maxPositionSize = rawMaxPos > 1 ? rawMaxPos / 100 : rawMaxPos;
@@ -534,51 +612,103 @@ function executeGetRiskConfig(): unknown {
   };
 }
 
-function executeUpdateRiskConfig(args: { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }): unknown {
-  const db = getDb();
-
+async function executeUpdateRiskConfig(args: { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }): Promise<unknown> {
   // Get active risk config
-  const config = db.prepare<[], { id: string }>(
-    "SELECT id FROM risk_configurations WHERE is_active = 1 LIMIT 1"
-  ).get();
+  let config: { id: string } | undefined;
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<{ id: string }>(
+      "SELECT id FROM risk_configurations WHERE is_active = 1 LIMIT 1"
+    );
+    config = row ?? undefined;
+  } else {
+    const db = getDb();
+    config = db.prepare<[], { id: string }>(
+      "SELECT id FROM risk_configurations WHERE is_active = 1 LIMIT 1"
+    ).get();
+  }
 
   if (!config) return { error: "No active risk configuration found" };
 
-  const cb = db.prepare<[string], { id: string; drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
-    "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = ? LIMIT 1"
-  ).get(config.id);
+  let cb: { id: string; drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number } | undefined;
+  if (isPgEnabled()) {
+    const row = await pgQueryOne<typeof cb & {}>(
+      "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = $1 LIMIT 1",
+      [config.id]
+    );
+    cb = row ?? undefined;
+  } else {
+    const db = getDb();
+    cb = db.prepare<[string], { id: string; drawdown_limit_pct: number; max_position_size_pct: number; kelly_fraction_multiplier: number }>(
+      "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = ? LIMIT 1"
+    ).get(config.id);
+  }
 
   if (!cb) return { error: "No circuit breaker config found" };
-
-  const updates: string[] = [];
-  const values: (number | string)[] = [];
 
   if (args.max_position_size != null) {
     if (args.max_position_size < 0.01 || args.max_position_size > 1.0) {
       return { error: "max_position_size must be between 0.01 and 1.0" };
     }
-    updates.push("max_position_size_pct = ?");
-    values.push(args.max_position_size);
   }
   if (args.drawdown_limit != null) {
     if (args.drawdown_limit < 0.01 || args.drawdown_limit > 1.0) {
       return { error: "drawdown_limit must be between 0.01 and 1.0" };
     }
-    updates.push("drawdown_limit_pct = ?");
-    values.push(args.drawdown_limit);
   }
   if (args.kelly_multiplier != null) {
     if (args.kelly_multiplier < 0.01 || args.kelly_multiplier > 1.0) {
       return { error: "kelly_multiplier must be between 0.01 and 1.0" };
     }
-    updates.push("kelly_fraction_multiplier = ?");
-    values.push(args.kelly_multiplier);
   }
 
-  if (updates.length === 0) return { error: "No fields to update" };
+  if (isPgEnabled()) {
+    const updates: string[] = [];
+    const values: (number | string)[] = [];
+    let paramIdx = 1;
 
-  values.push(cb.id);
-  db.prepare(`UPDATE global_circuit_breakers SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    if (args.max_position_size != null) {
+      updates.push(`max_position_size_pct = $${paramIdx++}`);
+      values.push(args.max_position_size);
+    }
+    if (args.drawdown_limit != null) {
+      updates.push(`drawdown_limit_pct = $${paramIdx++}`);
+      values.push(args.drawdown_limit);
+    }
+    if (args.kelly_multiplier != null) {
+      updates.push(`kelly_fraction_multiplier = $${paramIdx++}`);
+      values.push(args.kelly_multiplier);
+    }
+
+    if (updates.length === 0) return { error: "No fields to update" };
+
+    values.push(cb.id);
+    await pgExec(
+      `UPDATE global_circuit_breakers SET ${updates.join(", ")} WHERE id = $${paramIdx}`,
+      values
+    );
+  } else {
+    const updates: string[] = [];
+    const values: (number | string)[] = [];
+
+    if (args.max_position_size != null) {
+      updates.push("max_position_size_pct = ?");
+      values.push(args.max_position_size);
+    }
+    if (args.drawdown_limit != null) {
+      updates.push("drawdown_limit_pct = ?");
+      values.push(args.drawdown_limit);
+    }
+    if (args.kelly_multiplier != null) {
+      updates.push("kelly_fraction_multiplier = ?");
+      values.push(args.kelly_multiplier);
+    }
+
+    if (updates.length === 0) return { error: "No fields to update" };
+
+    values.push(cb.id);
+    const db = getDb();
+    db.prepare(`UPDATE global_circuit_breakers SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+  }
 
   // Return updated config
   return executeGetRiskConfig();
@@ -609,23 +739,46 @@ async function executeTriggerScanner(): Promise<unknown> {
   }
 }
 
-function executeGetPipelineOutput(args: { run_id: string }): unknown {
-  const db = getDb();
+async function executeGetPipelineOutput(args: { run_id: string }): Promise<unknown> {
+  let run: any;
+  let aura: any, flux: any, clause: any, oracle: any, edge: any, research: any;
 
-  const run = db.prepare(
-    `SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state
-     FROM pipeline_runs WHERE id = ?`
-  ).get(args.run_id) as any;
+  if (isPgEnabled()) {
+    run = await pgQueryOne(
+      `SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state
+       FROM pipeline_runs WHERE id = $1`,
+      [args.run_id]
+    );
 
-  if (!run) return { error: `Pipeline run not found: ${args.run_id}` };
+    if (!run) return { error: `Pipeline run not found: ${args.run_id}` };
 
-  // Fetch each agent's output for this run
-  const aura = db.prepare("SELECT * FROM aura_results WHERE pipeline_run_id = ?").get(args.run_id);
-  const flux = db.prepare("SELECT * FROM flux_results WHERE pipeline_run_id = ?").get(args.run_id);
-  const clause = db.prepare("SELECT * FROM clause_results WHERE pipeline_run_id = ?").get(args.run_id);
-  const oracle = db.prepare("SELECT * FROM oracle_results WHERE pipeline_run_id = ?").get(args.run_id);
-  const edge = db.prepare("SELECT * FROM edge_results WHERE pipeline_run_id = ?").get(args.run_id);
-  const research = db.prepare("SELECT * FROM research_notes WHERE pipeline_run_id = ?").get(args.run_id);
+    // Fetch each agent's output for this run in parallel
+    [aura, flux, clause, oracle, edge, research] = await Promise.all([
+      pgQueryOne("SELECT * FROM aura_results WHERE pipeline_run_id = $1", [args.run_id]),
+      pgQueryOne("SELECT * FROM flux_results WHERE pipeline_run_id = $1", [args.run_id]),
+      pgQueryOne("SELECT * FROM clause_results WHERE pipeline_run_id = $1", [args.run_id]),
+      pgQueryOne("SELECT * FROM oracle_results WHERE pipeline_run_id = $1", [args.run_id]),
+      pgQueryOne("SELECT * FROM edge_results WHERE pipeline_run_id = $1", [args.run_id]),
+      pgQueryOne("SELECT * FROM research_notes WHERE pipeline_run_id = $1", [args.run_id]),
+    ]);
+  } else {
+    const db = getDb();
+
+    run = db.prepare(
+      `SELECT id, market_slug, market_question, created_at, completed_at, decision, confidence, signal_state
+       FROM pipeline_runs WHERE id = ?`
+    ).get(args.run_id) as any;
+
+    if (!run) return { error: `Pipeline run not found: ${args.run_id}` };
+
+    // Fetch each agent's output for this run
+    aura = db.prepare("SELECT * FROM aura_results WHERE pipeline_run_id = ?").get(args.run_id);
+    flux = db.prepare("SELECT * FROM flux_results WHERE pipeline_run_id = ?").get(args.run_id);
+    clause = db.prepare("SELECT * FROM clause_results WHERE pipeline_run_id = ?").get(args.run_id);
+    oracle = db.prepare("SELECT * FROM oracle_results WHERE pipeline_run_id = ?").get(args.run_id);
+    edge = db.prepare("SELECT * FROM edge_results WHERE pipeline_run_id = ?").get(args.run_id);
+    research = db.prepare("SELECT * FROM research_notes WHERE pipeline_run_id = ?").get(args.run_id);
+  }
 
   return {
     run_id: run.id,
@@ -647,21 +800,19 @@ function executeGetPipelineOutput(args: { run_id: string }): unknown {
   };
 }
 
-function executeUpdateWebhookConfig(
+async function executeUpdateWebhookConfig(
   args: { endpoint_url?: string; webhook_events?: string },
   context: ToolExecutionContext | null,
-): unknown {
+): Promise<unknown> {
   if (!context?.linkedAgentId) return { error: "Agent context not available" };
 
-  const db = getDb();
-  const updates: string[] = [];
-  const values: (string | null)[] = [];
+  // Validate inputs first (shared between PG and SQLite paths)
+  const fieldUpdates: { column: string; value: string | null }[] = [];
 
   if (args.endpoint_url !== undefined) {
     if (args.endpoint_url === "" || args.endpoint_url === null) {
       // Allow clearing the URL
-      updates.push("endpoint_url = ?");
-      values.push(null);
+      fieldUpdates.push({ column: "endpoint_url", value: null });
     } else {
       // SSRF validation (same rules as agent creation)
       if (args.endpoint_url.length > 500) return { error: "endpoint_url must be 500 characters or less" };
@@ -680,8 +831,7 @@ function executeUpdateWebhookConfig(
       } catch {
         return { error: "endpoint_url is not a valid URL" };
       }
-      updates.push("endpoint_url = ?");
-      values.push(args.endpoint_url);
+      fieldUpdates.push({ column: "endpoint_url", value: args.endpoint_url });
     }
   }
 
@@ -691,25 +841,60 @@ function executeUpdateWebhookConfig(
       if (!Array.isArray(events) || !events.every((e: unknown) => typeof e === "string")) {
         return { error: "webhook_events must be a JSON array of strings" };
       }
-      updates.push("webhook_events = ?");
-      values.push(JSON.stringify(events));
+      fieldUpdates.push({ column: "webhook_events", value: JSON.stringify(events) });
     } catch {
       return { error: "webhook_events must be valid JSON" };
     }
   }
 
-  if (updates.length === 0) return { error: "No fields to update" };
+  if (fieldUpdates.length === 0) return { error: "No fields to update" };
 
-  updates.push("updated_at = ?");
-  values.push(String(Date.now()));
-  values.push(context.linkedAgentId);
+  let agent: { endpoint_url: string | null; webhook_events: string | null };
 
-  db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+  if (isPgEnabled()) {
+    const setClauses: string[] = [];
+    const values: (string | null)[] = [];
+    let paramIdx = 1;
 
-  // Return updated config
-  const agent = db.prepare(
-    "SELECT endpoint_url, webhook_events FROM agents WHERE id = ?"
-  ).get(context.linkedAgentId) as { endpoint_url: string | null; webhook_events: string | null };
+    for (const f of fieldUpdates) {
+      setClauses.push(`${f.column} = $${paramIdx++}`);
+      values.push(f.value);
+    }
+    setClauses.push(`updated_at = $${paramIdx++}`);
+    values.push(String(Date.now()));
+    values.push(context.linkedAgentId);
+
+    await pgExec(
+      `UPDATE agents SET ${setClauses.join(", ")} WHERE id = $${paramIdx}`,
+      values
+    );
+
+    // Return updated config
+    const row = await pgQueryOne<{ endpoint_url: string | null; webhook_events: string | null }>(
+      "SELECT endpoint_url, webhook_events FROM agents WHERE id = $1",
+      [context.linkedAgentId]
+    );
+    agent = row ?? { endpoint_url: null, webhook_events: null };
+  } else {
+    const db = getDb();
+    const updates: string[] = [];
+    const values: (string | null)[] = [];
+
+    for (const f of fieldUpdates) {
+      updates.push(`${f.column} = ?`);
+      values.push(f.value);
+    }
+    updates.push("updated_at = ?");
+    values.push(String(Date.now()));
+    values.push(context.linkedAgentId);
+
+    db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+
+    // Return updated config
+    agent = db.prepare(
+      "SELECT endpoint_url, webhook_events FROM agents WHERE id = ?"
+    ).get(context.linkedAgentId) as { endpoint_url: string | null; webhook_events: string | null };
+  }
 
   let parsedEvents: string[] = ["*"];
   try { parsedEvents = JSON.parse(agent.webhook_events ?? '["*"]'); } catch { /* ignore */ }
@@ -772,27 +957,27 @@ export async function executeTool(
     case "place_trade":
       return { name, data: executePlaceTrade(args as { slug: string; direction: string; size: number }) };
     case "get_scanner_signals":
-      return { name, data: executeGetScannerSignals(args as { alerts_only?: string }) };
+      return { name, data: await executeGetScannerSignals(args as { alerts_only?: string }) };
     case "get_pipeline_history":
-      return { name, data: executeGetPipelineHistory(args as { limit?: number }) };
+      return { name, data: await executeGetPipelineHistory(args as { limit?: number }) };
     case "get_agent_status":
-      return { name, data: executeGetAgentStatus(context) };
+      return { name, data: await executeGetAgentStatus(context) };
     case "heartbeat":
-      return { name, data: executeHeartbeat(context) };
+      return { name, data: await executeHeartbeat(context) };
     case "close_position":
-      return { name, data: executeClosePosition(args as { slug: string }, context) };
+      return { name, data: await executeClosePosition(args as { slug: string }, context) };
     case "get_market_price":
       return { name, data: await executeGetMarketPrice(args as { slug: string }) };
     case "get_risk_config":
-      return { name, data: executeGetRiskConfig() };
+      return { name, data: await executeGetRiskConfig() };
     case "update_risk_config":
-      return { name, data: executeUpdateRiskConfig(args as { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }) };
+      return { name, data: await executeUpdateRiskConfig(args as { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }) };
     case "trigger_scanner":
       return { name, data: await executeTriggerScanner() };
     case "get_pipeline_output":
-      return { name, data: executeGetPipelineOutput(args as { run_id: string }) };
+      return { name, data: await executeGetPipelineOutput(args as { run_id: string }) };
     case "update_webhook_config":
-      return { name, data: executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }, context) };
+      return { name, data: await executeUpdateWebhookConfig(args as { endpoint_url?: string; webhook_events?: string }, context) };
     case "get_health_score":
       return { name, data: await executeGetHealthScore(context) };
     case "get_polymarket_status":

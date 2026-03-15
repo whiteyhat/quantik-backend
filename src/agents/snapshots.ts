@@ -3,7 +3,7 @@ import { computeHealthScore, type HealthScore } from "../monitoring/healthScore"
 import { getCircuitBreaker, getCorrelationMonitor } from "../risk";
 import { getScannerStatus } from "../scanner/marketScanner";
 import { getWalletFundingSnapshot } from "../utils/balances";
-import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import {
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
@@ -223,39 +223,71 @@ function parseScannerQuestion(rawPipeline: string | null, slug: string): string 
   return slugToQuestion(slug);
 }
 
-function getLatestScannerPriceMap(): Map<string, number> {
-  const db = getDb();
-  const rows = db.prepare(
-    `SELECT s.slug, s.probability
-     FROM scanner_results s
-     INNER JOIN (
-       SELECT slug, MAX(scanned_at) AS latest
+async function getLatestScannerPriceMap(): Promise<Map<string, number>> {
+  let rows: Array<{ slug: string; probability: number }>;
+
+  if (isPgEnabled()) {
+    rows = await pgQuery<{ slug: string; probability: number }>(
+      `SELECT DISTINCT ON (slug) slug, probability
        FROM scanner_results
-       GROUP BY slug
-     ) latest
-       ON latest.slug = s.slug AND latest.latest = s.scanned_at`
-  ).all() as Array<{ slug: string; probability: number }>;
+       ORDER BY slug, scanned_at DESC`
+    );
+  } else {
+    const db = getDb();
+    rows = db.prepare(
+      `SELECT s.slug, s.probability
+       FROM scanner_results s
+       INNER JOIN (
+         SELECT slug, MAX(scanned_at) AS latest
+         FROM scanner_results
+         GROUP BY slug
+       ) latest
+         ON latest.slug = s.slug AND latest.latest = s.scanned_at`
+    ).all() as Array<{ slug: string; probability: number }>;
+  }
 
   return new Map(rows.map((row) => [row.slug, Number(row.probability ?? 0.5)]));
 }
 
-function getRiskConfig(): { config: RiskConfigRow | null; lucifer: LuciferThresholdRow | null } {
-  const db = getDb();
-  const config = db.prepare<[], RiskConfigRow>(
-    `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
-     FROM global_circuit_breakers gcb
-     JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1
-     LIMIT 1`
-  ).get() ?? null;
+async function getRiskConfig(): Promise<{ config: RiskConfigRow | null; lucifer: LuciferThresholdRow | null }> {
+  let config: RiskConfigRow | null;
+  let lucifer: LuciferThresholdRow | null;
 
-  const lucifer = db.prepare<[], LuciferThresholdRow>(
-    `SELECT at.var_threshold
-     FROM agent_thresholds at
-     JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
-     WHERE rc.is_active = 1 AND at.agent_name = 'lucifer'
-     LIMIT 1`
-  ).get() ?? null;
+  if (isPgEnabled()) {
+    config = await pgQueryOne<RiskConfigRow>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1
+       LIMIT 1`
+    );
+
+    lucifer = await pgQueryOne<LuciferThresholdRow>(
+      `SELECT at.var_threshold
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 AND at.agent_name = $1
+       LIMIT 1`,
+      ["lucifer"]
+    );
+  } else {
+    const db = getDb();
+    config = db.prepare<[], RiskConfigRow>(
+      `SELECT gcb.drawdown_limit_pct, gcb.max_position_size_pct, gcb.kelly_fraction_multiplier
+       FROM global_circuit_breakers gcb
+       JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1
+       LIMIT 1`
+    ).get() ?? null;
+
+    lucifer = db.prepare<[], LuciferThresholdRow>(
+      `SELECT at.var_threshold
+       FROM agent_thresholds at
+       JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+       WHERE rc.is_active = 1 AND at.agent_name = 'lucifer'
+       LIMIT 1`
+    ).get() ?? null;
+  }
 
   return { config, lucifer };
 }
@@ -374,29 +406,13 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     });
   }
 
-  const db = getDb();
   const todayStart = new Date().setUTCHours(0, 0, 0, 0);
-  const latestPrices = getLatestScannerPriceMap();
-  const scannerDirections = getLatestScannerDirectionMap();
+  const latestPrices = await getLatestScannerPriceMap();
+  const scannerDirections = await getLatestScannerDirectionMap();
 
-  const { tradesToday } = db.prepare(
-    `SELECT COUNT(*) AS tradesToday
-     FROM executions
-     WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'`
-  ).get(context.linkedAgentId, todayStart) as { tradesToday: number };
-
-  const { realizedToday } = db.prepare(
-    `SELECT COALESCE(SUM(pnl), 0) AS realizedToday
-     FROM executions
-     WHERE agent_id = ? AND executed_at >= ? AND status != 'failed' AND pnl IS NOT NULL`
-  ).get(context.linkedAgentId, todayStart) as { realizedToday: number };
-
-  const openExecutions = db.prepare(
-    `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at
-     FROM executions
-     WHERE agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
-     ORDER BY executed_at DESC`
-  ).all(context.linkedAgentId) as Array<{
+  type TradesTodayRow = { tradesToday: number };
+  type RealizedTodayRow = { realizedToday: number };
+  type OpenExecutionRow = {
     id: number;
     slug: string;
     side: string;
@@ -406,7 +422,57 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     fill_price: number | null;
     status: string;
     executed_at: number;
-  }>;
+  };
+
+  let tradesToday: number;
+  let realizedToday: number;
+  let openExecutions: OpenExecutionRow[];
+
+  if (isPgEnabled()) {
+    const ttRow = await pgQueryOne<TradesTodayRow>(
+      `SELECT COUNT(*) AS "tradesToday"
+       FROM executions
+       WHERE agent_id = $1 AND executed_at >= $2 AND status != 'failed'`,
+      [context.linkedAgentId, todayStart]
+    );
+    tradesToday = Number(ttRow?.tradesToday ?? 0);
+
+    const rtRow = await pgQueryOne<RealizedTodayRow>(
+      `SELECT COALESCE(SUM(pnl), 0) AS "realizedToday"
+       FROM executions
+       WHERE agent_id = $1 AND executed_at >= $2 AND status != 'failed' AND pnl IS NOT NULL`,
+      [context.linkedAgentId, todayStart]
+    );
+    realizedToday = Number(rtRow?.realizedToday ?? 0);
+
+    openExecutions = await pgQuery<OpenExecutionRow>(
+      `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at
+       FROM executions
+       WHERE agent_id = $1 AND status IN ('placed', 'paper') AND pnl IS NULL
+       ORDER BY executed_at DESC`,
+      [context.linkedAgentId]
+    );
+  } else {
+    const db = getDb();
+    ({ tradesToday } = db.prepare(
+      `SELECT COUNT(*) AS tradesToday
+       FROM executions
+       WHERE agent_id = ? AND executed_at >= ? AND status != 'failed'`
+    ).get(context.linkedAgentId, todayStart) as TradesTodayRow);
+
+    ({ realizedToday } = db.prepare(
+      `SELECT COALESCE(SUM(pnl), 0) AS realizedToday
+       FROM executions
+       WHERE agent_id = ? AND executed_at >= ? AND status != 'failed' AND pnl IS NOT NULL`
+    ).get(context.linkedAgentId, todayStart) as RealizedTodayRow);
+
+    openExecutions = db.prepare(
+      `SELECT id, slug, side, direction, source, amount, fill_price, status, executed_at
+       FROM executions
+       WHERE agent_id = ? AND status IN ('placed', 'paper') AND pnl IS NULL
+       ORDER BY executed_at DESC`
+    ).all(context.linkedAgentId) as OpenExecutionRow[];
+  }
 
   let unrealizedToday = 0;
   const positions: PortfolioPositionSnapshot[] = openExecutions.map((execution) => {
@@ -430,42 +496,85 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     };
   });
 
-  const { total, wins } = db.prepare(
-    `SELECT COUNT(*) AS total,
-            COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins
-     FROM executions
-     WHERE agent_id = ? AND status != 'failed' AND pnl IS NOT NULL`
-  ).get(context.linkedAgentId) as { total: number; wins: number };
+  type TotalWinsRow = { total: number; wins: number };
+  type TradeSlugPnlRow = { slug: string; pnl: number };
+  type TotalVolumeRow = { totalVolume: number };
 
-  const bestTrade = db.prepare(
-    `SELECT slug, pnl
-     FROM executions
-     WHERE agent_id = ? AND pnl IS NOT NULL
-     ORDER BY pnl DESC
-     LIMIT 1`
-  ).get(context.linkedAgentId) as { slug: string; pnl: number } | undefined;
+  let total: number;
+  let wins: number;
+  let bestTrade: TradeSlugPnlRow | undefined;
+  let worstTrade: TradeSlugPnlRow | undefined;
+  let totalVolume: number;
 
-  const worstTrade = db.prepare(
-    `SELECT slug, pnl
-     FROM executions
-     WHERE agent_id = ? AND pnl IS NOT NULL
-     ORDER BY pnl ASC
-     LIMIT 1`
-  ).get(context.linkedAgentId) as { slug: string; pnl: number } | undefined;
+  if (isPgEnabled()) {
+    const twRow = await pgQueryOne<TotalWinsRow>(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins
+       FROM executions
+       WHERE agent_id = $1 AND status != 'failed' AND pnl IS NOT NULL`,
+      [context.linkedAgentId]
+    );
+    total = Number(twRow?.total ?? 0);
+    wins = Number(twRow?.wins ?? 0);
 
-  const { totalVolume } = db.prepare(
-    `SELECT COALESCE(SUM(amount), 0) AS totalVolume
-     FROM executions
-     WHERE agent_id = ? AND status != 'failed'`
-  ).get(context.linkedAgentId) as { totalVolume: number };
+    bestTrade = (await pgQueryOne<TradeSlugPnlRow>(
+      `SELECT slug, pnl
+       FROM executions
+       WHERE agent_id = $1 AND pnl IS NOT NULL
+       ORDER BY pnl DESC
+       LIMIT 1`,
+      [context.linkedAgentId]
+    )) ?? undefined;
 
-  const recentTradeRows = db.prepare(
-    `SELECT id, slug, side, direction, source, amount, status, executed_at
-     FROM executions
-     WHERE agent_id = ? AND status != 'failed'
-     ORDER BY executed_at DESC
-     LIMIT 20`
-  ).all(context.linkedAgentId) as Array<{
+    worstTrade = (await pgQueryOne<TradeSlugPnlRow>(
+      `SELECT slug, pnl
+       FROM executions
+       WHERE agent_id = $1 AND pnl IS NOT NULL
+       ORDER BY pnl ASC
+       LIMIT 1`,
+      [context.linkedAgentId]
+    )) ?? undefined;
+
+    const tvRow = await pgQueryOne<TotalVolumeRow>(
+      `SELECT COALESCE(SUM(amount), 0) AS "totalVolume"
+       FROM executions
+       WHERE agent_id = $1 AND status != 'failed'`,
+      [context.linkedAgentId]
+    );
+    totalVolume = Number(tvRow?.totalVolume ?? 0);
+  } else {
+    const db2 = getDb();
+    ({ total, wins } = db2.prepare(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins
+       FROM executions
+       WHERE agent_id = ? AND status != 'failed' AND pnl IS NOT NULL`
+    ).get(context.linkedAgentId) as TotalWinsRow);
+
+    bestTrade = db2.prepare(
+      `SELECT slug, pnl
+       FROM executions
+       WHERE agent_id = ? AND pnl IS NOT NULL
+       ORDER BY pnl DESC
+       LIMIT 1`
+    ).get(context.linkedAgentId) as TradeSlugPnlRow | undefined;
+
+    worstTrade = db2.prepare(
+      `SELECT slug, pnl
+       FROM executions
+       WHERE agent_id = ? AND pnl IS NOT NULL
+       ORDER BY pnl ASC
+       LIMIT 1`
+    ).get(context.linkedAgentId) as TradeSlugPnlRow | undefined;
+
+    ({ totalVolume } = db2.prepare(
+      `SELECT COALESCE(SUM(amount), 0) AS totalVolume
+       FROM executions
+       WHERE agent_id = ? AND status != 'failed'`
+    ).get(context.linkedAgentId) as TotalVolumeRow);
+  }
+
+  type RecentTradeRow = {
     id: number;
     slug: string;
     side: string;
@@ -474,7 +583,29 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     amount: number;
     status: string;
     executed_at: number;
-  }>;
+  };
+
+  let recentTradeRows: RecentTradeRow[];
+
+  if (isPgEnabled()) {
+    recentTradeRows = await pgQuery<RecentTradeRow>(
+      `SELECT id, slug, side, direction, source, amount, status, executed_at
+       FROM executions
+       WHERE agent_id = $1 AND status != 'failed'
+       ORDER BY executed_at DESC
+       LIMIT 20`,
+      [context.linkedAgentId]
+    );
+  } else {
+    const db3 = getDb();
+    recentTradeRows = db3.prepare(
+      `SELECT id, slug, side, direction, source, amount, status, executed_at
+       FROM executions
+       WHERE agent_id = ? AND status != 'failed'
+       ORDER BY executed_at DESC
+       LIMIT 20`
+    ).all(context.linkedAgentId) as RecentTradeRow[];
+  }
 
   const recentTrades = recentTradeRows.map((execution) => ({
     id: execution.id,
@@ -486,13 +617,27 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     executedAt: new Date(execution.executed_at).toISOString(),
   }));
 
-  const lastTrades = db.prepare(
-    `SELECT pnl
-     FROM executions
-     WHERE agent_id = ? AND pnl IS NOT NULL
-     ORDER BY executed_at DESC
-     LIMIT 20`
-  ).all(context.linkedAgentId) as Array<{ pnl: number }>;
+  let lastTrades: Array<{ pnl: number }>;
+
+  if (isPgEnabled()) {
+    lastTrades = await pgQuery<{ pnl: number }>(
+      `SELECT pnl
+       FROM executions
+       WHERE agent_id = $1 AND pnl IS NOT NULL
+       ORDER BY executed_at DESC
+       LIMIT 20`,
+      [context.linkedAgentId]
+    );
+  } else {
+    const db4 = getDb();
+    lastTrades = db4.prepare(
+      `SELECT pnl
+       FROM executions
+       WHERE agent_id = ? AND pnl IS NOT NULL
+       ORDER BY executed_at DESC
+       LIMIT 20`
+    ).all(context.linkedAgentId) as Array<{ pnl: number }>;
+  }
 
   let currentStreak = 0;
   if (lastTrades.length > 0) {
@@ -505,17 +650,39 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   }
 
   const funding = await getWalletFundingSnapshot(context.walletAddress);
-  const { totalTradesAll } = db.prepare(
-    `SELECT COUNT(*) AS totalTradesAll
-     FROM executions
-     WHERE agent_id = ? AND status != 'failed'`
-  ).get(context.linkedAgentId) as { totalTradesAll: number };
+  let totalTradesAll: number;
+  let totalRealizedPnl: number;
 
-  const { totalRealizedPnl } = db.prepare(
-    `SELECT COALESCE(SUM(pnl), 0) AS totalRealizedPnl
-     FROM executions
-     WHERE agent_id = ? AND pnl IS NOT NULL`
-  ).get(context.linkedAgentId) as { totalRealizedPnl: number };
+  if (isPgEnabled()) {
+    const ttaRow = await pgQueryOne<{ totalTradesAll: number }>(
+      `SELECT COUNT(*) AS "totalTradesAll"
+       FROM executions
+       WHERE agent_id = $1 AND status != 'failed'`,
+      [context.linkedAgentId]
+    );
+    totalTradesAll = Number(ttaRow?.totalTradesAll ?? 0);
+
+    const trpRow = await pgQueryOne<{ totalRealizedPnl: number }>(
+      `SELECT COALESCE(SUM(pnl), 0) AS "totalRealizedPnl"
+       FROM executions
+       WHERE agent_id = $1 AND pnl IS NOT NULL`,
+      [context.linkedAgentId]
+    );
+    totalRealizedPnl = Number(trpRow?.totalRealizedPnl ?? 0);
+  } else {
+    const db5 = getDb();
+    ({ totalTradesAll } = db5.prepare(
+      `SELECT COUNT(*) AS totalTradesAll
+       FROM executions
+       WHERE agent_id = ? AND status != 'failed'`
+    ).get(context.linkedAgentId) as { totalTradesAll: number });
+
+    ({ totalRealizedPnl } = db5.prepare(
+      `SELECT COALESCE(SUM(pnl), 0) AS totalRealizedPnl
+       FROM executions
+       WHERE agent_id = ? AND pnl IS NOT NULL`
+    ).get(context.linkedAgentId) as { totalRealizedPnl: number });
+  }
 
   const deployedCapital = round2(openExecutions.reduce((sum, execution) => sum + (execution.amount ?? 0), 0));
   const pnlToday = round2(realizedToday + unrealizedToday);
@@ -545,10 +712,19 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   const exposurePct = totalValue && totalValue > 0 ? (deployedCapital / totalValue) * 100 : 0;
   const winRate = total > 0 ? (wins ?? 0) / total : 0;
 
-  const cbRow = db.prepare(
-    "SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1"
-  ).get() as { state: string; drawdown_pct: number } | undefined;
-  const { config } = getRiskConfig();
+  let cbRow: { state: string; drawdown_pct: number } | undefined;
+
+  if (isPgEnabled()) {
+    cbRow = (await pgQueryOne<{ state: string; drawdown_pct: number }>(
+      "SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1"
+    )) ?? undefined;
+  } else {
+    const db6 = getDb();
+    cbRow = db6.prepare(
+      "SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1"
+    ).get() as { state: string; drawdown_pct: number } | undefined;
+  }
+  const { config } = await getRiskConfig();
   const kellyMultiplier = config?.kelly_fraction_multiplier ?? 0.25;
   const kellyUtilization = totalValue !== null && totalValue > 0 && kellyMultiplier > 0
     ? deployedCapital / (totalValue * kellyMultiplier)
@@ -607,7 +783,7 @@ export async function loadRiskSnapshot(context: ToolExecutionContext | null): Pr
   const portfolio = await loadPortfolioSnapshot(context);
   const correlation = getCorrelationMonitor();
   const cbStatus = getCircuitBreaker().getStatus();
-  const { config, lucifer } = getRiskConfig();
+  const { config, lucifer } = await getRiskConfig();
 
   const totalCapital = portfolio.totalValue ?? 0;
   const themeExposure: Record<string, number> = {};
@@ -647,17 +823,11 @@ export async function loadTradeHistorySnapshot(
     return { trades: [], count: 0, winRate: 0, totalPnl: 0 };
   }
 
-  const db = getDb();
   const safeLimit = Math.min(Math.max(1, limit), 50);
-  const livePrice = getLatestScannerPriceMap();
-  const scannerDirections = getLatestScannerDirectionMap();
-  const executions = db.prepare(
-    `SELECT slug, side, direction, amount, fill_price, status, pnl, executed_at
-     FROM executions
-     WHERE agent_id = ?
-     ORDER BY executed_at DESC
-     LIMIT ?`
-  ).all(context.linkedAgentId, safeLimit) as Array<{
+  const livePrice = await getLatestScannerPriceMap();
+  const scannerDirections = await getLatestScannerDirectionMap();
+
+  type TradeExecutionRow = {
     slug: string;
     side: string;
     direction: string | null;
@@ -666,7 +836,29 @@ export async function loadTradeHistorySnapshot(
     status: string;
     pnl: number | null;
     executed_at: number;
-  }>;
+  };
+
+  let executions: TradeExecutionRow[];
+
+  if (isPgEnabled()) {
+    executions = await pgQuery<TradeExecutionRow>(
+      `SELECT slug, side, direction, amount, fill_price, status, pnl, executed_at
+       FROM executions
+       WHERE agent_id = $1
+       ORDER BY executed_at DESC
+       LIMIT $2`,
+      [context.linkedAgentId, safeLimit]
+    );
+  } else {
+    const db = getDb();
+    executions = db.prepare(
+      `SELECT slug, side, direction, amount, fill_price, status, pnl, executed_at
+       FROM executions
+       WHERE agent_id = ?
+       ORDER BY executed_at DESC
+       LIMIT ?`
+    ).all(context.linkedAgentId, safeLimit) as TradeExecutionRow[];
+  }
 
   const trades = executions.map((execution) => {
     const scannerDirection = scannerDirections.get(execution.slug);
@@ -704,32 +896,52 @@ export async function loadTradeHistorySnapshot(
   };
 }
 
-export function loadScannerSnapshot(options?: {
+export async function loadScannerSnapshot(options?: {
   alertsOnly?: boolean;
   lastSeenSignalAt?: number | null;
   limit?: number;
-}): ScannerSnapshot {
-  const db = getDb();
+}): Promise<ScannerSnapshot> {
   const status = getScannerStatus();
   const safeLimit = Math.min(Math.max(1, options?.limit ?? 3), 10);
   const lastSeenSignalAt = options?.lastSeenSignalAt ?? null;
-  const alertFilter = options?.alertsOnly
-    ? "WHERE s.sigma_confidence >= 0.70 AND s.kelly_fraction >= 0.40"
-    : "";
 
-  const rows = db.prepare(
-    `SELECT s.slug, s.scanned_at, s.sigma_confidence, s.kelly_fraction, s.recommendation, s.probability, s.pipeline_result
-     FROM scanner_results s
-     INNER JOIN (
-       SELECT slug, MAX(scanned_at) AS latest
-       FROM scanner_results
-       GROUP BY slug
-     ) latest
-       ON latest.slug = s.slug AND latest.latest = s.scanned_at
-     ${alertFilter}
-     ORDER BY s.scanned_at DESC
-     LIMIT ?`
-  ).all(safeLimit) as ScannerRow[];
+  let rows: ScannerRow[];
+
+  if (isPgEnabled()) {
+    const pgAlertFilter = options?.alertsOnly
+      ? "WHERE sigma_confidence >= 0.70 AND kelly_fraction >= 0.40"
+      : "";
+    rows = await pgQuery<ScannerRow>(
+      `SELECT slug, scanned_at, sigma_confidence, kelly_fraction, recommendation, probability, pipeline_result
+       FROM (
+         SELECT DISTINCT ON (slug) slug, scanned_at, sigma_confidence, kelly_fraction, recommendation, probability, pipeline_result
+         FROM scanner_results
+         ORDER BY slug, scanned_at DESC
+       ) latest
+       ${pgAlertFilter}
+       ORDER BY scanned_at DESC
+       LIMIT $1`,
+      [safeLimit]
+    );
+  } else {
+    const db = getDb();
+    const sqliteAlertFilter = options?.alertsOnly
+      ? "WHERE s.sigma_confidence >= 0.70 AND s.kelly_fraction >= 0.40"
+      : "";
+    rows = db.prepare(
+      `SELECT s.slug, s.scanned_at, s.sigma_confidence, s.kelly_fraction, s.recommendation, s.probability, s.pipeline_result
+       FROM scanner_results s
+       INNER JOIN (
+         SELECT slug, MAX(scanned_at) AS latest
+         FROM scanner_results
+         GROUP BY slug
+       ) latest
+         ON latest.slug = s.slug AND latest.latest = s.scanned_at
+       ${sqliteAlertFilter}
+       ORDER BY s.scanned_at DESC
+       LIMIT ?`
+    ).all(safeLimit) as ScannerRow[];
+  }
 
   const lastScannedAt = rows[0]?.scanned_at ?? status.lastScan ?? null;
   const freshnessMs = lastScannedAt ? Math.max(0, Date.now() - lastScannedAt) : null;

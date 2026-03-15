@@ -49,6 +49,23 @@ function migrate(db: Database.Database): void {
       lucifer_output JSON
     );
 
+    CREATE TABLE IF NOT EXISTS pipeline_run_steps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_order INTEGER NOT NULL,
+      step TEXT NOT NULL,
+      agent TEXT,
+      status TEXT NOT NULL,
+      started_at INTEGER,
+      completed_at INTEGER,
+      data JSON,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_run_steps_run_order
+      ON pipeline_run_steps(run_id, step_order, created_at);
+
     CREATE TABLE IF NOT EXISTS trades (
       id TEXT PRIMARY KEY,
       order_id TEXT,
@@ -105,9 +122,12 @@ function migrate(db: Database.Database): void {
       id TEXT PRIMARY KEY,
       request_code TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
+      reason TEXT,
       pending_orders_count INTEGER NOT NULL DEFAULT 0,
       active_positions_count INTEGER NOT NULL DEFAULT 0,
       estimated_total_value REAL NOT NULL DEFAULT 0,
+      cooldown_until INTEGER,
+      rearmed_at INTEGER,
       initiated_at INTEGER NOT NULL,
       completed_at INTEGER
     );
@@ -149,6 +169,55 @@ function migrate(db: Database.Database): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    -- ── Operator Inbox ───────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      level TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      category TEXT,
+      timestamp INTEGER NOT NULL,
+      read_at INTEGER,
+      action_label TEXT,
+      action_href TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user_time
+      ON notifications(user_id, timestamp DESC);
+
+    -- ── Market Discovery ─────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS watchlists (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      question TEXT,
+      created_at INTEGER NOT NULL,
+      UNIQUE(user_id, slug)
+    );
+    CREATE INDEX IF NOT EXISTS idx_watchlists_user_time
+      ON watchlists(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS market_alerts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      question TEXT,
+      direction TEXT NOT NULL,
+      threshold REAL NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_state TEXT,
+      last_triggered_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_market_alerts_user_time
+      ON market_alerts(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_market_alerts_slug_enabled
+      ON market_alerts(slug, enabled);
 
     -- ── Paper Trades ───────────────────────────────────────────────
 
@@ -431,7 +500,11 @@ function migrate(db: Database.Database): void {
       status TEXT NOT NULL,
       order_id TEXT,
       fill_price REAL,
-      pnl REAL DEFAULT NULL
+      pnl REAL DEFAULT NULL,
+      resolution_date TEXT,
+      closed_at INTEGER,
+      updated_at INTEGER,
+      pipeline_run_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
@@ -442,13 +515,20 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE executions ADD COLUMN direction TEXT");
   addColumn(db, "ALTER TABLE executions ADD COLUMN source TEXT");
   addColumn(db, "ALTER TABLE executions ADD COLUMN resolution_date TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN closed_at INTEGER");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN updated_at INTEGER");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN pipeline_run_id TEXT");
   addColumn(db, "ALTER TABLE trades ADD COLUMN source TEXT");
+  addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN reason TEXT");
+  addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN cooldown_until INTEGER");
+  addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN rearmed_at INTEGER");
 
   // Create indexes after ensuring columns exist (addColumn above)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_user ON executions(user_id, executed_at DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent_slug_time ON executions(agent_id, slug, executed_at DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_agent_source_time ON executions(agent_id, source, executed_at DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_executions_pipeline_run ON executions(pipeline_run_id, executed_at DESC)`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS autopilot_policies (
@@ -490,6 +570,26 @@ function migrate(db: Database.Database): void {
             AND d.decision = 'executed'
             AND ABS(d.scanned_at - executions.executed_at) <= 1800000
        )
+  `);
+
+  db.exec(`
+    UPDATE executions
+       SET updated_at = COALESCE(updated_at, executed_at)
+     WHERE updated_at IS NULL
+  `);
+
+  db.exec(`
+    UPDATE executions
+       SET pipeline_run_id = (
+         SELECT t.pipeline_run_id
+           FROM trades t
+          WHERE t.order_id = executions.order_id
+            AND t.pipeline_run_id IS NOT NULL
+          ORDER BY t.created_at DESC
+          LIMIT 1
+       )
+     WHERE pipeline_run_id IS NULL
+       AND order_id IS NOT NULL
   `);
 
   // Legacy migration cleanup: executions must allow multiple rows per slug/day.

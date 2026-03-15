@@ -1228,7 +1228,7 @@ async function resolveRecipe(
 
   if (recipe === "scanner_signals" || recipe === "refresh_signals") {
     const SCANNER_DEBOUNCE_MS = 5 * 60 * 1000; // 5 minutes — matches scanner's own cadence
-    const cached = loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
+    const cached = await loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
     const cacheAge = cached.lastScannedAt ? Date.now() - cached.lastScannedAt : Infinity;
     const shouldTrigger = recipe === "refresh_signals" || cacheAge > SCANNER_DEBOUNCE_MS;
     if (shouldTrigger) {
@@ -1236,7 +1236,7 @@ async function resolveRecipe(
       await executeTool("trigger_scanner", {}, context);
       emitTrace(res, TOOL_TRACE_META.trigger_scanner, "Scanner scan finished", "done");
     }
-    const scanner = loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
+    const scanner = await loadScannerSnapshot({ alertsOnly: true, lastSeenSignalAt, limit: 3 });
     const ops = await loadOpsSnapshot(context);
     const scannerContext: ContextEnvelope = { kind: "scanner", data: scanner };
     const opsContext: ContextEnvelope = { kind: "ops", data: ops };

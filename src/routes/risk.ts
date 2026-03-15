@@ -1,9 +1,16 @@
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
 import { runCliWithWallet } from "../cli";
 import { tryLoadActiveAgentContext } from "../utils/agentKey";
-import { emitAutopilotStatus, emitToAll } from "../infra/socket";
+import {
+  emitAutopilotStatus,
+  emitNotification,
+  emitPanicCooldown,
+  emitToAll,
+} from "../infra/socket";
+import { sendStatusUpdate } from "../alerts/telegramAlert";
 import {
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
@@ -49,9 +56,12 @@ interface PanicModeEventRow {
   id: string;
   request_code: string;
   status: string;
+  reason: string | null;
   pending_orders_count: number;
   active_positions_count: number;
   estimated_total_value: number;
+  cooldown_until: number | null;
+  rearmed_at: number | null;
   initiated_at: number;
   completed_at: number | null;
 }
@@ -80,35 +90,150 @@ interface LiquidationLineItemRow {
   pnl_impact: number;
 }
 
+interface PanicModeStatusPayload {
+  active: boolean;
+  cooldownEndsAt: number | null;
+  cooldownRemainingMs: number;
+  canRearm: boolean;
+  latestEvent: {
+    id: string;
+    requestCode: string;
+    reason: string | null;
+    status: string;
+    initiatedAt: number;
+    completedAt: number | null;
+    reportId: string | null;
+    cooldownEndsAt: number | null;
+    rearmedAt: number | null;
+  } | null;
+}
+
+const PANIC_COOLDOWN_MS = 60_000;
+const PANIC_REARM_CONFIRMATION = "CONFIRM";
+
+async function getLatestPanicModeEvent(): Promise<PanicModeEventRow | null> {
+  if (isPgEnabled()) {
+    return pgQueryOne<PanicModeEventRow>(
+      "SELECT * FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
+    );
+  }
+  const db = getDb();
+  return (
+    db.prepare<[], PanicModeEventRow>(
+      "SELECT * FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
+    ).get() ?? null
+  );
+}
+
+async function getPanicModeStatus(): Promise<PanicModeStatusPayload> {
+  const now = Date.now();
+  const latestEvent = await getLatestPanicModeEvent();
+
+  let panicRow: { panic_mode_enabled: number } | undefined | null;
+  let reportRow: { id: string } | undefined | null = null;
+
+  if (isPgEnabled()) {
+    panicRow = await pgQueryOne<{ panic_mode_enabled: number }>(
+      "SELECT panic_mode_enabled FROM global_circuit_breakers WHERE id = 'gcb-default-001' LIMIT 1"
+    );
+    if (latestEvent) {
+      reportRow = await pgQueryOne<{ id: string }>(
+        "SELECT id FROM liquidation_reports WHERE panic_mode_event_id = $1 ORDER BY completion_timestamp DESC LIMIT 1",
+        [latestEvent.id]
+      );
+    }
+  } else {
+    const db = getDb();
+    panicRow = db
+      .prepare<[], { panic_mode_enabled: number }>(
+        "SELECT panic_mode_enabled FROM global_circuit_breakers WHERE id = 'gcb-default-001' LIMIT 1"
+      )
+      .get();
+    if (latestEvent) {
+      reportRow = db
+        .prepare<[string], { id: string }>(
+          "SELECT id FROM liquidation_reports WHERE panic_mode_event_id = ? ORDER BY completion_timestamp DESC LIMIT 1"
+        )
+        .get(latestEvent.id) ?? null;
+    }
+  }
+
+  const cooldownEndsAt = latestEvent?.cooldown_until ?? null;
+  const cooldownRemainingMs =
+    cooldownEndsAt && cooldownEndsAt > now ? cooldownEndsAt - now : 0;
+  const active = panicRow?.panic_mode_enabled === 1;
+
+  return {
+    active,
+    cooldownEndsAt,
+    cooldownRemainingMs,
+    canRearm: active && cooldownRemainingMs === 0,
+    latestEvent: latestEvent
+      ? {
+          id: latestEvent.id,
+          requestCode: latestEvent.request_code,
+          reason: latestEvent.reason,
+          status: latestEvent.status,
+          initiatedAt: latestEvent.initiated_at,
+          completedAt: latestEvent.completed_at,
+          reportId: reportRow?.id ?? null,
+          cooldownEndsAt,
+          rearmedAt: latestEvent.rearmed_at,
+        }
+      : null,
+  };
+}
+
 // ── GET /api/v1/risk-config/active ────────────────────────────
 // Returns the active risk configuration with its agent thresholds
 // and global circuit breaker settings.
 
-router.get("/risk-config/active", (_req: Request, res: Response) => {
-  const db = getDb();
+router.get("/risk-config/active", async (_req: Request, res: Response) => {
+  let config: RiskConfigRow | undefined | null;
+  let thresholds: AgentThresholdRow[];
+  let circuitBreaker: GlobalCircuitBreakerRow | undefined | null;
 
-  const config = db
-    .prepare<[], RiskConfigRow>(
+  if (isPgEnabled()) {
+    config = await pgQueryOne<RiskConfigRow>(
       "SELECT * FROM risk_configurations WHERE is_active = 1 LIMIT 1"
-    )
-    .get();
+    );
+    if (!config) {
+      res.status(404).json({ error: "No active risk configuration found" });
+      return;
+    }
+    thresholds = await pgQuery<AgentThresholdRow>(
+      "SELECT * FROM agent_thresholds WHERE risk_configuration_id = $1",
+      [config.id]
+    );
+    circuitBreaker = await pgQueryOne<GlobalCircuitBreakerRow>(
+      "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = $1 LIMIT 1",
+      [config.id]
+    );
+  } else {
+    const db = getDb();
+    config = db
+      .prepare<[], RiskConfigRow>(
+        "SELECT * FROM risk_configurations WHERE is_active = 1 LIMIT 1"
+      )
+      .get();
 
-  if (!config) {
-    res.status(404).json({ error: "No active risk configuration found" });
-    return;
+    if (!config) {
+      res.status(404).json({ error: "No active risk configuration found" });
+      return;
+    }
+
+    thresholds = db
+      .prepare<[string], AgentThresholdRow>(
+        "SELECT * FROM agent_thresholds WHERE risk_configuration_id = ?"
+      )
+      .all(config.id);
+
+    circuitBreaker = db
+      .prepare<[string], GlobalCircuitBreakerRow>(
+        "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = ? LIMIT 1"
+      )
+      .get(config.id);
   }
-
-  const thresholds = db
-    .prepare<[string], AgentThresholdRow>(
-      "SELECT * FROM agent_thresholds WHERE risk_configuration_id = ?"
-    )
-    .all(config.id);
-
-  const circuitBreaker = db
-    .prepare<[string], GlobalCircuitBreakerRow>(
-      "SELECT * FROM global_circuit_breakers WHERE risk_configuration_id = ? LIMIT 1"
-    )
-    .get(config.id);
 
   res.json({
     id: config.id,
@@ -140,26 +265,43 @@ router.get("/risk-config/active", (_req: Request, res: Response) => {
 // Returns the active risk config in the flat shape the Prism frontend
 // settings page expects: { agentVarThreshold, maxPositionSize, drawdownLimit, kellyMultiplier }
 
-router.get("/risk-config", (_req: Request, res: Response) => {
-  const db = getDb();
+router.get("/risk-config", async (_req: Request, res: Response) => {
+  let cb: GlobalCircuitBreakerRow | undefined | null;
+  let thresholds: AgentThresholdRow[];
 
-  const cb = db
-    .prepare<[], GlobalCircuitBreakerRow>(
+  if (isPgEnabled()) {
+    cb = await pgQueryOne<GlobalCircuitBreakerRow>(
       `SELECT gcb.*
        FROM global_circuit_breakers gcb
        JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
        WHERE rc.is_active = 1 LIMIT 1`
-    )
-    .get();
-
-  const thresholds = db
-    .prepare<[], AgentThresholdRow>(
+    );
+    thresholds = await pgQuery<AgentThresholdRow>(
       `SELECT at.*
        FROM agent_thresholds at
        JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
        WHERE rc.is_active = 1`
-    )
-    .all();
+    );
+  } else {
+    const db = getDb();
+    cb = db
+      .prepare<[], GlobalCircuitBreakerRow>(
+        `SELECT gcb.*
+         FROM global_circuit_breakers gcb
+         JOIN risk_configurations rc ON gcb.risk_configuration_id = rc.id
+         WHERE rc.is_active = 1 LIMIT 1`
+      )
+      .get();
+
+    thresholds = db
+      .prepare<[], AgentThresholdRow>(
+        `SELECT at.*
+         FROM agent_thresholds at
+         JOIN risk_configurations rc ON at.risk_configuration_id = rc.id
+         WHERE rc.is_active = 1`
+      )
+      .all();
+  }
 
   const avgVar =
     thresholds.length > 0
@@ -182,8 +324,7 @@ router.get("/risk-config", (_req: Request, res: Response) => {
 // ── PUT /api/v1/risk-config ───────────────────────────────────
 // Accepts the flat shape from the Prism settings page and persists it.
 
-router.put("/risk-config", (req: Request, res: Response) => {
-  const db = getDb();
+router.put("/risk-config", async (req: Request, res: Response) => {
   const {
     agentVarThreshold = 0.05,
     maxPositionSize = 0.1,
@@ -198,31 +339,64 @@ router.put("/risk-config", (req: Request, res: Response) => {
 
   const now = Date.now();
 
-  // Update global circuit breaker
-  db.prepare(
-    `UPDATE global_circuit_breakers
-     SET max_position_size_pct = ?,
-         drawdown_limit_pct    = ?,
-         kelly_fraction_multiplier = ?,
-         updated_at = ?
-     WHERE id = 'gcb-default-001'`
-  ).run(maxPositionSize, drawdownLimit, kellyMultiplier, now);
+  if (isPgEnabled()) {
+    // Update global circuit breaker
+    await pgExec(
+      `UPDATE global_circuit_breakers
+       SET max_position_size_pct = $1,
+           drawdown_limit_pct    = $2,
+           kelly_fraction_multiplier = $3,
+           updated_at = $4
+       WHERE id = 'gcb-default-001'`,
+      [maxPositionSize, drawdownLimit, kellyMultiplier, now]
+    );
 
-  // Update all agent var thresholds to the new global value
-  db.prepare(
-    `UPDATE agent_thresholds
-     SET var_threshold = ?,
-         updated_at    = ?
-     WHERE risk_configuration_id = 'rc-default-001'`
-  ).run(agentVarThreshold, now);
+    // Update all agent var thresholds to the new global value
+    await pgExec(
+      `UPDATE agent_thresholds
+       SET var_threshold = $1,
+           updated_at    = $2
+       WHERE risk_configuration_id = 'rc-default-001'`,
+      [agentVarThreshold, now]
+    );
 
-  // Bump config version + timestamp
-  db.prepare(
-    `UPDATE risk_configurations
-     SET version    = version + 1,
-         updated_at = ?
-     WHERE id = 'rc-default-001'`
-  ).run(now);
+    // Bump config version + timestamp
+    await pgExec(
+      `UPDATE risk_configurations
+       SET version    = version + 1,
+           updated_at = $1
+       WHERE id = 'rc-default-001'`,
+      [now]
+    );
+  } else {
+    const db = getDb();
+
+    // Update global circuit breaker
+    db.prepare(
+      `UPDATE global_circuit_breakers
+       SET max_position_size_pct = ?,
+           drawdown_limit_pct    = ?,
+           kelly_fraction_multiplier = ?,
+           updated_at = ?
+       WHERE id = 'gcb-default-001'`
+    ).run(maxPositionSize, drawdownLimit, kellyMultiplier, now);
+
+    // Update all agent var thresholds to the new global value
+    db.prepare(
+      `UPDATE agent_thresholds
+       SET var_threshold = ?,
+           updated_at    = ?
+       WHERE risk_configuration_id = 'rc-default-001'`
+    ).run(agentVarThreshold, now);
+
+    // Bump config version + timestamp
+    db.prepare(
+      `UPDATE risk_configurations
+       SET version    = version + 1,
+           updated_at = ?
+       WHERE id = 'rc-default-001'`
+    ).run(now);
+  }
 
   res.json({
     agentVarThreshold,
@@ -237,143 +411,465 @@ router.put("/risk-config", (req: Request, res: Response) => {
 // Emergency protocol: cancels orders, liquidates positions, trips circuit breaker,
 // generates a persisted liquidation report retrievable by ID.
 
+router.get("/panic-mode/status", async (_req: Request, res: Response) => {
+  try {
+    res.json(await getPanicModeStatus());
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 router.post("/panic-mode/activate", async (req: Request, res: Response) => {
-  const db = getDb();
   const now = Date.now();
-  const body = req.body as { cancelOrders?: boolean; liquidatePositions?: boolean } | undefined;
+  const body = req.body as {
+    cancelOrders?: boolean;
+    liquidatePositions?: boolean;
+    reason?: string;
+  } | undefined;
   const cancelOrders = body?.cancelOrders !== false; // default true
   const liquidatePositions = body?.liquidatePositions ?? false;
+  const reason =
+    typeof body?.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 240)
+      : "Operator triggered emergency protocol.";
+  const existingStatus = await getPanicModeStatus();
 
-  // 1. Trip circuit breaker + global kill switch immediately
-  db.prepare(
-    "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
-  ).run(now);
-  db.prepare(
-    "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
-  ).run(now, now);
+  if (existingStatus.active || existingStatus.cooldownRemainingMs > 0) {
+    res.status(409).json({
+      error: "Panic mode is already active or cooling down.",
+      ...existingStatus,
+    });
+    return;
+  }
+  const cooldownEndsAt = now + PANIC_COOLDOWN_MS;
 
-  // Explicitly disable autopilot on ALL active agents so the flag is correct even after panic resets
-  db.prepare("UPDATE agents SET autopilot_enabled = 0, updated_at = ? WHERE autopilot_enabled = 1").run(now);
+  type OpenPositionRow = { id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; order_id: string | null; status: string };
 
-  // Broadcast panic to all connected clients immediately
-  emitToAll("panic:activated", { timestamp: now });
-  emitAutopilotStatus({
-    isRunning: false,
-    lastScan: null,
-    tradesToday: 0,
-    circuitBreakerTriggered: true,
+  if (isPgEnabled()) {
+    // 1. Trip circuit breaker + global kill switch immediately
+    await pgExec(
+      "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = $1 WHERE id = 'gcb-default-001'",
+      [now]
+    );
+    await pgExec(
+      "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = $1, last_checked_at = $2 WHERE id = 1",
+      [now, now]
+    );
+
+    // Explicitly disable autopilot on ALL active agents
+    await pgExec("UPDATE agents SET autopilot_enabled = 0, updated_at = $1 WHERE autopilot_enabled = 1", [now]);
+
+    // Broadcast panic to all connected clients immediately
+    emitToAll("panic:activated", { timestamp: now, reason, cooldownEndsAt });
+    emitAutopilotStatus({
+      isRunning: false,
+      lastScan: null,
+      tradesToday: 0,
+      circuitBreakerTriggered: true,
+      timestamp: now,
+    });
+
+    // 2. Read open positions before we close them
+    const openPositions = await pgQuery<OpenPositionRow>(
+      "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+    );
+
+    const priceRows = await pgQuery<{ slug: string; probability: number }>(
+      "SELECT DISTINCT ON (slug) slug, probability FROM scanner_results ORDER BY slug, scanned_at DESC"
+    );
+    const currentPrices = new Map(priceRows.map((r) => [r.slug, r.probability]));
+    const scannerDirections = await getLatestScannerDirectionMap();
+
+    const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
+
+    // 3. Cancel all open orders
+    let cancelledCount = 0;
+    if (cancelOrders) {
+      cancelledCount += await pgExec("UPDATE paper_orders SET status = 'cancelled' WHERE status = 'open'");
+
+      try {
+        const agentCtx = await tryLoadActiveAgentContext();
+        if (agentCtx) {
+          await runCliWithWallet(["clob", "cancel-all"], agentCtx.privateKey);
+          cancelledCount += 1;
+        }
+      } catch (cliErr) {
+        console.error("[PANIC] clob cancel-all failed:", cliErr);
+      }
+    }
+
+    // 4. Create panic event record
+    const eventId = uuidv4();
+    const requestCode = `PMR-${Date.now().toString(36).toUpperCase()}`;
+
+    await pgExec(`
+      INSERT INTO panic_mode_events
+        (id, request_code, status, reason, pending_orders_count, active_positions_count, estimated_total_value, cooldown_until, initiated_at)
+      VALUES ($1, $2, 'processing', $3, $4, $5, $6, $7, $8)
+    `, [eventId, requestCode, reason, cancelledCount, openPositions.length, estimatedValue, cooldownEndsAt, now]);
+
+    // 5. Create liquidation report
+    const reportId = uuidv4();
+    const reportCode = `LQR-${Date.now().toString(36).toUpperCase()}`;
+
+    await pgExec(`
+      INSERT INTO liquidation_reports
+        (id, report_code, panic_mode_event_id, status, total_realized_value, slippage_pct, gas_execution_cost, recovery_status)
+      VALUES ($1, $2, $3, 'processing', NULL, NULL, NULL, 'pending')
+    `, [reportId, reportCode, eventId]);
+
+    // 6. Build line items + close positions
+    let totalRealizedValue = 0;
+    let totalPnl = 0;
+
+    for (const pos of openPositions) {
+      const scannerDirection = scannerDirections.get(pos.slug);
+      const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
+      const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
+      const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
+
+      const direction = metrics.direction;
+      const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
+      await pgExec(`
+        INSERT INTO liquidation_line_items
+          (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [
+        uuidv4(),
+        reportId,
+        `${pos.slug.toUpperCase()}-${direction}`,
+        `${label} — ${direction}`,
+        metrics.currentTokenPrice,
+        metrics.entryTokenPrice,
+        pos.amount / Math.max(0.01, metrics.entryTokenPrice),
+        "shares",
+        parseFloat(metrics.pnl.toFixed(2)),
+      ]);
+
+      if (liquidatePositions) {
+        await pgExec("UPDATE executions SET status = 'liquidated', pnl = $1 WHERE id = $2", [
+          parseFloat(metrics.pnl.toFixed(2)),
+          pos.id,
+        ]);
+      }
+
+      totalRealizedValue += realizedValue;
+      totalPnl += metrics.pnl;
+    }
+
+    // 7. Finalize report
+    const completedAt = Date.now();
+    const reportStatus = liquidatePositions ? "complete" : "partial";
+
+    await pgExec(
+      "UPDATE liquidation_reports SET status = $1, completion_timestamp = $2, total_realized_value = $3, slippage_pct = 0, gas_execution_cost = 0, recovery_status = $4 WHERE id = $5",
+      [reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId]
+    );
+
+    await pgExec(
+      "UPDATE panic_mode_events SET status = $1, completed_at = $2 WHERE id = $3",
+      [reportStatus, completedAt, eventId]
+    );
+
+    void sendStatusUpdate(
+      [
+        "🚨 <b>Quantik panic mode activated</b>",
+        `Reason: ${reason}`,
+        `Orders cancelled: ${cancelledCount}`,
+        `Positions affected: ${openPositions.length}`,
+        `Cooldown ends: ${new Date(cooldownEndsAt).toISOString()}`,
+        `Report: <code>${reportCode}</code>`,
+      ].join("\n")
+    );
+
+    emitNotification(null, {
+      id: `panic-activated-${eventId}`,
+      level: "error",
+      title: "Panic mode activated",
+      message: reason,
+      category: "panic",
+      timestamp: now,
+      action: {
+        label: "Open liquidation report",
+        href: `/reports/liquidation/${reportId}`,
+      },
+    });
+    emitPanicCooldown({
+      active: true,
+      cooldownEndsAt,
+      canRearm: false,
+      reportId,
+      reason,
+      timestamp: now,
+    });
+
+    res.json({
+      success: true,
+      reportId,
+      cooldownEndsAt,
+      reason,
+    });
+  } else {
+    const db = getDb();
+
+    // 1. Trip circuit breaker + global kill switch immediately
+    db.prepare(
+      "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
+    ).run(now);
+    db.prepare(
+      "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
+    ).run(now, now);
+
+    // Explicitly disable autopilot on ALL active agents so the flag is correct even after panic resets
+    db.prepare("UPDATE agents SET autopilot_enabled = 0, updated_at = ? WHERE autopilot_enabled = 1").run(now);
+
+    // Broadcast panic to all connected clients immediately
+    emitToAll("panic:activated", { timestamp: now, reason, cooldownEndsAt });
+    emitAutopilotStatus({
+      isRunning: false,
+      lastScan: null,
+      tradesToday: 0,
+      circuitBreakerTriggered: true,
+      timestamp: now,
+    });
+
+    // 2. Read open positions before we close them
+    const openPositions = db.prepare<[], OpenPositionRow>(
+      "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+    ).all();
+
+    const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
+    const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
+    const scannerDirections = await getLatestScannerDirectionMap();
+
+    const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
+
+    // 3. Cancel all open orders
+    let cancelledCount = 0;
+    if (cancelOrders) {
+      // Cancel paper orders
+      const paperResult = db.prepare("UPDATE paper_orders SET status = 'cancelled' WHERE status = 'open'").run();
+      cancelledCount += paperResult.changes;
+
+      // Cancel live orders via CLI (best-effort — circuit breaker already tripped above)
+      try {
+        const agentCtx = await tryLoadActiveAgentContext();
+        if (agentCtx) {
+          await runCliWithWallet(["clob", "cancel-all"], agentCtx.privateKey);
+          cancelledCount += 1;
+        }
+      } catch (cliErr) {
+        console.error("[PANIC] clob cancel-all failed:", cliErr);
+        // Do NOT abort — circuit breaker and autopilot disable already took effect
+      }
+    }
+
+    // 4. Create panic event record
+    const eventId = uuidv4();
+    const requestCode = `PMR-${Date.now().toString(36).toUpperCase()}`;
+
+    db.prepare(`
+      INSERT INTO panic_mode_events
+        (id, request_code, status, reason, pending_orders_count, active_positions_count, estimated_total_value, cooldown_until, initiated_at)
+      VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, ?)
+    `).run(
+      eventId,
+      requestCode,
+      reason,
+      cancelledCount,
+      openPositions.length,
+      estimatedValue,
+      cooldownEndsAt,
+      now
+    );
+
+    // 5. Create liquidation report
+    const reportId = uuidv4();
+    const reportCode = `LQR-${Date.now().toString(36).toUpperCase()}`;
+
+    db.prepare(`
+      INSERT INTO liquidation_reports
+        (id, report_code, panic_mode_event_id, status, total_realized_value, slippage_pct, gas_execution_cost, recovery_status)
+      VALUES (?, ?, ?, 'processing', NULL, NULL, NULL, 'pending')
+    `).run(reportId, reportCode, eventId);
+
+    // 6. Build line items + close positions
+    const insertItem = db.prepare(`
+      INSERT INTO liquidation_line_items
+        (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const closeExecution = db.prepare(
+      "UPDATE executions SET status = 'liquidated', pnl = ? WHERE id = ?"
+    );
+
+    let totalRealizedValue = 0;
+    let totalPnl = 0;
+
+    for (const pos of openPositions) {
+      const scannerDirection = scannerDirections.get(pos.slug);
+      const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
+      const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
+      const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
+
+      const direction = metrics.direction;
+      const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
+      insertItem.run(
+        uuidv4(),
+        reportId,
+        `${pos.slug.toUpperCase()}-${direction}`,
+        `${label} — ${direction}`,
+        metrics.currentTokenPrice,
+        metrics.entryTokenPrice,
+        pos.amount / Math.max(0.01, metrics.entryTokenPrice),
+        "shares",
+        parseFloat(metrics.pnl.toFixed(2))
+      );
+
+      // Mark position as liquidated with realized PnL
+      if (liquidatePositions) {
+        closeExecution.run(parseFloat(metrics.pnl.toFixed(2)), pos.id);
+      }
+
+      totalRealizedValue += realizedValue;
+      totalPnl += metrics.pnl;
+    }
+
+    // 7. Finalize report
+    const completedAt = Date.now();
+    const reportStatus = liquidatePositions ? "complete" : "partial";
+
+    db.prepare(
+      "UPDATE liquidation_reports SET status = ?, completion_timestamp = ?, total_realized_value = ?, slippage_pct = 0, gas_execution_cost = 0, recovery_status = ? WHERE id = ?"
+    ).run(reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId);
+
+    db.prepare(
+      "UPDATE panic_mode_events SET status = ?, completed_at = ? WHERE id = ?"
+    ).run(reportStatus, completedAt, eventId);
+
+    void sendStatusUpdate(
+      [
+        "🚨 <b>Quantik panic mode activated</b>",
+        `Reason: ${reason}`,
+        `Orders cancelled: ${cancelledCount}`,
+        `Positions affected: ${openPositions.length}`,
+        `Cooldown ends: ${new Date(cooldownEndsAt).toISOString()}`,
+        `Report: <code>${reportCode}</code>`,
+      ].join("\n")
+    );
+
+    emitNotification(null, {
+      id: `panic-activated-${eventId}`,
+      level: "error",
+      title: "Panic mode activated",
+      message: reason,
+      category: "panic",
+      timestamp: now,
+      action: {
+        label: "Open liquidation report",
+        href: `/reports/liquidation/${reportId}`,
+      },
+    });
+    emitPanicCooldown({
+      active: true,
+      cooldownEndsAt,
+      canRearm: false,
+      reportId,
+      reason,
+      timestamp: now,
+    });
+
+    res.json({
+      success: true,
+      reportId,
+      cooldownEndsAt,
+      reason,
+    });
+  }
+});
+
+router.post("/panic-mode/rearm", async (req: Request, res: Response) => {
+  const now = Date.now();
+  const body = req.body as { confirmation?: string } | undefined;
+  const status = await getPanicModeStatus();
+
+  if (!status.active) {
+    res.status(409).json({
+      error: "Panic mode is not currently active.",
+      ...status,
+    });
+    return;
+  }
+
+  if (status.cooldownRemainingMs > 0) {
+    res.status(409).json({
+      error: "Panic mode cooldown is still active.",
+      ...status,
+    });
+    return;
+  }
+
+  if (body?.confirmation !== PANIC_REARM_CONFIRMATION) {
+    res.status(400).json({
+      error: `Confirmation must equal ${PANIC_REARM_CONFIRMATION}.`,
+    });
+    return;
+  }
+
+  if (isPgEnabled()) {
+    await pgExec(
+      "UPDATE global_circuit_breakers SET panic_mode_enabled = 0, updated_at = $1 WHERE id = 'gcb-default-001'",
+      [now]
+    );
+    await pgExec(
+      "UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL, last_checked_at = $1 WHERE id = 1",
+      [now]
+    );
+    if (status.latestEvent?.id) {
+      await pgExec(
+        "UPDATE panic_mode_events SET rearmed_at = $1, status = CASE WHEN status = 'processing' THEN 'rearmed' ELSE status END WHERE id = $2",
+        [now, status.latestEvent.id]
+      );
+    }
+  } else {
+    const db = getDb();
+    db.prepare(
+      "UPDATE global_circuit_breakers SET panic_mode_enabled = 0, updated_at = ? WHERE id = 'gcb-default-001'"
+    ).run(now);
+    db.prepare(
+      "UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL, last_checked_at = ? WHERE id = 1"
+    ).run(now);
+    if (status.latestEvent?.id) {
+      db.prepare(
+        "UPDATE panic_mode_events SET rearmed_at = ?, status = CASE WHEN status = 'processing' THEN 'rearmed' ELSE status END WHERE id = ?"
+      ).run(now, status.latestEvent.id);
+    }
+  }
+
+  void sendStatusUpdate("✅ <b>Quantik panic mode re-armed.</b>");
+
+  emitNotification(null, {
+    id: `panic-rearmed-${now}`,
+    level: "success",
+    title: "Panic mode re-armed",
+    message: "Circuit breaker reset to ARMED after cooldown.",
+    category: "panic",
+    timestamp: now,
+  });
+  emitPanicCooldown({
+    active: false,
+    cooldownEndsAt: status.cooldownEndsAt,
+    canRearm: false,
+    reportId: status.latestEvent?.reportId ?? null,
+    reason: status.latestEvent?.reason ?? null,
     timestamp: now,
   });
 
-  // 2. Read open positions before we close them
-  const openPositions = db.prepare<[], { id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; order_id: string | null; status: string }>(
-    "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
-  ).all();
-
-  const priceRows = db.prepare("SELECT slug, probability FROM scanner_results GROUP BY slug ORDER BY scanned_at DESC").all() as any[];
-  const currentPrices = new Map(priceRows.map((r: any) => [r.slug, r.probability]));
-  const scannerDirections = getLatestScannerDirectionMap();
-
-  const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
-
-  // 3. Cancel all open orders
-  let cancelledCount = 0;
-  if (cancelOrders) {
-    // Cancel paper orders
-    const paperResult = db.prepare("UPDATE paper_orders SET status = 'cancelled' WHERE status = 'open'").run();
-    cancelledCount += paperResult.changes;
-
-    // Cancel live orders via CLI (best-effort — circuit breaker already tripped above)
-    try {
-      const agentCtx = await tryLoadActiveAgentContext();
-      if (agentCtx) {
-        await runCliWithWallet(["clob", "cancel-all"], agentCtx.privateKey);
-        cancelledCount += 1;
-      }
-    } catch (cliErr) {
-      console.error("[PANIC] clob cancel-all failed:", cliErr);
-      // Do NOT abort — circuit breaker and autopilot disable already took effect
-    }
-  }
-
-  // 4. Create panic event record
-  const eventId = uuidv4();
-  const requestCode = `PMR-${Date.now().toString(36).toUpperCase()}`;
-
-  db.prepare(`
-    INSERT INTO panic_mode_events
-      (id, request_code, status, pending_orders_count, active_positions_count, estimated_total_value, initiated_at)
-    VALUES (?, ?, 'processing', ?, ?, ?, ?)
-  `).run(eventId, requestCode, cancelledCount, openPositions.length, estimatedValue, now);
-
-  // 5. Create liquidation report
-  const reportId = uuidv4();
-  const reportCode = `LQR-${Date.now().toString(36).toUpperCase()}`;
-
-  db.prepare(`
-    INSERT INTO liquidation_reports
-      (id, report_code, panic_mode_event_id, status, total_realized_value, slippage_pct, gas_execution_cost, recovery_status)
-    VALUES (?, ?, ?, 'processing', NULL, NULL, NULL, 'pending')
-  `).run(reportId, reportCode, eventId);
-
-  // 6. Build line items + close positions
-  const insertItem = db.prepare(`
-    INSERT INTO liquidation_line_items
-      (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const closeExecution = db.prepare(
-    "UPDATE executions SET status = 'liquidated', pnl = ? WHERE id = ?"
-  );
-
-  let totalRealizedValue = 0;
-  let totalPnl = 0;
-
-  for (const pos of openPositions) {
-    const scannerDirection = scannerDirections.get(pos.slug);
-    const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
-    const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
-    const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
-
-    const direction = metrics.direction;
-    const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-
-    insertItem.run(
-      uuidv4(),
-      reportId,
-      `${pos.slug.toUpperCase()}-${direction}`,
-      `${label} — ${direction}`,
-      metrics.currentTokenPrice,
-      metrics.entryTokenPrice,
-      pos.amount / Math.max(0.01, metrics.entryTokenPrice),
-      "shares",
-      parseFloat(metrics.pnl.toFixed(2))
-    );
-
-    // Mark position as liquidated with realized PnL
-    if (liquidatePositions) {
-      closeExecution.run(parseFloat(metrics.pnl.toFixed(2)), pos.id);
-    }
-
-    totalRealizedValue += realizedValue;
-    totalPnl += metrics.pnl;
-  }
-
-  // 7. Finalize report
-  const completedAt = Date.now();
-  const reportStatus = liquidatePositions ? "complete" : "partial";
-
-  db.prepare(
-    "UPDATE liquidation_reports SET status = ?, completion_timestamp = ?, total_realized_value = ?, slippage_pct = 0, gas_execution_cost = 0, recovery_status = ? WHERE id = ?"
-  ).run(reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId);
-
-  db.prepare(
-    "UPDATE panic_mode_events SET status = ?, completed_at = ? WHERE id = ?"
-  ).run(reportStatus, completedAt, eventId);
-
   res.json({
     success: true,
-    reportId,
+    status: await getPanicModeStatus(),
   });
 });
 
@@ -381,33 +877,60 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
 // Returns a liquidation report with its line items in the shape
 // the Prism LiquidationReportPage expects.
 
-router.get("/liquidation-reports/:id", (req: Request, res: Response) => {
-  const db = getDb();
+router.get("/liquidation-reports/:id", async (req: Request, res: Response) => {
   const id = Array.isArray(req.params["id"]) ? req.params["id"][0] : req.params["id"];
 
-  const report = db
-    .prepare<[string], LiquidationReportRow>(
-      "SELECT * FROM liquidation_reports WHERE id = ?"
-    )
-    .get(id);
+  let report: LiquidationReportRow | undefined | null;
+  let lineItems: LiquidationLineItemRow[];
+  let event: PanicModeEventRow | undefined | null;
 
-  if (!report) {
-    res.status(404).json({ error: `Liquidation report '${id}' not found` });
-    return;
+  if (isPgEnabled()) {
+    report = await pgQueryOne<LiquidationReportRow>(
+      "SELECT * FROM liquidation_reports WHERE id = $1",
+      [id]
+    );
+
+    if (!report) {
+      res.status(404).json({ error: `Liquidation report '${id}' not found` });
+      return;
+    }
+
+    lineItems = await pgQuery<LiquidationLineItemRow>(
+      "SELECT * FROM liquidation_line_items WHERE liquidation_report_id = $1",
+      [report.id]
+    );
+
+    event = await pgQueryOne<PanicModeEventRow>(
+      "SELECT * FROM panic_mode_events WHERE id = $1",
+      [report.panic_mode_event_id]
+    );
+  } else {
+    const db = getDb();
+
+    report = db
+      .prepare<[string], LiquidationReportRow>(
+        "SELECT * FROM liquidation_reports WHERE id = ?"
+      )
+      .get(id);
+
+    if (!report) {
+      res.status(404).json({ error: `Liquidation report '${id}' not found` });
+      return;
+    }
+
+    lineItems = db
+      .prepare<[string], LiquidationLineItemRow>(
+        "SELECT * FROM liquidation_line_items WHERE liquidation_report_id = ?"
+      )
+      .all(report.id);
+
+    // Look up the originating panic event for timestamp + triggeredBy context
+    event = db
+      .prepare<[string], PanicModeEventRow>(
+        "SELECT * FROM panic_mode_events WHERE id = ?"
+      )
+      .get(report.panic_mode_event_id);
   }
-
-  const lineItems = db
-    .prepare<[string], LiquidationLineItemRow>(
-      "SELECT * FROM liquidation_line_items WHERE liquidation_report_id = ?"
-    )
-    .all(report.id);
-
-  // Look up the originating panic event for timestamp + triggeredBy context
-  const event = db
-    .prepare<[string], PanicModeEventRow>(
-      "SELECT * FROM panic_mode_events WHERE id = ?"
-    )
-    .get(report.panic_mode_event_id);
 
   // Compute aggregates
   const totalPnlImpact = lineItems.reduce((acc, li) => acc + li.pnl_impact, 0);
@@ -465,6 +988,7 @@ router.get("/liquidation-reports/:id", (req: Request, res: Response) => {
     id: report.id,
     reportCode: report.report_code,
     panicModeEventId: report.panic_mode_event_id,
+    reason: event?.reason ?? null,
     status: frontendStatus,
     // ── Prism-expected fields ──────────────────────────────────────
     timestamp: reportTimestamp,
@@ -485,6 +1009,8 @@ router.get("/liquidation-reports/:id", (req: Request, res: Response) => {
     slippagePct,
     gasExecutionCost,
     recoveryStatus: report.recovery_status ?? "pending",
+    cooldownEndsAt: event?.cooldown_until ?? null,
+    rearmedAt: event?.rearmed_at ?? null,
     totalPnlImpact,
     lineItems: lineItems.map((li) => ({
       id: li.id,

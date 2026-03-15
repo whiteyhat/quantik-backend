@@ -15,14 +15,17 @@ export interface ExecutionRecordInput {
   fillPrice?: number | null;
   pnl?: number | null;
   resolutionDate?: string | null;
+  pipelineRunId?: string | null;
+  closedAt?: number | null;
 }
 
 export async function insertExecutionRecord(input: ExecutionRecordInput): Promise<void> {
+  const updatedAt = input.closedAt ?? input.executedAt;
   const db = getDb();
   db.prepare(
     `INSERT INTO executions (
-       user_id, agent_id, slug, side, direction, source, amount, executed_at, status, order_id, fill_price, pnl, resolution_date
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       user_id, agent_id, slug, side, direction, source, amount, executed_at, status, order_id, fill_price, pnl, resolution_date, pipeline_run_id, closed_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     input.userId,
     input.agentId,
@@ -36,14 +39,17 @@ export async function insertExecutionRecord(input: ExecutionRecordInput): Promis
     input.orderId ?? null,
     input.fillPrice ?? null,
     input.pnl ?? null,
-    input.resolutionDate ?? null
+    input.resolutionDate ?? null,
+    input.pipelineRunId ?? null,
+    input.closedAt ?? null,
+    updatedAt
   );
 
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO executions (
-         user_id, agent_id, slug, side, direction, source, amount, executed_at, status, order_id, fill_price, pnl, resolution_date
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+         user_id, agent_id, slug, side, direction, source, amount, executed_at, status, order_id, fill_price, pnl, resolution_date, pipeline_run_id, closed_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         input.userId,
         input.agentId,
@@ -58,6 +64,9 @@ export async function insertExecutionRecord(input: ExecutionRecordInput): Promis
         input.fillPrice ?? null,
         input.pnl ?? null,
         input.resolutionDate ?? null,
+        input.pipelineRunId ?? null,
+        input.closedAt ?? null,
+        updatedAt,
       ]
     );
   }

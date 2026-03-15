@@ -3,6 +3,7 @@ import { getPipelineHistory, PipelineRun } from "../db/queries";
 import { getDb } from "../db/schema";
 import { validateSignal, type SignalValidation } from "../signal/validator";
 import { findAnalogues } from "../signal/backtester";
+import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
 
 const router = Router();
 
@@ -70,9 +71,9 @@ function toSignalRow(run: PipelineRun): SignalRow {
 
 // ── GET /api/signals — last 20 TRADE/WATCH signals ──────────────
 
-router.get("/", (_req: Request, res: Response) => {
+router.get("/", async (_req: Request, res: Response) => {
   try {
-    const runs = getPipelineHistory(50); // fetch extra, filter down
+    const runs = await getPipelineHistory(50); // fetch extra, filter down
     const signals = runs.map(toSignalRow).filter(
       (s) => s.status === "TRADE" || s.status === "WATCH"
     );
@@ -84,9 +85,9 @@ router.get("/", (_req: Request, res: Response) => {
 
 // ── GET /api/signals/queue — WATCH queue (unresolved) ───────────
 
-router.get("/queue", (_req: Request, res: Response) => {
+router.get("/queue", async (_req: Request, res: Response) => {
   try {
-    const runs = getPipelineHistory(100);
+    const runs = await getPipelineHistory(100);
     const watchQueue = runs
       .map(toSignalRow)
       .filter((s) => s.status === "WATCH");
@@ -98,7 +99,7 @@ router.get("/queue", (_req: Request, res: Response) => {
 
 // ── POST /api/signals/validate — 5-gate validator ───────────────
 
-router.post("/validate", (req: Request, res: Response) => {
+router.post("/validate", async (req: Request, res: Response) => {
   try {
     const body = req.body as Record<string, unknown>;
     const pipelineRunId = body["pipelineRunId"];
@@ -109,10 +110,18 @@ router.post("/validate", (req: Request, res: Response) => {
     }
 
     // Fetch the pipeline run
-    const db = getDb();
-    const run = db
-      .prepare("SELECT * FROM pipeline_runs WHERE id = ?")
-      .get(pipelineRunId) as PipelineRun | undefined;
+    let run: PipelineRun | undefined | null;
+    if (isPgEnabled()) {
+      run = await pgQueryOne<PipelineRun>(
+        "SELECT * FROM pipeline_runs WHERE id = $1",
+        [pipelineRunId]
+      );
+    } else {
+      const db = getDb();
+      run = db
+        .prepare("SELECT * FROM pipeline_runs WHERE id = ?")
+        .get(pipelineRunId) as PipelineRun | undefined;
+    }
 
     if (!run) {
       res.status(404).json({ error: "Pipeline run not found" });
@@ -164,10 +173,18 @@ router.post("/validate", (req: Request, res: Response) => {
     });
 
     // Store signal_state in pipeline_runs (new column not in PipelineRun interface)
-    db.prepare("UPDATE pipeline_runs SET signal_state = ? WHERE id = ?").run(
-      validation.state,
-      pipelineRunId
-    );
+    if (isPgEnabled()) {
+      await pgExec(
+        "UPDATE pipeline_runs SET signal_state = $1 WHERE id = $2",
+        [validation.state, pipelineRunId]
+      );
+    } else {
+      const db = getDb();
+      db.prepare("UPDATE pipeline_runs SET signal_state = ? WHERE id = ?").run(
+        validation.state,
+        pipelineRunId
+      );
+    }
 
     // Also run backtester for context
     const analogues = findAnalogues(

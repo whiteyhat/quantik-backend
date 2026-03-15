@@ -1,4 +1,5 @@
 import { getDb } from "../db/schema";
+import { isPgEnabled, pgQuery } from "../db/postgres";
 
 export type ExecutionDirection = "YES" | "NO";
 
@@ -41,18 +42,23 @@ export function recommendationToDirection(value: unknown): ExecutionDirection | 
   return null;
 }
 
-export function getLatestScannerDirectionMap(): Map<string, ExecutionDirection> {
-  const db = getDb();
-  const rows = db.prepare(
-    `SELECT s.slug, s.recommendation
+export async function getLatestScannerDirectionMap(): Promise<Map<string, ExecutionDirection>> {
+  const query = `SELECT s.slug, s.recommendation
      FROM scanner_results s
      INNER JOIN (
        SELECT slug, MAX(scanned_at) AS latest
        FROM scanner_results
        GROUP BY slug
      ) latest
-       ON latest.slug = s.slug AND latest.latest = s.scanned_at`
-  ).all() as Array<{ slug: string; recommendation: string | null }>;
+       ON latest.slug = s.slug AND latest.latest = s.scanned_at`;
+
+  let rows: Array<{ slug: string; recommendation: string | null }>;
+  if (isPgEnabled()) {
+    rows = await pgQuery<{ slug: string; recommendation: string | null }>(query);
+  } else {
+    const db = getDb();
+    rows = db.prepare(query).all() as Array<{ slug: string; recommendation: string | null }>;
+  }
 
   return new Map(
     rows

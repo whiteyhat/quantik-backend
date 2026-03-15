@@ -5,12 +5,13 @@ import { AlertPoller, ensureAlertColumns } from "../alerts/telegramAlert";
 import { ResolutionMonitor } from "../monitoring/resolution";
 import { checkByoHealth } from "../monitoring/byoHealth";
 import { getDb } from "../db/schema";
-import { emitPositionUpdate } from "./socket";
+import { emitPositionUpdate, emitPriceUpdate } from "./socket";
 import {
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
   getLatestScannerDirectionMap,
 } from "../utils/executionDirection";
+import { evaluateMarketAlerts } from "../services/marketAlerts";
 
 // ── Position Update Emitter ───────────────────────────────────────────────────
 // Periodically computes current P&L for open positions and emits Socket.IO
@@ -31,14 +32,24 @@ async function emitPositionUpdates(): Promise<void> {
        ON s.slug = t.slug AND s.scanned_at = t.latest`
     ).all() as { slug: string; probability: number }[];
     const priceMap = new Map(priceRows.map(r => [r.slug, r.probability]));
-    const scannerDirections = getLatestScannerDirectionMap();
+    const scannerDirections = await getLatestScannerDirectionMap();
 
     const now = Date.now();
+    const priceUpdates = new Map<string, { slug: string; yes: number; no: number; timestamp: number }>();
     for (const pos of positions) {
       const scannerDirection = scannerDirections.get(pos.slug);
       const currentYes = priceMap.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
       const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
       const pnlPct = pos.amount > 0 ? metrics.pnl / pos.amount : 0;
+
+      if (!priceUpdates.has(pos.slug)) {
+        priceUpdates.set(pos.slug, {
+          slug: pos.slug,
+          yes: currentYes,
+          no: Math.max(0, 1 - currentYes),
+          timestamp: now,
+        });
+      }
 
       emitPositionUpdate(null, {
         slug: pos.slug,
@@ -47,6 +58,12 @@ async function emitPositionUpdates(): Promise<void> {
         pnlPct,
         timestamp: now,
       });
+    }
+
+    if (priceUpdates.size > 0) {
+      const batchedUpdates = Array.from(priceUpdates.values());
+      emitPriceUpdate(batchedUpdates);
+      await evaluateMarketAlerts(batchedUpdates);
     }
   } catch (err) {
     console.error("[scheduler:position-update] error:", err);
