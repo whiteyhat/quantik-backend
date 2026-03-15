@@ -20,6 +20,7 @@ import {
   type ToolExecutionContext,
   type TradeHistorySnapshot,
 } from "../agents/snapshots";
+import { type ArenaLeaderboardResponse, type ArenaWindow } from "../performance/arena";
 
 const router = Router();
 
@@ -124,6 +125,7 @@ sessionCleanupInterval.unref?.();
 type RecipeName =
   | "scanner_signals"
   | "refresh_signals"
+  | "arena_leaderboard"
   | "portfolio_status"
   | "risk_status"
   | "trade_history"
@@ -135,7 +137,7 @@ type TraceKey =
   | "risk_officer"
   | "ops_monitor";
 
-type ContextKind = "portfolio" | "scanner" | "risk" | "ops";
+type ContextKind = "portfolio" | "scanner" | "risk" | "ops" | "arena";
 
 interface TraceMeta {
   key: TraceKey;
@@ -144,7 +146,7 @@ interface TraceMeta {
 
 interface ContextEnvelope {
   kind: ContextKind;
-  data: PortfolioSnapshot | ScannerSnapshot | RiskSnapshot | OpsSnapshot | unknown;
+  data: PortfolioSnapshot | ScannerSnapshot | RiskSnapshot | OpsSnapshot | ArenaLeaderboardResponse | unknown;
 }
 
 interface RecipeResolution {
@@ -364,6 +366,7 @@ const TOOL_TRACE_META: Record<string, TraceMeta> = {
   get_portfolio: { key: "portfolio_analyst", label: "Portfolio Analyst" },
   get_risk_status: { key: "risk_officer", label: "Risk Officer" },
   get_trade_history: { key: "portfolio_analyst", label: "Portfolio Analyst" },
+  get_arena_leaderboard: { key: "portfolio_analyst", label: "Portfolio Analyst" },
   get_scanner_signals: { key: "signal_scout", label: "Signal Scout" },
   get_agent_status: { key: "ops_monitor", label: "Ops Monitor" },
   get_health_score: { key: "ops_monitor", label: "Ops Monitor" },
@@ -580,12 +583,22 @@ function formatTimeAgo(timestamp: number | null): string {
   return formatAgeFromMs(Date.now() - timestamp);
 }
 
+function inferArenaWindow(message: string): ArenaWindow {
+  const lower = message.toLowerCase();
+  if (/\b(24h|24 h|day|daily)\b/.test(lower)) return "day";
+  if (/\b(7d|7 d|7 day|7 days|7f|week|weekly)\b/.test(lower)) return "week";
+  return "all";
+}
+
 function detectRecipe(message: string): RecipeName | null {
   const lower = message.toLowerCase();
 
   // Refresh/rescan — en/es/fr/de
   if (/(refresh|rerun|rescan|run).*(scanner|signals?|se[ñn]ales?|signaux|signale)|refresh signals|run scanner|actualizar.*esc[aá]ner|relancer.*scanner|scanner.*neu/.test(lower)) {
     return "refresh_signals";
+  }
+  if (/(arena|leaderboard|leader board|rank(?:ing)?|podium|best agents?|top agents?|champion|crown)/.test(lower)) {
+    return "arena_leaderboard";
   }
   // Scanner signals — en + es(señales,escáner,oportunidades) + fr(signaux,opportunités) + de(signale,chancen)
   if (/(scanner|signal|signals?|se[ñn]ales?|esc[aá]ner|oportunidad|signaux|opportunit|signale|chancen)/.test(lower)) {
@@ -619,6 +632,10 @@ function getSuggestionsForRecipe(recipe: RecipeName, locale?: string): string[] 
       return s
         ? [s.refreshSignals, s.portfolioStatus, s.explainRisk]
         : ["Refresh signals now.", "What's my portfolio status?", "Explain my current risk."];
+    case "arena_leaderboard":
+      return s
+        ? [s.portfolioStatus, s.riskStatus, s.reviewTrades]
+        : ["What's my portfolio status?", "What's my current risk status?", "Review recent trades."];
     case "portfolio_status":
       return s
         ? [s.activePositions, s.riskStatus, s.reviewTrades]
@@ -1010,6 +1027,46 @@ function buildTradeHistoryFallback(history: TradeHistorySnapshot, locale?: strin
   );
 }
 
+function formatSignedUsd(value: number): string {
+  const absolute = `$${Math.abs(value).toFixed(2)}`;
+  if (value > 0) return `+${absolute}`;
+  if (value < 0) return `-${absolute}`;
+  return absolute;
+}
+
+function arenaWindowLabel(window: ArenaWindow): string {
+  if (window === "day") return "24h";
+  if (window === "week") return "7d";
+  return "all-time";
+}
+
+function buildArenaFallback(arena: ArenaLeaderboardResponse): string {
+  const champion = arena.leaders[0];
+  if (!champion) {
+    return "Arena has no ranked agents yet. Once active agents post live PnL, I can call the champion, podium, and your rivalry gaps.";
+  }
+
+  const prefix = `Arena ${arenaWindowLabel(arena.window)}: ${champion.name} is leading at ${formatSignedUsd(champion.selectedPnl)}.`;
+  const viewer = arena.viewer;
+
+  if (!viewer.agentId) {
+    return clampReplyWords(`${prefix} ${arena.meta.rankedAgents} agents are currently ranked.`);
+  }
+
+  if (viewer.ranked && viewer.rank) {
+    return clampReplyWords(
+      `${prefix} You are #${viewer.rank} at ${formatSignedUsd(viewer.referencePnl)}. Gap to podium ${formatSignedUsd(viewer.gapToPodium)}, crown ${formatSignedUsd(viewer.gapToCrown)}.`,
+    );
+  }
+
+  const reason = viewer.reason === "inactive"
+    ? "Your agent is inactive, so it is outside the board."
+    : "Your agent is outside the ranked board right now.";
+  return clampReplyWords(
+    `${prefix} ${reason} Gap to top 10 ${formatSignedUsd(viewer.gapToTop10)}, crown ${formatSignedUsd(viewer.gapToCrown)}.`,
+  );
+}
+
 function buildOpsFallback(ops: OpsSnapshot, locale?: string): string {
   const f = fb(locale);
   const name = ops.agentName ?? (f ? "Tu agente" : "Your agent");
@@ -1057,7 +1114,7 @@ You are chatting with your user through the Quantik platform sidebar.
 - Keep every response under 60 words.
 - You have direct access to Quantik internal systems and internal specialist sub-agents. Use provided internal context and tools before asking the user for anything.
 - When asked about markets, trading, or portfolio — use internal context or tools to get live data. Do not make up numbers.
-- You can reference Quantik features: /autopilot, /markets, /trade-history.
+- You can reference Quantik features: /arena, /autopilot, /markets, /trade-history.
 - If the user asks something outside trading/markets, briefly acknowledge it but steer back.
 - Never break character. Never say you are an AI or language model.
 - Never claim you lack access to portfolio, signal, or agent status data if internal context is present.
@@ -1070,6 +1127,7 @@ You have access to tools that let you fetch live data. ALWAYS use the appropriat
 - Portfolio, balance, positions, P&L → use get_portfolio
 - Risk, circuit breakers, drawdown, exposure → use get_risk_status
 - Past trades, performance, win rate → use get_trade_history
+- Arena standings, rank, leaderboard windows → use get_arena_leaderboard
 - Finding markets, searching topics → use search_markets
 - Analyzing a specific market → use run_analysis
 - Placing trades → use place_trade (always confirm first)
@@ -1153,6 +1211,17 @@ function buildRecipePrompt(
           : null,
       }];
     }
+    if (context.kind === "arena") {
+      const data = context.data as ArenaLeaderboardResponse;
+      return [context.kind, {
+        window: data.window,
+        updatedAt: data.updatedAt,
+        meta: data.meta,
+        champion: data.leaders[0] ?? null,
+        leaders: data.leaders.slice(0, 5),
+        viewer: data.viewer,
+      }];
+    }
     return [context.kind, context.data];
   }));
   const recipeLabel = recipe.replace(/_/g, " ");
@@ -1205,6 +1274,8 @@ function contextFromToolResult(toolName: string, data: unknown): ContextEnvelope
       return { kind: "portfolio", data };
     case "get_risk_status":
       return { kind: "risk", data };
+    case "get_arena_leaderboard":
+      return { kind: "arena", data };
     case "get_scanner_signals":
       return { kind: "scanner", data };
     case "get_agent_status":
@@ -1248,6 +1319,23 @@ async function resolveRecipe(
       contexts,
       suggestions: getSuggestionsForRecipe(recipe, body.locale),
       fallbackReply: buildScannerFallback(scanner, body.locale),
+      prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
+    };
+  }
+
+  if (recipe === "arena_leaderboard") {
+    const window = inferArenaWindow(body.message);
+    emitTrace(res, TOOL_TRACE_META.get_arena_leaderboard, `Syncing arena ${arenaWindowLabel(window)} board`);
+    const arenaResult = await executeTool("get_arena_leaderboard", { window }, context);
+    const arena = arenaResult.data as ArenaLeaderboardResponse;
+    const arenaContext: ContextEnvelope = { kind: "arena", data: arena };
+    contexts.push(arenaContext);
+    emitContext(res, arenaContext);
+    emitTrace(res, TOOL_TRACE_META.get_arena_leaderboard, "Arena board ready", "done");
+    return {
+      contexts,
+      suggestions: getSuggestionsForRecipe(recipe, body.locale),
+      fallbackReply: buildArenaFallback(arena),
       prompt: buildRecipePrompt(recipe, body.message, contexts, body.locale),
     };
   }

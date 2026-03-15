@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import crypto from "crypto";
 import type { AddressInfo } from "net";
 import type { Server } from "http";
 
@@ -180,6 +181,28 @@ function seedRiskConfig(db: ReturnType<typeof import("../src/db/schema").getDb>)
   ).run(now);
 }
 
+function seedApiKey(
+  db: ReturnType<typeof import("../src/db/schema").getDb>,
+  agentId: string,
+  userId: string,
+  scopes: string[] = ["read", "trade", "analysis", "config"],
+) {
+  const fullKey = `qk_live_${crypto.randomBytes(16).toString("hex")}`;
+  const keyHash = crypto.createHash("sha256").update(fullKey).digest("hex");
+  db.prepare(
+    "INSERT INTO api_keys (id, agent_id, user_id, key_hash, key_prefix, scopes, rate_limit_tier, created_at) VALUES (?, ?, ?, ?, ?, ?, 'standard', ?)"
+  ).run(
+    `key-${Math.random().toString(16).slice(2, 10)}`,
+    agentId,
+    userId,
+    keyHash,
+    fullKey.slice(0, 16),
+    JSON.stringify(scopes),
+    Date.now(),
+  );
+  return fullKey;
+}
+
 function parseSseBody(body: string): Array<Record<string, unknown>> {
   return body
     .split("\n")
@@ -310,6 +333,63 @@ describe("agent chat route", () => {
       expect(opsData.connectionStatus).toBe("connected");
       expect(opsData.health?.status).toBeDefined();
     } finally {
+      await closeServer(server);
+    }
+  });
+
+  test("BYO arena chat infers the requested window and keeps viewer context scoped to the API-key agent", async () => {
+    const { server, baseUrl, getDb } = await startServer();
+
+    try {
+      const db = seedUser(getDb, currentUserId!);
+      seedRiskConfig(db);
+      const byoAgentId = seedAgent(db, currentUserId!, {
+        id: "agent-byo-arena",
+        agent_type: "byo",
+        name: "Arena Lobster",
+        connection_status: "connected",
+      });
+      const rivalId = seedAgent(db, "user-rival-arena", {
+        id: "agent-rival-arena",
+        name: "Champion Hawk",
+      });
+      seedExecution(db, byoAgentId, "byo-arena-market", 40, Date.now() - 60_000, {
+        status: "settled",
+        pnl: 40,
+      });
+      seedExecution(db, rivalId, "rival-arena-market", 95, Date.now() - 90_000, {
+        status: "settled",
+        pnl: 95,
+      });
+      const apiKey = seedApiKey(db, byoAgentId, currentUserId!);
+      currentUserId = null;
+
+      const response = await fetch(`${baseUrl}/api/v1/agent/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ message: "Who is leading the arena in 24h and where do I rank?" }),
+      });
+
+      const events = parseSseBody(await response.text());
+      const arenaContext = events.find((event) => event.type === "context" && event.kind === "arena");
+      const arenaData = arenaContext?.data as {
+        window?: string;
+        viewer?: { agentId?: string | null; rank?: number | null };
+        leaders?: Array<{ name: string }>;
+      };
+      const done = events.find((event) => event.type === "done");
+
+      expect(arenaData.window).toBe("day");
+      expect(arenaData.viewer?.agentId).toBe(byoAgentId);
+      expect(arenaData.viewer?.rank).toBe(2);
+      expect(arenaData.leaders?.[0]?.name).toBe("Champion Hawk");
+      expect(String(done?.reply ?? "")).toMatch(/Arena 24h/i);
+      expect(String(done?.reply ?? "")).toMatch(/#2/);
+    } finally {
+      currentUserId = "user-chat";
       await closeServer(server);
     }
   });

@@ -47,6 +47,7 @@ describe("skill manifest routes", () => {
 
       const toolNames = body.tools.map((tool) => tool.name);
       expect(toolNames).toEqual(expect.arrayContaining([
+        "get_arena_leaderboard",
         "get_polymarket_status",
         "run_polymarket_approvals",
         "usage",
@@ -84,6 +85,8 @@ describe("skill manifest routes", () => {
       expect(response.status).toBe(200);
 
       const body = await response.text();
+      expect(body).toContain("### get_arena_leaderboard");
+      expect(body).toContain("`arena`");
       expect(body).toContain("### get_polymarket_status");
       expect(body).toContain("### run_polymarket_approvals");
       expect(body).toContain("## Legacy Compatibility");

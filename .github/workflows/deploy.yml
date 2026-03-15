@@ -29,6 +29,9 @@ jobs:
           NODE_ENV: test
           API_URL: https://quantik-backend-production.up.railway.app
 
+      - name: Build backend
+        run: npm run build
+
   deploy:
     name: Deploy to Railway
     runs-on: ubuntu-latest

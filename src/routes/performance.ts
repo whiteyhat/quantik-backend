@@ -12,12 +12,8 @@ import {
   getEntryYesPrice,
   getLatestScannerDirectionMap,
 } from "../utils/executionDirection";
-import {
-  buildArenaLeaderboard,
-  type ArenaAgentRecord,
-  type ArenaExecutionRecord,
-  type ArenaWindow,
-} from "../performance/arena";
+import { parseArenaWindow } from "../performance/arena";
+import { loadArenaLeaderboard } from "../performance/arenaService";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -56,10 +52,6 @@ interface ReportTrade {
   orderId: string | null;
   mode: string;
   pipelineRunId: string | null;
-}
-
-function parseArenaWindow(value: unknown): ArenaWindow {
-  return value === "day" || value === "week" ? value : "all";
 }
 
 function humanizeSlug(slug: string): string {
@@ -221,101 +213,6 @@ async function loadReportTrades(req: Request): Promise<ReportTrade[]> {
   });
 }
 
-async function loadArenaAgents(viewerAgentId?: string | null): Promise<ArenaAgentRecord[]> {
-  const columns = `id, agent_code, status, name, avatar_emoji, animal_type, agent_type, connection_status, autopilot_enabled, polymarket_ready`;
-
-  if (isPgEnabled()) {
-    const activeAgents = await pgQuery<ArenaAgentRecord>(
-      `SELECT ${columns}
-       FROM agents
-       WHERE status = 'active'
-       ORDER BY updated_at DESC NULLS LAST`
-    );
-
-    if (!viewerAgentId || activeAgents.some((agent) => agent.id === viewerAgentId)) {
-      return activeAgents;
-    }
-
-    const viewerAgent = await pgQueryOne<ArenaAgentRecord>(
-      `SELECT ${columns}
-       FROM agents
-       WHERE id = $1`,
-      [viewerAgentId]
-    );
-
-    return viewerAgent ? [...activeAgents, viewerAgent] : activeAgents;
-  }
-
-  const db = getDb();
-  const activeAgents = db.prepare(
-    `SELECT ${columns}
-     FROM agents
-     WHERE status = 'active'
-     ORDER BY updated_at DESC`
-  ).all() as ArenaAgentRecord[];
-
-  if (!viewerAgentId || activeAgents.some((agent) => agent.id === viewerAgentId)) {
-    return activeAgents;
-  }
-
-  const viewerAgent = db.prepare(
-    `SELECT ${columns}
-     FROM agents
-     WHERE id = ?`
-  ).get(viewerAgentId) as ArenaAgentRecord | undefined;
-
-  return viewerAgent ? [...activeAgents, viewerAgent] : activeAgents;
-}
-
-async function loadArenaExecutions(agentIds: string[]): Promise<ArenaExecutionRecord[]> {
-  if (agentIds.length === 0) return [];
-
-  if (isPgEnabled()) {
-    return pgQuery<ArenaExecutionRecord>(
-      `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
-       FROM executions
-       WHERE agent_id = ANY($1::text[])
-       ORDER BY executed_at DESC`,
-      [agentIds]
-    );
-  }
-
-  const db = getDb();
-  const placeholders = agentIds.map(() => "?").join(", ");
-  return db.prepare(
-    `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
-     FROM executions
-     WHERE agent_id IN (${placeholders})
-     ORDER BY executed_at DESC`
-  ).all(...agentIds) as ArenaExecutionRecord[];
-}
-
-async function getLatestArenaScannerPriceMap(): Promise<Map<string, number>> {
-  let rows: Array<{ slug: string; probability: number }>;
-
-  if (isPgEnabled()) {
-    rows = await pgQuery<{ slug: string; probability: number }>(
-      `SELECT DISTINCT ON (slug) slug, probability
-       FROM scanner_results
-       ORDER BY slug, scanned_at DESC`
-    );
-  } else {
-    const db = getDb();
-    rows = db.prepare(
-      `SELECT s.slug, s.probability
-       FROM scanner_results s
-       INNER JOIN (
-         SELECT slug, MAX(scanned_at) AS latest
-         FROM scanner_results
-         GROUP BY slug
-       ) latest
-         ON latest.slug = s.slug AND latest.latest = s.scanned_at`
-    ).all() as Array<{ slug: string; probability: number }>;
-  }
-
-  return new Map(rows.map((row) => [row.slug, Number(row.probability ?? 0.5)]));
-}
-
 router.get("/summary", async (req: Request, res) => {
   try {
     const userId = await getUserIdAsync(req);
@@ -398,24 +295,10 @@ router.get("/trades", async (req, res) => {
 router.get("/arena", async (req, res) => {
   try {
     const window = parseArenaWindow(req.query.window);
-    const userId = await getUserIdAsync(req);
+    const userId = req.apiKeyAgent ? null : await getUserIdAsync(req);
     const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
-    const viewerAgentId = linkedAgent?.agentId ?? null;
-    const agents = await loadArenaAgents(viewerAgentId);
-    const executions = await loadArenaExecutions(agents.map((agent) => agent.id));
-    const [latestPrices, scannerDirections] = await Promise.all([
-      getLatestArenaScannerPriceMap(),
-      getLatestScannerDirectionMap(),
-    ]);
-
-    res.json(buildArenaLeaderboard({
-      window,
-      agents,
-      executions,
-      latestPrices,
-      scannerDirections,
-      viewerAgentId,
-    }));
+    const viewerAgentId = req.apiKeyAgent?.agentId ?? linkedAgent?.agentId ?? null;
+    res.json(await loadArenaLeaderboard(window, viewerAgentId));
   } catch (err) {
     console.error("[performance:arena] error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });

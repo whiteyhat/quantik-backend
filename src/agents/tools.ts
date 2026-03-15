@@ -21,6 +21,8 @@ import {
   getEntryYesPrice,
   getLatestScannerDirectionMap,
 } from "../utils/executionDirection";
+import { loadArenaLeaderboard } from "../performance/arenaService";
+import { parseArenaWindow, type ArenaWindow } from "../performance/arena";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,17 @@ export const TOOL_DECLARATIONS: GeminiFunctionDeclaration[] = [
       type: "object",
       properties: {
         limit: { type: "number", description: "Number of recent trades to return (default 10, max 50)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_arena_leaderboard",
+    description: "Get the Arena leaderboard for 24h, 7d, or all-time performance, including the current champion and the calling agent's viewer context.",
+    parameters: {
+      type: "object",
+      properties: {
+        window: { type: "string", description: "Leaderboard window", enum: ["day", "week", "all"] },
       },
       required: [],
     },
@@ -251,6 +264,13 @@ async function executeGetTradeHistory(
   context: ToolExecutionContext | null,
 ): Promise<unknown> {
   return loadTradeHistorySnapshot(context, args.limit ?? 10);
+}
+
+async function executeGetArenaLeaderboard(
+  args: { window?: ArenaWindow },
+  context: ToolExecutionContext | null,
+): Promise<unknown> {
+  return loadArenaLeaderboard(parseArenaWindow(args.window), context?.linkedAgentId ?? null);
 }
 
 async function executeSearchMarkets(args: { query?: string; category?: string }): Promise<unknown> {
@@ -950,6 +970,8 @@ export async function executeTool(
       return { name, data: await executeGetRiskStatus(context) };
     case "get_trade_history":
       return { name, data: await executeGetTradeHistory(args as { limit?: number }, context) };
+    case "get_arena_leaderboard":
+      return { name, data: await executeGetArenaLeaderboard(args as { window?: ArenaWindow }, context) };
     case "search_markets":
       return { name, data: await executeSearchMarkets(args as { query?: string; category?: string }) };
     case "run_analysis":

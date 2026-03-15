@@ -161,7 +161,7 @@ Authorization: Bearer YOUR_API_KEY
 - Session memory: **30-minute TTL**, max 20 messages per session
 
 **Auto-recipe keywords** — include one of these in your message for parallel context preloading before the LLM reply:
-\`portfolio\`, \`scanner\`, \`risk\`, \`health\`, \`trades\`
+\`portfolio\`, \`scanner\`, \`risk\`, \`health\`, \`trades\`, \`arena\`
 
 **SSE event types:**
 
@@ -204,7 +204,7 @@ ${generateLegacyDocs(baseUrl)}
 
 | Scope | Access |
 |---|---|
-| \`read\` | All GET endpoints (portfolio, trades, markets, scanner, risk config, health, usage) + conversational chat |
+| \`read\` | All GET endpoints (portfolio, trades, arena, markets, scanner, risk config, health, usage) + conversational chat |
 | \`trade\` | Execute and close trades |
 | \`analysis\` | Run pipeline analysis, trigger scanner |
 | \`config\` | Update risk config, webhook config, submit Polymarket approvals |
@@ -213,7 +213,7 @@ ${generateLegacyDocs(baseUrl)}
 
 | Endpoint Type | Limit |
 |---|---|
-| Read (GET tools, usage) | 120 requests/minute |
+| Read (GET tools, arena, usage) | 120 requests/minute |
 | Analysis (run_analysis, trigger_scanner) | 5 requests/minute |
 | Trade (place_trade, close_position) | 10 requests/minute |
 | Config (update_risk_config, update_webhook_config, run_polymarket_approvals) | 10 requests/minute |

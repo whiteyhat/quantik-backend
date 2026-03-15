@@ -29,6 +29,7 @@ const TOOL_ROUTE_META: Record<
   get_portfolio: { method: "GET", scope: "read", rateLimitBucket: "read" },
   get_risk_status: { method: "GET", scope: "read", rateLimitBucket: "read" },
   get_trade_history: { method: "GET", scope: "read", rateLimitBucket: "read" },
+  get_arena_leaderboard: { method: "GET", scope: "read", rateLimitBucket: "read" },
   search_markets: { method: "GET", scope: "read", rateLimitBucket: "read" },
   run_analysis: { method: "POST", scope: "analysis", rateLimitBucket: "analysis" },
   place_trade: { method: "POST", scope: "trade", rateLimitBucket: "trade" },

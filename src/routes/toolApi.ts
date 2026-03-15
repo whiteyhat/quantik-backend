@@ -5,6 +5,7 @@ import { loadToolExecutionContextByAgentId } from "../agents/snapshots";
 import { rateLimit } from "../infra/rateLimit";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgExec } from "../db/postgres";
+import { isArenaWindow, parseArenaWindow } from "../performance/arena";
 
 const router = Router();
 
@@ -103,6 +104,15 @@ router.get("/get_trade_history", requireApiKey, requireScope("read"), readRateLi
   const raw = req.query.limit ? parseInt(req.query.limit as string, 10) : 10;
   const limit = Math.min(Math.max(1, isNaN(raw) ? 10 : raw), 50);
   callTool(req, res, "get_trade_history", { limit });
+});
+
+router.get("/get_arena_leaderboard", requireApiKey, requireScope("read"), readRateLimit, (req: Request, res: Response) => {
+  const rawWindow = req.query.window;
+  if (rawWindow != null && (typeof rawWindow !== "string" || !isArenaWindow(rawWindow))) {
+    res.status(400).json({ success: false, error: "window must be one of: day, week, all", code: "INVALID_PARAMS" });
+    return;
+  }
+  callTool(req, res, "get_arena_leaderboard", { window: parseArenaWindow(rawWindow) });
 });
 
 const VALID_CATEGORIES = ["crypto", "politics", "sports", "pop-culture", "science", "world", "business"];
