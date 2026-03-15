@@ -158,6 +158,37 @@ async function main() {
     }
   }
 
+  // ── Reconcile user IDs ──────────────────────────────────────────
+  // When a user logs into prod before migration, they get a new internal ID.
+  // The migrated data (agents, executions) still references the old SQLite ID.
+  // Fix by remapping all references to the prod-created user ID.
+  console.log("\n[migrate] Reconciling user IDs...");
+  const sqliteUsers = new Database(DB_PATH, { readonly: true })
+    .prepare("SELECT id, clerk_id FROM users")
+    .all() as Array<{ id: string; clerk_id: string }>;
+
+  const pg = getPgPool();
+  for (const su of sqliteUsers) {
+    const pgUser = (await pg.query(
+      "SELECT id FROM users WHERE clerk_id = $1", [su.clerk_id]
+    )).rows[0] as { id: string } | undefined;
+
+    if (pgUser && pgUser.id !== su.id) {
+      // Prod user exists with different ID — remap references
+      const r1 = await pg.query("UPDATE agents SET user_id = $1 WHERE user_id = $2", [pgUser.id, su.id]);
+      const r2 = await pg.query("UPDATE executions SET user_id = $1 WHERE user_id = $2", [pgUser.id, su.id]);
+      // Link agent_id if the SQLite user had one
+      if (su.clerk_id) {
+        const sqliteAgentId = new Database(DB_PATH, { readonly: true })
+          .prepare("SELECT agent_id FROM users WHERE id = ?").get(su.id) as { agent_id: string | null } | undefined;
+        if (sqliteAgentId?.agent_id) {
+          await pg.query("UPDATE users SET agent_id = $1 WHERE id = $2", [sqliteAgentId.agent_id, pgUser.id]);
+        }
+      }
+      console.log(`  [remap] ${su.clerk_id}: ${su.id} -> ${pgUser.id} (agents: ${r1.rowCount}, executions: ${r2.rowCount})`);
+    }
+  }
+
   sqliteDb.close();
 
   console.log(`\n[migrate] Done! ${totalInserted} rows across ${totalTables} tables.`);
