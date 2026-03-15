@@ -991,20 +991,24 @@ router.get("/agent/me", async (req: Request, res: Response) => {
 
 // ── GET /api/v1/agents — List agents ─────────────────────────
 
-router.get("/agents", (_req: Request, res: Response) => {
-  const db = getDb();
-  const agents = db.prepare(`
-    SELECT id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
+router.get("/agents", async (_req: Request, res: Response) => {
+  const AGENT_LIST_COLS = `id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
            personality, decision_style, trading_instinct, time_patience, profit_dream,
            money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
            wallet_address, created_at, updated_at, deployed_at, agent_type, endpoint_url, agent_url,
            connection_status, last_heartbeat, description, webhook_events,
-           autopilot_enabled, autopilot_updated_at
-    FROM agents ORDER BY created_at DESC
-  `).all();
+           autopilot_enabled, autopilot_updated_at`;
+
+  let agents: Array<Record<string, unknown>>;
+  if (isPgEnabled()) {
+    agents = await pgQuery<Record<string, unknown>>(`SELECT ${AGENT_LIST_COLS} FROM agents ORDER BY created_at DESC`);
+  } else {
+    const db = getDb();
+    agents = db.prepare(`SELECT ${AGENT_LIST_COLS} FROM agents ORDER BY created_at DESC`).all() as Array<Record<string, unknown>>;
+  }
 
   res.json({
-    agents: (agents as Array<Record<string, unknown>>).map((agent) => ({
+    agents: agents.map((agent) => ({
       ...agent,
       autopilot_enabled: normalizeAutopilotEnabled(agent.autopilot_enabled as number | boolean | null | undefined),
       webhook_events: typeof agent.webhook_events === "string"
@@ -1022,9 +1026,14 @@ router.get("/agents", (_req: Request, res: Response) => {
 
 // ── GET /api/v1/agents/:id — Get agent detail ────────────────
 
-router.get("/agents/:id", (req: Request, res: Response) => {
-  const db = getDb();
-  const agent = db.prepare(`SELECT * FROM agents WHERE id = ?`).get(req.params.id);
+router.get("/agents/:id", async (req: Request, res: Response) => {
+  let agent: Record<string, unknown> | null | undefined;
+  if (isPgEnabled()) {
+    agent = await pgQueryOne<Record<string, unknown>>("SELECT * FROM agents WHERE id = $1", [req.params.id]);
+  } else {
+    const db = getDb();
+    agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(req.params.id) as Record<string, unknown> | undefined;
+  }
 
   if (!agent) {
     res.status(404).json({ error: "Agent not found" });
@@ -1036,9 +1045,14 @@ router.get("/agents/:id", (req: Request, res: Response) => {
 
 // ── PATCH /api/v1/agents/:id — Update agent config ──────────
 
-router.patch("/agents/:id", (req: Request, res: Response) => {
-  const db = getDb();
-  const existing = db.prepare(`SELECT * FROM agents WHERE id = ?`).get(req.params.id) as Record<string, unknown> | undefined;
+router.patch("/agents/:id", async (req: Request, res: Response) => {
+  let existing: Record<string, unknown> | undefined | null;
+  if (isPgEnabled()) {
+    existing = await pgQueryOne<Record<string, unknown>>("SELECT * FROM agents WHERE id = $1", [req.params.id]);
+  } else {
+    const db = getDb();
+    existing = db.prepare("SELECT * FROM agents WHERE id = ?").get(req.params.id) as Record<string, unknown> | undefined;
+  }
 
   if (!existing) {
     res.status(404).json({ error: "Agent not found" });
@@ -1066,20 +1080,38 @@ router.patch("/agents/:id", (req: Request, res: Response) => {
   const systemPrompt = buildSystemPrompt(merged, agentCode);
   const now = Date.now();
 
-  db.prepare(`
-    UPDATE agents SET
-      name = ?, avatar_emoji = ?, animal_type = ?, avatar_image = ?,
-      personality = ?, decision_style = ?, trading_instinct = ?, time_patience = ?,
-      profit_dream = ?, money_approach = ?, protection_mindset = ?, leverage_vibe = ?,
-      market_sense = ?, asset_love = ?, system_prompt = ?, updated_at = ?
-    WHERE id = ?
-  `).run(
-    merged.name, merged.avatar, merged.animalType ?? null, merged.generatedImage ?? null,
-    merged.personality, merged.decisionStyle, merged.tradingInstinct, merged.timePatience,
-    merged.profitDream, merged.moneyApproach, merged.protectionMindset, "none",
-    merged.marketSense, merged.assetLove, systemPrompt, now,
-    req.params.id
-  );
+  if (isPgEnabled()) {
+    await pgExec(`
+      UPDATE agents SET
+        name = $1, avatar_emoji = $2, animal_type = $3, avatar_image = $4,
+        personality = $5, decision_style = $6, trading_instinct = $7, time_patience = $8,
+        profit_dream = $9, money_approach = $10, protection_mindset = $11, leverage_vibe = $12,
+        market_sense = $13, asset_love = $14, system_prompt = $15, updated_at = $16
+      WHERE id = $17
+    `, [
+      merged.name, merged.avatar, merged.animalType ?? null, merged.generatedImage ?? null,
+      merged.personality, merged.decisionStyle, merged.tradingInstinct, merged.timePatience,
+      merged.profitDream, merged.moneyApproach, merged.protectionMindset, "none",
+      merged.marketSense, merged.assetLove, systemPrompt, now,
+      req.params.id
+    ]);
+  } else {
+    const db = getDb();
+    db.prepare(`
+      UPDATE agents SET
+        name = ?, avatar_emoji = ?, animal_type = ?, avatar_image = ?,
+        personality = ?, decision_style = ?, trading_instinct = ?, time_patience = ?,
+        profit_dream = ?, money_approach = ?, protection_mindset = ?, leverage_vibe = ?,
+        market_sense = ?, asset_love = ?, system_prompt = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      merged.name, merged.avatar, merged.animalType ?? null, merged.generatedImage ?? null,
+      merged.personality, merged.decisionStyle, merged.tradingInstinct, merged.timePatience,
+      merged.profitDream, merged.moneyApproach, merged.protectionMindset, "none",
+      merged.marketSense, merged.assetLove, systemPrompt, now,
+      req.params.id
+    );
+  }
 
   res.json({ ok: true, system_prompt: systemPrompt });
 });
