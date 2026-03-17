@@ -7,6 +7,7 @@ import {
   type ArenaExecutionRecord,
   type ArenaLeaderboardResponse,
   type ArenaWindow,
+  type ArenaMarketBreakdown,
 } from "./arena";
 import { loadPreviousRanks } from "./arenaSnapshots";
 
@@ -176,6 +177,41 @@ async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {
   }
 }
 
+function humanizeSlug(slug: string): string {
+  return slug
+    .split("-")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+async function loadMarketQuestions(slugs: string[]): Promise<Map<string, string>> {
+  if (slugs.length === 0) return new Map();
+
+  if (isPgEnabled()) {
+    const rows = await pgQuery<{ slug: string; question: string }>(
+      `SELECT slug, question FROM orchestrator_candidates WHERE slug = ANY($1::text[])`,
+      [slugs]
+    );
+    return new Map(rows.map((r) => [r.slug, r.question]));
+  }
+
+  const db = getDb();
+  const placeholders = slugs.map(() => "?").join(", ");
+  const rows = db.prepare(
+    `SELECT slug, question FROM orchestrator_candidates WHERE slug IN (${placeholders})`
+  ).all(...slugs) as Array<{ slug: string; question: string }>;
+  return new Map(rows.map((r) => [r.slug, r.question]));
+}
+
+function enrichMarketBreakdownQuestions(
+  breakdown: ArenaMarketBreakdown[],
+  questionMap: Map<string, string>,
+): void {
+  for (const entry of breakdown) {
+    entry.question = questionMap.get(entry.slug) ?? humanizeSlug(entry.slug);
+  }
+}
+
 export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: string | null, limit?: number, offset?: number): Promise<ArenaLeaderboardResponse> {
   const [snapshot, previousRanks] = await Promise.all([
     loadSharedArenaSnapshot(),
@@ -194,7 +230,7 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
     }
   }
 
-  return buildArenaLeaderboard({
+  const result = buildArenaLeaderboard({
     window,
     agents,
     executions,
@@ -207,6 +243,26 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
     limit,
     offset,
   });
+
+  // Enrich market breakdown with readable questions
+  const allSlugs = new Set<string>();
+  for (const leader of result.leaders) {
+    for (const m of leader.marketBreakdown) allSlugs.add(m.slug);
+  }
+  if (result.viewer?.entry) {
+    for (const m of result.viewer.entry.marketBreakdown) allSlugs.add(m.slug);
+  }
+  if (allSlugs.size > 0) {
+    const questionMap = await loadMarketQuestions([...allSlugs]);
+    for (const leader of result.leaders) {
+      enrichMarketBreakdownQuestions(leader.marketBreakdown, questionMap);
+    }
+    if (result.viewer?.entry) {
+      enrichMarketBreakdownQuestions(result.viewer.entry.marketBreakdown, questionMap);
+    }
+  }
+
+  return result;
 }
 
 export function resetArenaLeaderboardCache(): void {

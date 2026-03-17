@@ -50,6 +50,7 @@ export interface ArenaExecutionRecord {
 
 export interface ArenaMarketBreakdown {
   slug: string;
+  question: string;
   pnl: number;
   trades: number;
   winRate: number;
@@ -285,6 +286,7 @@ function computeAgentEntry(
   const marketBreakdown: ArenaMarketBreakdown[] = Array.from(marketMap.entries())
     .map(([slug, data]) => ({
       slug,
+      question: slug,
       pnl: round2(data.pnl),
       trades: data.trades,
       winRate: data.settled > 0 ? round2((data.wins / data.settled) * 100) : 0,

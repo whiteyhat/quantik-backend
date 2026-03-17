@@ -178,6 +178,7 @@ export async function loadAgentHistory(
 
 export interface ArenaComparisonAgent {
   agentId: string;
+  agentCode: string;
   name: string;
   avatarEmoji: string;
   rank: number | null;
@@ -208,6 +209,7 @@ export async function loadComparison(
   function toComp(entry: typeof entry1, sparkline: ArenaSparklinePoint[]): ArenaComparisonAgent {
     return {
       agentId: entry?.agentId ?? "",
+      agentCode: entry?.agentCode ?? "",
       name: entry?.name ?? "Unknown",
       avatarEmoji: entry?.avatarEmoji ?? "?",
       rank: entry?.rank ?? null,
