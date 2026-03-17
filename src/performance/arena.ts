@@ -4,6 +4,7 @@ import {
   type ExecutionDirection,
 } from "../utils/executionDirection";
 import { computeAgentBadges, type ArenaBadge } from "./arenaAchievements";
+import { computeAgentDNA, computeArenaDNAStats, type AgentDNA } from "./arenaDNA";
 import { computeAgentHeat } from "./arenaHeat";
 
 export type ArenaWindow = "day" | "week" | "all";
@@ -19,6 +20,7 @@ export function parseArenaWindow(value: unknown, fallback: ArenaWindow = "all"):
 
 export interface ArenaAgentRecord {
   id: string;
+  user_id?: string | null;
   agent_code: string;
   status: string;
   name: string;
@@ -80,6 +82,7 @@ export interface ArenaLeaderboardEntry {
   marketBreakdown: ArenaMarketBreakdown[];
   badges: ArenaBadge[];
   heat: number;
+  dna: AgentDNA;
 }
 
 export interface ArenaViewerContext {
@@ -318,6 +321,7 @@ function computeAgentEntry(
       marketBreakdown,
       badges: [],  // populated after global pre-pass in buildArenaLeaderboard
       heat: computeAgentHeat(validExecutions, computeCurrentStreak(validExecutions), now),
+      dna: { volume: 0, diversity: 0, speed: 0, streak: 0, riskAppetite: 0, timing: 0 },  // populated after global pre-pass
     },
   };
 }
@@ -377,6 +381,13 @@ export function buildArenaLeaderboard({
   for (const entry of leaders) {
     const agentExecs = executionsByAgent.get(entry.agentId) ?? [];
     entry.badges = computeAgentBadges(agentExecs, entry.currentStreak, entry.bestTradePnl, globalHighestPnl);
+  }
+
+  // Compute Strategy DNA (requires global stats for normalization)
+  const dnaStats = computeArenaDNAStats(executionsByAgent);
+  for (const entry of leaders) {
+    const agentExecs = executionsByAgent.get(entry.agentId) ?? [];
+    entry.dna = computeAgentDNA(agentExecs, dnaStats);
   }
 
   const leaderByAgentId = new Map(leaders.map((entry) => [entry.agentId, entry]));

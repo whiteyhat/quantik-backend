@@ -1,8 +1,9 @@
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQuery, pgExec } from "../db/postgres";
-import { loadArenaLeaderboard } from "./arenaService";
+import { loadArenaLeaderboard, loadCachedArenaAgents } from "./arenaService";
 import { emitToAll } from "../infra/socket";
-import type { ArenaWindow, ArenaLeaderboardEntry } from "./arena";
+import type { ArenaWindow, ArenaLeaderboardEntry, ArenaAgentRecord } from "./arena";
+import { emitArenaNotifications } from "./arenaNotifications";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -264,11 +265,15 @@ function broadcastDelta(window: ArenaWindow, deltas: ArenaRankDelta[]): void {
 
 export async function processArenaSnapshots(): Promise<void> {
   try {
+    // Load agents with user_id for notification routing
+    const agentRecords = await loadCachedArenaAgents();
+
     for (const window of WINDOWS) {
       const previousRanks = await loadPreviousRanks(window);
       const leaders = await writeSnapshot(window);
       const deltas = computeDeltas(leaders, previousRanks);
       broadcastDelta(window, deltas);
+      emitArenaNotifications(window, leaders, agentRecords, deltas);
     }
     cleanupOldSnapshots();
     console.log("[arena-snapshots] Snapshot cycle complete");

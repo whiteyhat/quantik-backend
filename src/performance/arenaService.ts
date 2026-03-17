@@ -10,7 +10,7 @@ import {
 } from "./arena";
 import { loadPreviousRanks } from "./arenaSnapshots";
 
-const ARENA_AGENT_COLUMNS = "id, agent_code, status, name, avatar_emoji, animal_type, agent_type, connection_status, autopilot_enabled, polymarket_ready";
+const ARENA_AGENT_COLUMNS = "id, user_id, agent_code, status, name, avatar_emoji, animal_type, agent_type, connection_status, autopilot_enabled, polymarket_ready";
 const ARENA_CACHE_TTL_MS = 15_000;
 const SCANNER_STALENESS_MS = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -212,4 +212,10 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
 export function resetArenaLeaderboardCache(): void {
   sharedArenaSnapshot = null;
   sharedArenaSnapshotPromise = null;
+}
+
+/** Return the cached active agents (includes user_id for notification routing). */
+export async function loadCachedArenaAgents(): Promise<ArenaAgentRecord[]> {
+  const snapshot = await loadSharedArenaSnapshot();
+  return snapshot.activeAgents;
 }

@@ -13,7 +13,7 @@ import {
   getLatestScannerDirectionMap,
 } from "../utils/executionDirection";
 import { parseArenaWindow } from "../performance/arena";
-import { loadArenaLeaderboard } from "../performance/arenaService";
+import { loadArenaLeaderboard, loadCachedArenaAgents } from "../performance/arenaService";
 import { loadAgentHistory, loadComparison } from "../performance/arenaSnapshots";
 import { apiRateLimit } from "../infra/rateLimit";
 
@@ -326,6 +326,54 @@ router.get("/arena/compare", apiRateLimit, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("[performance:arena:compare] error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Public agent profile — no auth required
+router.get("/arena/agent/:agentCode", apiRateLimit, async (req, res) => {
+  try {
+    const agentCode = typeof req.params.agentCode === "string" ? req.params.agentCode : "";
+    if (!agentCode) {
+      res.status(400).json({ error: "Missing agentCode" });
+      return;
+    }
+
+    // Find agent by agent_code
+    const agents = await loadCachedArenaAgents();
+    const agent = agents.find((a) => a.agent_code === agentCode);
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    // Load leaderboard to find this agent's entry
+    const result = await loadArenaLeaderboard("all");
+    const entry = result.leaders.find((e) => e.agentId === agent.id);
+
+    // Load sparkline history
+    const sparkline = await loadAgentHistory(agent.id, "all", 168);
+
+    res.json({
+      agentCode: agent.agent_code,
+      name: agent.name,
+      avatarEmoji: agent.avatar_emoji,
+      agentType: agent.agent_type,
+      rank: entry?.rank ?? null,
+      selectedPnl: entry?.selectedPnl ?? 0,
+      allTimePnl: entry?.allTimePnl ?? 0,
+      winRate: entry?.winRate ?? 0,
+      totalTrades: entry?.totalTrades ?? 0,
+      openPositions: entry?.openPositions ?? 0,
+      currentStreak: entry?.currentStreak ?? 0,
+      heat: entry?.heat ?? 0,
+      dna: entry?.dna ?? { volume: 0, diversity: 0, speed: 0, streak: 0, riskAppetite: 0, timing: 0 },
+      badges: entry?.badges ?? [],
+      marketBreakdown: entry?.marketBreakdown ?? [],
+      sparkline,
+    });
+  } catch (err) {
+    console.error("[performance:arena:agent] error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
