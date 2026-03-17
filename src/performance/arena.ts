@@ -3,6 +3,8 @@ import {
   getEntryYesPrice,
   type ExecutionDirection,
 } from "../utils/executionDirection";
+import { computeAgentBadges, type ArenaBadge } from "./arenaAchievements";
+import { computeAgentHeat } from "./arenaHeat";
 
 export type ArenaWindow = "day" | "week" | "all";
 export const ARENA_WINDOW_VALUES: ArenaWindow[] = ["day", "week", "all"];
@@ -76,6 +78,8 @@ export interface ArenaLeaderboardEntry {
   bestTradePnl: number;
   rankChange: number | null;
   marketBreakdown: ArenaMarketBreakdown[];
+  badges: ArenaBadge[];
+  heat: number;
 }
 
 export interface ArenaViewerContext {
@@ -312,6 +316,8 @@ function computeAgentEntry(
       bestTradePnl: round2(Number(bestTrade?.pnl ?? 0)),
       rankChange: null,
       marketBreakdown,
+      badges: [],  // populated after global pre-pass in buildArenaLeaderboard
+      heat: computeAgentHeat(validExecutions, computeCurrentStreak(validExecutions), now),
     },
   };
 }
@@ -365,6 +371,13 @@ export function buildArenaLeaderboard({
       const rankChange = prev != null ? prev - rank : null;
       return { ...entry, rank, rankChange };
     });
+
+  // Compute badges (requires global context for Diamond Hands)
+  const globalHighestPnl = leaders.reduce((max, entry) => Math.max(max, entry.bestTradePnl), 0);
+  for (const entry of leaders) {
+    const agentExecs = executionsByAgent.get(entry.agentId) ?? [];
+    entry.badges = computeAgentBadges(agentExecs, entry.currentStreak, entry.bestTradePnl, globalHighestPnl);
+  }
 
   const leaderByAgentId = new Map(leaders.map((entry) => [entry.agentId, entry]));
   const viewerRecord = viewerAgentId

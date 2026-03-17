@@ -158,4 +158,46 @@ describe("arena leaderboard builder", () => {
     expect(result.viewer.entry?.name).toBe("Signal Scout");
     expect(result.viewer.gapToCrown).toBe(220);
   });
+
+  test("computes badges and heat for ranked entries", () => {
+    const agents = [
+      makeAgent({ id: "agent-a", agent_code: "Q-AGENT-X101", name: "Badge Hunter" }),
+    ];
+
+    const now = NOW;
+    const executions = Array.from({ length: 55 }, (_, i) =>
+      makeExecution({
+        id: i + 1,
+        agent_id: "agent-a",
+        slug: `market-${i % 6}`,
+        pnl: i % 3 === 0 ? -5 : 20,
+        executed_at: now - (i + 1) * 60_000,
+        closed_at: now - i * 60_000,
+        updated_at: now - i * 60_000,
+      }),
+    );
+
+    const result = buildArenaLeaderboard({
+      window: "all",
+      now,
+      agents,
+      executions,
+      latestPrices: new Map(),
+      scannerDirections: new Map(),
+    });
+
+    expect(result.leaders).toHaveLength(1);
+    const entry = result.leaders[0];
+
+    // Should have badges: first_blood (>= 1 trade), market_maker (>= 50), diversified (>= 5 slugs), speed_demon (closed < 1h), diamond_hands (only agent)
+    const badgeIds = entry.badges.map((b) => b.id);
+    expect(badgeIds).toContain("first_blood");
+    expect(badgeIds).toContain("market_maker");
+    expect(badgeIds).toContain("diversified");
+    expect(badgeIds).toContain("speed_demon");
+    expect(badgeIds).toContain("diamond_hands");
+
+    // Heat should be > 0 since all 55 trades are recent
+    expect(entry.heat).toBeGreaterThan(0);
+  });
 });

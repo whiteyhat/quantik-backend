@@ -19,6 +19,8 @@ export interface ArenaSnapshotRow {
 
 export interface ArenaRankDelta {
   agentId: string;
+  name: string;
+  avatarEmoji: string;
   previousRank: number | null;
   currentRank: number;
   rankChange: number; // positive = moved up, negative = moved down, 0 = unchanged
@@ -232,6 +234,8 @@ function computeDeltas(leaders: ArenaLeaderboardEntry[], previousRanks: Map<stri
     const rankChange = previousRank != null ? previousRank - entry.rank : 0;
     return {
       agentId: entry.agentId,
+      name: entry.name,
+      avatarEmoji: entry.avatarEmoji,
       previousRank,
       currentRank: entry.rank,
       rankChange,
