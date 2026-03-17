@@ -8,9 +8,11 @@ import {
   type ArenaLeaderboardResponse,
   type ArenaWindow,
 } from "./arena";
+import { loadPreviousRanks } from "./arenaSnapshots";
 
 const ARENA_AGENT_COLUMNS = "id, agent_code, status, name, avatar_emoji, animal_type, agent_type, connection_status, autopilot_enabled, polymarket_ready";
 const ARENA_CACHE_TTL_MS = 15_000;
+const SCANNER_STALENESS_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 interface SharedArenaSnapshot {
   activeAgents: ArenaAgentRecord[];
@@ -18,6 +20,7 @@ interface SharedArenaSnapshot {
   activeExecutions: ArenaExecutionRecord[];
   latestPrices: Map<string, number>;
   scannerDirections: Map<string, ExecutionDirection>;
+  scannerTimestamps: Map<string, number>;
   loadedAt: number;
 }
 
@@ -62,10 +65,20 @@ async function loadArenaAgentById(agentId: string): Promise<ArenaAgentRecord | n
   return row ?? null;
 }
 
-async function loadArenaExecutions(agentIds: string[]): Promise<ArenaExecutionRecord[]> {
+async function loadArenaExecutions(agentIds: string[], sinceMs?: number): Promise<ArenaExecutionRecord[]> {
   if (agentIds.length === 0) return [];
 
   if (isPgEnabled()) {
+    if (sinceMs != null) {
+      return pgQuery<ArenaExecutionRecord>(
+        `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
+         FROM executions
+         WHERE agent_id = ANY($1::text[])
+           AND (executed_at >= $2 OR (pnl IS NULL AND (status = 'placed' OR status = 'paper')))
+         ORDER BY executed_at DESC`,
+        [agentIds, sinceMs]
+      );
+    }
     return pgQuery<ArenaExecutionRecord>(
       `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
        FROM executions
@@ -77,6 +90,15 @@ async function loadArenaExecutions(agentIds: string[]): Promise<ArenaExecutionRe
 
   const db = getDb();
   const placeholders = agentIds.map(() => "?").join(", ");
+  if (sinceMs != null) {
+    return db.prepare(
+      `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
+       FROM executions
+       WHERE agent_id IN (${placeholders})
+         AND (executed_at >= ? OR (pnl IS NULL AND (status = 'placed' OR status = 'paper')))
+       ORDER BY executed_at DESC`
+    ).all(...agentIds, sinceMs) as ArenaExecutionRecord[];
+  }
   return db.prepare(
     `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
      FROM executions
@@ -85,19 +107,22 @@ async function loadArenaExecutions(agentIds: string[]): Promise<ArenaExecutionRe
   ).all(...agentIds) as ArenaExecutionRecord[];
 }
 
-async function getLatestArenaScannerPriceMap(): Promise<Map<string, number>> {
-  let rows: Array<{ slug: string; probability: number }>;
+async function getLatestArenaScannerPrices(): Promise<{
+  prices: Map<string, number>;
+  timestamps: Map<string, number>;
+}> {
+  let rows: Array<{ slug: string; probability: number; scanned_at: number }>;
 
   if (isPgEnabled()) {
-    rows = await pgQuery<{ slug: string; probability: number }>(
-      `SELECT DISTINCT ON (slug) slug, probability
+    rows = await pgQuery<{ slug: string; probability: number; scanned_at: number }>(
+      `SELECT DISTINCT ON (slug) slug, probability, scanned_at
        FROM scanner_results
        ORDER BY slug, scanned_at DESC`
     );
   } else {
     const db = getDb();
     rows = db.prepare(
-      `SELECT s.slug, s.probability
+      `SELECT s.slug, s.probability, s.scanned_at
        FROM scanner_results s
        INNER JOIN (
          SELECT slug, MAX(scanned_at) AS latest
@@ -105,10 +130,13 @@ async function getLatestArenaScannerPriceMap(): Promise<Map<string, number>> {
          GROUP BY slug
        ) latest
          ON latest.slug = s.slug AND latest.latest = s.scanned_at`
-    ).all() as Array<{ slug: string; probability: number }>;
+    ).all() as Array<{ slug: string; probability: number; scanned_at: number }>;
   }
 
-  return new Map(rows.map((row) => [row.slug, Number(row.probability ?? 0.5)]));
+  return {
+    prices: new Map(rows.map((row) => [row.slug, Number(row.probability ?? 0.5)])),
+    timestamps: new Map(rows.map((row) => [row.slug, Number(row.scanned_at ?? 0)])),
+  };
 }
 
 async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {
@@ -122,9 +150,9 @@ async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {
   sharedArenaSnapshotPromise = (async () => {
     const activeAgents = await loadActiveArenaAgents();
     const activeAgentIds = activeAgents.map((agent) => agent.id);
-    const [activeExecutions, latestPrices, scannerDirections] = await Promise.all([
+    const [activeExecutions, scannerData, scannerDirections] = await Promise.all([
       loadArenaExecutions(activeAgentIds),
-      getLatestArenaScannerPriceMap(),
+      getLatestArenaScannerPrices(),
       getLatestScannerDirectionMap(),
     ]);
 
@@ -132,8 +160,9 @@ async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {
       activeAgents,
       activeAgentIds: new Set(activeAgentIds),
       activeExecutions,
-      latestPrices,
+      latestPrices: scannerData.prices,
       scannerDirections,
+      scannerTimestamps: scannerData.timestamps,
       loadedAt: Date.now(),
     };
     sharedArenaSnapshot = snapshot;
@@ -147,8 +176,11 @@ async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {
   }
 }
 
-export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: string | null): Promise<ArenaLeaderboardResponse> {
-  const snapshot = await loadSharedArenaSnapshot();
+export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: string | null, limit?: number, offset?: number): Promise<ArenaLeaderboardResponse> {
+  const [snapshot, previousRanks] = await Promise.all([
+    loadSharedArenaSnapshot(),
+    loadPreviousRanks(window),
+  ]);
 
   let agents = snapshot.activeAgents;
   let executions = snapshot.activeExecutions;
@@ -168,7 +200,12 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
     executions,
     latestPrices: snapshot.latestPrices,
     scannerDirections: snapshot.scannerDirections,
+    scannerTimestamps: snapshot.scannerTimestamps,
+    stalenessThresholdMs: SCANNER_STALENESS_MS,
+    previousRanks: previousRanks.size > 0 ? previousRanks : undefined,
     viewerAgentId: viewerAgentId ?? null,
+    limit,
+    offset,
   });
 }
 

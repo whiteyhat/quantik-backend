@@ -856,6 +856,26 @@ function migrate(db: Database.Database): void {
     );
   `);
 
+  // ── Arena Snapshots ──────────────────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS arena_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      window TEXT NOT NULL,
+      rank INTEGER NOT NULL,
+      selected_pnl REAL NOT NULL,
+      all_time_pnl REAL NOT NULL,
+      win_rate REAL NOT NULL,
+      total_trades INTEGER NOT NULL DEFAULT 0,
+      snapshot_at INTEGER NOT NULL,
+      UNIQUE(agent_id, window, snapshot_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_arena_snapshots_agent_window
+      ON arena_snapshots(agent_id, window, snapshot_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_arena_snapshots_time
+      ON arena_snapshots(snapshot_at DESC);
+  `);
+
   // Ensure locale columns exist (safe no-op on fresh dbs after CREATE TABLE above)
   addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_es TEXT");
   addColumn(db, "ALTER TABLE versions ADD COLUMN highlight_fr TEXT");

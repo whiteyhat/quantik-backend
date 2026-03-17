@@ -14,6 +14,8 @@ import {
 } from "../utils/executionDirection";
 import { parseArenaWindow } from "../performance/arena";
 import { loadArenaLeaderboard } from "../performance/arenaService";
+import { loadAgentHistory, loadComparison } from "../performance/arenaSnapshots";
+import { apiRateLimit } from "../infra/rateLimit";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -292,15 +294,50 @@ router.get("/trades", async (req, res) => {
   }
 });
 
-router.get("/arena", async (req, res) => {
+router.get("/arena", apiRateLimit, async (req, res) => {
   try {
     const window = parseArenaWindow(req.query.window);
     const userId = req.apiKeyAgent ? null : await getUserIdAsync(req);
     const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
     const viewerAgentId = req.apiKeyAgent?.agentId ?? linkedAgent?.agentId ?? null;
-    res.json(await loadArenaLeaderboard(window, viewerAgentId));
+    const limit = req.query.limit != null ? Math.max(1, Math.min(200, Number(req.query.limit) || 50)) : undefined;
+    const offset = req.query.offset != null ? Math.max(0, Number(req.query.offset) || 0) : undefined;
+    res.json(await loadArenaLeaderboard(window, viewerAgentId, limit, offset));
   } catch (err) {
     console.error("[performance:arena] error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.get("/arena/compare", apiRateLimit, async (req, res) => {
+  try {
+    const window = parseArenaWindow(req.query.window);
+    const a1 = typeof req.query.a1 === "string" ? req.query.a1 : "";
+    const a2 = typeof req.query.a2 === "string" ? req.query.a2 : "";
+    if (!a1 || !a2) {
+      res.status(400).json({ error: "Both a1 and a2 agent IDs are required" });
+      return;
+    }
+    const result = await loadComparison(a1, a2, window);
+    if (!result) {
+      res.status(404).json({ error: "Neither agent found in leaderboard" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    console.error("[performance:arena:compare] error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.get("/arena/:agentId/history", apiRateLimit, async (req, res) => {
+  try {
+    const window = parseArenaWindow(req.query.window);
+    const limit = Math.max(1, Math.min(720, Number(req.query.limit) || 168));
+    const agentId = typeof req.params.agentId === "string" ? req.params.agentId : "";
+    res.json(await loadAgentHistory(agentId, window, limit));
+  } catch (err) {
+    console.error("[performance:arena:history] error:", err);
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

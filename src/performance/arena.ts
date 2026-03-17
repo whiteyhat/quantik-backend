@@ -44,6 +44,14 @@ export interface ArenaExecutionRecord {
   updated_at: number | null;
 }
 
+export interface ArenaMarketBreakdown {
+  slug: string;
+  pnl: number;
+  trades: number;
+  winRate: number;
+  openPositions: number;
+}
+
 export interface ArenaLeaderboardEntry {
   rank: number;
   agentId: string;
@@ -66,6 +74,8 @@ export interface ArenaLeaderboardEntry {
   lastTradeAt: number | null;
   bestTradeSlug: string | null;
   bestTradePnl: number;
+  rankChange: number | null;
+  marketBreakdown: ArenaMarketBreakdown[];
 }
 
 export interface ArenaViewerContext {
@@ -86,6 +96,7 @@ export interface ArenaLeaderboardResponse {
   updatedAt: number;
   meta: {
     rankedAgents: number;
+    totalRanked: number;
     activeAgents: number;
     totalSelectedPnlPool: number;
     totalRealizedPnlPool: number;
@@ -108,7 +119,12 @@ interface BuildArenaLeaderboardOptions {
   executions: ArenaExecutionRecord[];
   latestPrices: Map<string, number>;
   scannerDirections: Map<string, ExecutionDirection>;
+  scannerTimestamps?: Map<string, number>;
+  stalenessThresholdMs?: number;
+  previousRanks?: Map<string, number>;
   viewerAgentId?: string | null;
+  limit?: number;
+  offset?: number;
 }
 
 function normalizeBoolean(value: unknown): boolean {
@@ -171,6 +187,18 @@ function gapToRank(leaders: ArenaLeaderboardEntry[], referencePnl: number, rank:
   return round2(Math.max(0, target - referencePnl));
 }
 
+function isScannerPriceStale(
+  slug: string,
+  now: number,
+  scannerTimestamps?: Map<string, number>,
+  stalenessThresholdMs?: number,
+): boolean {
+  if (!scannerTimestamps || !stalenessThresholdMs) return false;
+  const scannedAt = scannerTimestamps.get(slug);
+  if (scannedAt == null) return true;
+  return now - scannedAt > stalenessThresholdMs;
+}
+
 function computeAgentEntry(
   agent: ArenaAgentRecord,
   executions: ArenaExecutionRecord[],
@@ -178,6 +206,9 @@ function computeAgentEntry(
   scannerDirections: Map<string, ExecutionDirection>,
   window: ArenaWindow,
   windowStart: number,
+  now: number,
+  scannerTimestamps?: Map<string, number>,
+  stalenessThresholdMs?: number,
 ): ArenaEntryComputation {
   const validExecutions = executions.filter((execution) => execution.status !== "failed");
   const openExecutions = validExecutions.filter(isOpenExecution);
@@ -197,7 +228,9 @@ function computeAgentEntry(
 
   for (const execution of openExecutions) {
     const scannerDirection = scannerDirections.get(execution.slug);
-    const currentYesPrice = latestPrices.get(execution.slug) ?? getEntryYesPrice(execution, scannerDirection);
+    const entryPrice = getEntryYesPrice(execution, scannerDirection);
+    const stale = isScannerPriceStale(execution.slug, now, scannerTimestamps, stalenessThresholdMs);
+    const currentYesPrice = stale ? entryPrice : (latestPrices.get(execution.slug) ?? entryPrice);
     const metrics = calculateOpenExecutionMetrics(execution, currentYesPrice, scannerDirection);
     lifetimeUnrealizedPnl += metrics.pnl;
 
@@ -221,6 +254,37 @@ function computeAgentEntry(
     if (latest == null) return execution.executed_at;
     return Math.max(latest, execution.executed_at);
   }, null);
+
+  // Market-level breakdown
+  const marketMap = new Map<string, { pnl: number; trades: number; wins: number; settled: number; open: number }>();
+  for (const execution of validExecutions) {
+    const entry = marketMap.get(execution.slug) ?? { pnl: 0, trades: 0, wins: 0, settled: 0, open: 0 };
+    entry.trades += 1;
+    if (execution.pnl != null) {
+      entry.pnl += Number(execution.pnl);
+      entry.settled += 1;
+      if (Number(execution.pnl) > 0) entry.wins += 1;
+    } else if (isOpenExecution(execution)) {
+      const scannerDirection = scannerDirections.get(execution.slug);
+      const entryPrice = getEntryYesPrice(execution, scannerDirection);
+      const stale = isScannerPriceStale(execution.slug, now, scannerTimestamps, stalenessThresholdMs);
+      const currentYesPrice = stale ? entryPrice : (latestPrices.get(execution.slug) ?? entryPrice);
+      const metrics = calculateOpenExecutionMetrics(execution, currentYesPrice, scannerDirection);
+      entry.pnl += metrics.pnl;
+      entry.open += 1;
+    }
+    marketMap.set(execution.slug, entry);
+  }
+  const marketBreakdown: ArenaMarketBreakdown[] = Array.from(marketMap.entries())
+    .map(([slug, data]) => ({
+      slug,
+      pnl: round2(data.pnl),
+      trades: data.trades,
+      winRate: data.settled > 0 ? round2((data.wins / data.settled) * 100) : 0,
+      openPositions: data.open,
+    }))
+    .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
+    .slice(0, 10);
 
   return {
     eligible: agent.status === "active" && validExecutions.length > 0,
@@ -246,6 +310,8 @@ function computeAgentEntry(
       lastTradeAt,
       bestTradeSlug: bestTrade?.slug ?? null,
       bestTradePnl: round2(Number(bestTrade?.pnl ?? 0)),
+      rankChange: null,
+      marketBreakdown,
     },
   };
 }
@@ -257,7 +323,12 @@ export function buildArenaLeaderboard({
   executions,
   latestPrices,
   scannerDirections,
+  scannerTimestamps,
+  stalenessThresholdMs,
+  previousRanks,
   viewerAgentId = null,
+  limit,
+  offset = 0,
 }: BuildArenaLeaderboardOptions): ArenaLeaderboardResponse {
   const windowStart = getWindowStart(window, now);
   const executionsByAgent = new Map<string, ArenaExecutionRecord[]>();
@@ -278,6 +349,9 @@ export function buildArenaLeaderboard({
       scannerDirections,
       window,
       windowStart,
+      now,
+      scannerTimestamps,
+      stalenessThresholdMs,
     ),
   }));
 
@@ -285,7 +359,12 @@ export function buildArenaLeaderboard({
     .filter((record) => record.eligible)
     .map((record) => record.entry)
     .sort(compareEntries)
-    .map((entry, index) => ({ ...entry, rank: index + 1 }));
+    .map((entry, index) => {
+      const rank = index + 1;
+      const prev = previousRanks?.get(entry.agentId) ?? null;
+      const rankChange = prev != null ? prev - rank : null;
+      return { ...entry, rank, rankChange };
+    });
 
   const leaderByAgentId = new Map(leaders.map((entry) => [entry.agentId, entry]));
   const viewerRecord = viewerAgentId
@@ -326,11 +405,16 @@ export function buildArenaLeaderboard({
         reason: "no_agent",
       };
 
+  const paginatedLeaders = limit != null
+    ? leaders.slice(offset, offset + limit)
+    : leaders;
+
   return {
     window,
     updatedAt: now,
     meta: {
-      rankedAgents: leaders.length,
+      rankedAgents: paginatedLeaders.length,
+      totalRanked: leaders.length,
       activeAgents: agents.filter((agent) => agent.status === "active").length,
       totalSelectedPnlPool: round2(leaders.reduce((sum, entry) => sum + entry.selectedPnl, 0)),
       totalRealizedPnlPool: round2(leaders.reduce((sum, entry) => sum + entry.selectedRealizedPnl, 0)),
@@ -341,7 +425,7 @@ export function buildArenaLeaderboard({
         return Math.max(latest, entry.lastTradeAt);
       }, null),
     },
-    leaders,
+    leaders: paginatedLeaders,
     viewer,
   };
 }

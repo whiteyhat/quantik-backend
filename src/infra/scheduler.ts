@@ -154,6 +154,15 @@ export async function startBullMQScheduler(): Promise<void> {
     processor: checkByoHealth,
     immediate: false,
   });
+
+  // Arena rank snapshots (60min) — historical tracking + rank-change deltas
+  const { processArenaSnapshots } = await import("../performance/arenaSnapshots");
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.ARENA_SNAPSHOTS,
+    intervalMs: 60 * 60 * 1000,
+    processor: processArenaSnapshots,
+    immediate: true,
+  });
 }
 
 // ── Legacy Fallback (setInterval) ─────────────────────────────────────────────
@@ -195,6 +204,13 @@ export function startLegacyScheduler(): void {
   setInterval(() => {
     checkByoHealth().catch(console.error);
   }, 60 * 1000);
+
+  // Arena rank snapshots (60min) — historical tracking + rank-change deltas
+  const { processArenaSnapshots } = require("../performance/arenaSnapshots");
+  processArenaSnapshots().catch(console.error);
+  setInterval(() => {
+    processArenaSnapshots().catch(console.error);
+  }, 60 * 60 * 1000);
 }
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────

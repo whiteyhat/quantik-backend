@@ -790,6 +790,25 @@ export async function migratePg(): Promise<void> {
     DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0');
   `);
 
+  await safeQuery("create arena_snapshots", `
+    CREATE TABLE IF NOT EXISTS arena_snapshots (
+      id BIGSERIAL PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      window TEXT NOT NULL,
+      rank INTEGER NOT NULL,
+      selected_pnl REAL NOT NULL,
+      all_time_pnl REAL NOT NULL,
+      win_rate REAL NOT NULL,
+      total_trades INTEGER NOT NULL DEFAULT 0,
+      snapshot_at BIGINT NOT NULL,
+      UNIQUE(agent_id, window, snapshot_at)
+    );
+    CREATE INDEX IF NOT EXISTS idx_arena_snapshots_agent_window
+      ON arena_snapshots(agent_id, window, snapshot_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_arena_snapshots_time
+      ON arena_snapshots(snapshot_at DESC);
+  `);
+
   // ── Seed / upsert localized releases ────────────────────────────────────────
   try {
     const { RELEASES } = await import("./releases-data");
