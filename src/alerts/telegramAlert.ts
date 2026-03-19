@@ -5,6 +5,7 @@
 
 import { getDb } from "../db/schema";
 import { v4 as uuid } from "uuid";
+import { resolvePolymarketUrl } from "../utils/market-fetch";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -112,7 +113,7 @@ function cleanThesis(raw: string): string {
   return raw;
 }
 
-function formatSignalAlert(r: ScanResult): string {
+async function formatSignalAlert(r: ScanResult): Promise<string> {
   const confPct   = Math.round(r.sigma_confidence * 100);
   const kellyFmt  = (r.kelly_fraction * 100).toFixed(1);
   const oraclePct = Math.round((r.oracle_prob ?? 0) * 100);
@@ -128,7 +129,7 @@ function formatSignalAlert(r: ScanResult): string {
 
   const pnlToday = r.pnlToday ?? 0;
   const pnlSign  = pnlToday >= 0 ? "+" : "";
-  const polyUrl  = `https://polymarket.com/event/${encodeURIComponent(r.slug)}`;
+  const polyUrl  = await resolvePolymarketUrl(r.slug);
   const thesis   = cleanThesis(r.sigma_thesis ?? "");
   const time     = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/New_York" });
 
@@ -171,8 +172,9 @@ function esc(text: string): string {
 
 export async function sendSignalAlert(result: ScanResult): Promise<boolean> {
   try {
+    const text = await formatSignalAlert(result);
     await tgPost("sendMessage", {
-      text: formatSignalAlert(result),
+      text,
       parse_mode: "HTML",
       disable_web_page_preview: true,
     });

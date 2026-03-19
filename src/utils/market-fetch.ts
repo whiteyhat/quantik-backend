@@ -89,6 +89,29 @@ export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
   };
 }
 
+/**
+ * Resolve the correct Polymarket frontend URL for a given market slug.
+ * Polymarket uses /event/<eventSlug> — the event slug (groupSlug from Gamma API)
+ * differs from the market slug for multi-outcome events.
+ */
+export async function resolvePolymarketUrl(marketSlug: string): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://gamma-api.polymarket.com/markets?slug=${marketSlug}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(3000) }
+    );
+    if (res.ok) {
+      const raw: unknown = await res.json();
+      const m: any = Array.isArray(raw) && raw.length > 0 ? raw[0] : raw;
+      const eventSlug = m?.groupSlug || m?.eventSlug || m?.slug || marketSlug;
+      return `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`;
+    }
+  } catch {
+    // Gamma API timeout/error — fall back
+  }
+  return `https://polymarket.com/event/${encodeURIComponent(marketSlug)}`;
+}
+
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Agent timeout")), ms);
