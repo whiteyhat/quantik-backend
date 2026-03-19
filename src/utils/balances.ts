@@ -1,5 +1,10 @@
 import { runCli, runCliWithWallet } from "../cli";
 import { tryLoadActiveAgentContext } from "./agentKey";
+import {
+  AUTOPILOT_MIN_POL_BALANCE,
+  AUTOPILOT_MIN_USDC_BALANCE,
+  buildAutopilotFundingMessage,
+} from "./autopilotFunding";
 
 const POLYGON_RPC_URLS = ["https://polygon.drpc.org", "https://polygon-bor-rpc.publicnode.com"];
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
@@ -220,7 +225,10 @@ export async function getWalletFundingSnapshot(
     };
   }
 
-  if (pol.balance <= 0 && usdc.balance <= 0) {
+  const polReady = pol.balance >= AUTOPILOT_MIN_POL_BALANCE;
+  const usdcReady = usdc.balance >= AUTOPILOT_MIN_USDC_BALANCE;
+
+  if (!polReady && !usdcReady) {
     return {
       address,
       onChainUsdc: usdc.balance,
@@ -229,12 +237,12 @@ export async function getWalletFundingSnapshot(
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
-      fundingMessage: "Deposit POL for Polygon fees and USDC.e for Polymarket trades before enabling autopilot.",
+      fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
       ready: false,
     };
   }
 
-  if (pol.balance <= 0) {
+  if (!polReady) {
     return {
       address,
       onChainUsdc: usdc.balance,
@@ -243,12 +251,12 @@ export async function getWalletFundingSnapshot(
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
-      fundingMessage: "Deposit POL to cover Polygon fees before enabling autopilot.",
+      fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
       ready: false,
     };
   }
 
-  if (usdc.balance <= 0) {
+  if (!usdcReady) {
     return {
       address,
       onChainUsdc: usdc.balance,
@@ -257,7 +265,7 @@ export async function getWalletFundingSnapshot(
       usdcStatus: usdc.status,
       polStatus: pol.status,
       fundingStatus: "funding_required",
-      fundingMessage: "Deposit USDC.e to fund Polymarket trades before enabling autopilot.",
+      fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
       ready: false,
     };
   }
@@ -270,7 +278,7 @@ export async function getWalletFundingSnapshot(
     usdcStatus: usdc.status,
     polStatus: pol.status,
     fundingStatus: "ready",
-    fundingMessage: "Wallet has both POL and USDC.e required for autonomous trading.",
+    fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
     ready: true,
   };
 }

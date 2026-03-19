@@ -40,7 +40,6 @@ export async function fetchBls(): Promise<BlsDataPoint[]> {
         startyear: String(currentYear - 1),
         endyear: String(currentYear),
         registrationkey: BLS_API_KEY,
-        latest: true,
       }),
       signal: AbortSignal.timeout(8000),
     });

@@ -180,7 +180,6 @@ export async function loadAutopilotExecutionContexts(): Promise<AutopilotExecuti
        WHERE agents.user_id IS NOT NULL
          AND agents.status = 'active'
          AND agents.autopilot_enabled = 1
-         AND agents.polymarket_ready = 1
        ORDER BY agents.updated_at DESC NULLS LAST`
     );
     return rows.map(buildAutopilotContext);
@@ -206,7 +205,6 @@ export async function loadAutopilotExecutionContexts(): Promise<AutopilotExecuti
      WHERE agents.user_id IS NOT NULL
        AND agents.status = 'active'
        AND agents.autopilot_enabled = 1
-       AND agents.polymarket_ready = 1
      ORDER BY agents.updated_at DESC`
   ).all() as AutopilotAgentRow[];
   return rows.map(buildAutopilotContext);

@@ -6,19 +6,27 @@ import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
 import { requireEitherAuth } from "../middleware/apiKeyAuth";
 import { getWalletFundingSnapshot } from "../utils/balances";
+import { getSettings } from "../db/queries";
 import { computeHealthScore } from "../monitoring/healthScore";
 import { generateWalletCredentials } from "../wallet/generate";
 import { encrypt } from "../infra/encryption";
 import { rateLimit } from "../infra/rateLimit";
 import { checkPolymarketBalance, runPolymarketApprovals } from "../services/polymarket-prep.service";
+import { getScannerStatus } from "../scanner/marketScanner";
 import {
   getAutopilotPolicyEnvelope,
   listAutopilotDecisions,
   upsertAutopilotPolicyOverrides,
 } from "../services/autopilotPolicy";
 import { loadAgentWalletContext } from "../utils/agentKey";
+import {
+  AUTOPILOT_POL_REQUIREMENT,
+  AUTOPILOT_USDC_REQUIREMENT,
+  buildAutopilotFundingMissingItems,
+} from "../utils/autopilotFunding";
 
 const router = Router();
+const AUTOPILOT_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 
 // ── Attribute-to-Prompt Mappings ─────────────────────────────
 
@@ -164,6 +172,8 @@ interface OwnedAgentContext extends OwnedAgentRecord {
   webhook_secret: string | null;
   autopilot_enabled: number | boolean | null;
   autopilot_updated_at: number | null;
+  polymarket_ready: number | boolean | null;
+  polymarket_status: string | null;
   personality: string | null;
   decision_style: string | null;
   trading_instinct: string | null;
@@ -257,6 +267,7 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
     return await pgQueryOne<OwnedAgentContext>(
       `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
               name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+              polymarket_ready, polymarket_status,
               personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
        FROM agents WHERE id = $1 AND user_id = $2`,
       [agentId, userId]
@@ -267,6 +278,7 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   const agent = db.prepare(
     `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
             name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+            polymarket_ready, polymarket_status,
             personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
      FROM agents WHERE id = ? AND user_id = ?`
   ).get(agentId, userId) as OwnedAgentContext | undefined;
@@ -288,6 +300,214 @@ async function buildAutopilotPolicy(agent: AgentPolicySource) {
 
 function normalizeAutopilotEnabled(value: number | boolean | null | undefined): boolean {
   return value === true || value === 1;
+}
+
+type AgentExecutionSource = "autopilot" | "manual";
+
+interface AutopilotDecisionSummary {
+  id: string;
+  slug: string;
+  direction: string;
+  decision: "executed" | "skipped" | "failed";
+  reason_code: string;
+  size_usdc: number | null;
+  scanned_at: number;
+  error: string | null;
+}
+
+interface AgentExecutionSummaryRow {
+  id: number | string;
+  slug: string;
+  side: string;
+  direction: string | null;
+  amount: number;
+  executed_at: number;
+  status: string;
+  order_id: string | null;
+  fill_price: number | null;
+  pnl: number | null;
+  source: string | null;
+}
+
+function buildPolymarketPrepMissingItems(agent: OwnedAgentContext, funding: Awaited<ReturnType<typeof getWalletFundingSnapshot>>): string[] {
+  if (!agent.wallet_address) {
+    return [
+      "Assign a wallet address to this agent.",
+      `Fund the wallet with ${AUTOPILOT_POL_REQUIREMENT} and ${AUTOPILOT_USDC_REQUIREMENT}.`,
+    ];
+  }
+
+  if (funding.fundingStatus === "unavailable") {
+    return ["Live wallet balances are temporarily unavailable. Retry the verification check."];
+  }
+
+  const fundingItems = buildAutopilotFundingMissingItems(funding.pol, funding.onChainUsdc);
+  if (fundingItems.length > 0) return fundingItems;
+
+  if (normalizeAutopilotEnabled(agent.polymarket_ready)) {
+    return [];
+  }
+
+  if (agent.polymarket_status === "approval_failed") {
+    return ["Retry the Polymarket approval flow for this wallet."];
+  }
+
+  return ["Run the Polymarket approval flow for this wallet."];
+}
+
+function buildPolymarketPrepMessage(agent: OwnedAgentContext): string {
+  if (agent.polymarket_status === "approval_failed") {
+    return "Polymarket approvals failed. Retry the approval flow before enabling autopilot.";
+  }
+
+  return "Polymarket approvals are incomplete. Run the approval flow before enabling autopilot.";
+}
+
+async function loadAutopilotActivity(agentId: string): Promise<{
+  tradesToday: number;
+  lastExecutedAt: number | null;
+  lastDecisionAt: number | null;
+  lastDecision: AutopilotDecisionSummary | null;
+  lastReasonCode: string | null;
+}> {
+  const todayStart = new Date().setUTCHours(0, 0, 0, 0);
+
+  if (isPgEnabled()) {
+    const tradesRow = await pgQueryOne<{ count: number | string }>(
+      `SELECT COUNT(*) AS count
+       FROM executions
+       WHERE agent_id = $1
+         AND source = 'autopilot'
+         AND status IN ('placed', 'paper')
+         AND executed_at >= $2`,
+      [agentId, todayStart]
+    );
+    const executionRow = await pgQueryOne<{ executed_at: number | string }>(
+      `SELECT executed_at
+       FROM executions
+       WHERE agent_id = $1
+         AND source = 'autopilot'
+       ORDER BY executed_at DESC
+       LIMIT 1`,
+      [agentId]
+    );
+    const decisionRow = await pgQueryOne<AutopilotDecisionSummary>(
+      `SELECT id, slug, direction, decision, reason_code, size_usdc, scanned_at, error
+       FROM autopilot_decisions
+       WHERE agent_id = $1
+       ORDER BY scanned_at DESC
+       LIMIT 1`,
+      [agentId]
+    );
+
+    return {
+      tradesToday: Number(tradesRow?.count ?? 0),
+      lastExecutedAt: executionRow ? Number(executionRow.executed_at) : null,
+      lastDecisionAt: decisionRow ? Number(decisionRow.scanned_at) : null,
+      lastDecision: decisionRow ?? null,
+      lastReasonCode: decisionRow?.reason_code ?? null,
+    };
+  }
+
+  const db = getDb();
+  const tradesRow = db.prepare(
+    `SELECT COUNT(*) AS count
+     FROM executions
+     WHERE agent_id = ?
+       AND source = 'autopilot'
+       AND status IN ('placed', 'paper')
+       AND executed_at >= ?`
+  ).get(agentId, todayStart) as { count: number } | undefined;
+  const executionRow = db.prepare(
+    `SELECT executed_at
+     FROM executions
+     WHERE agent_id = ?
+       AND source = 'autopilot'
+     ORDER BY executed_at DESC
+     LIMIT 1`
+  ).get(agentId) as { executed_at: number } | undefined;
+  const decisionRow = db.prepare(
+    `SELECT id, slug, direction, decision, reason_code, size_usdc, scanned_at, error
+     FROM autopilot_decisions
+     WHERE agent_id = ?
+     ORDER BY scanned_at DESC
+     LIMIT 1`
+  ).get(agentId) as AutopilotDecisionSummary | undefined;
+
+  return {
+    tradesToday: Number(tradesRow?.count ?? 0),
+    lastExecutedAt: executionRow?.executed_at ?? null,
+    lastDecisionAt: decisionRow?.scanned_at ?? null,
+    lastDecision: decisionRow ?? null,
+    lastReasonCode: decisionRow?.reason_code ?? null,
+  };
+}
+
+async function listOwnedAgentExecutions(
+  agentId: string,
+  limit: number,
+  source?: AgentExecutionSource
+): Promise<AgentExecutionSummaryRow[]> {
+  if (isPgEnabled()) {
+    const params: Array<string | number> = [agentId];
+    const clauses = ["agent_id = $1"];
+    let paramIndex = 2;
+
+    if (source) {
+      clauses.push(`source = $${paramIndex}`);
+      params.push(source);
+      paramIndex += 1;
+    }
+
+    params.push(limit);
+
+    return pgQuery<AgentExecutionSummaryRow>(
+      `SELECT id, slug, side, direction, amount, executed_at, status, order_id, fill_price, pnl, source
+       FROM executions
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY executed_at DESC
+       LIMIT $${paramIndex}`,
+      params
+    );
+  }
+
+  const db = getDb();
+  if (source) {
+    return db.prepare(
+      `SELECT id, slug, side, direction, amount, executed_at, status, order_id, fill_price, pnl, source
+       FROM executions
+       WHERE agent_id = ? AND source = ?
+       ORDER BY executed_at DESC
+       LIMIT ?`
+    ).all(agentId, source, limit) as AgentExecutionSummaryRow[];
+  }
+
+  return db.prepare(
+    `SELECT id, slug, side, direction, amount, executed_at, status, order_id, fill_price, pnl, source
+     FROM executions
+     WHERE agent_id = ?
+     ORDER BY executed_at DESC
+     LIMIT ?`
+  ).all(agentId, limit) as AgentExecutionSummaryRow[];
+}
+
+function determineAutopilotBlocker(params: {
+  agent: OwnedAgentContext;
+  funding: Awaited<ReturnType<typeof getWalletFundingSnapshot>>;
+  lastGlobalScanAt: number | null;
+}): "none" | "no_wallet" | "funding_required" | "polymarket_prep_required" | "scanner_idle" | "autopilot_off" {
+  const { agent, funding, lastGlobalScanAt } = params;
+
+  if (!agent.wallet_address) return "no_wallet";
+  if (funding.fundingStatus !== "ready") return "funding_required";
+  if (!normalizeAutopilotEnabled(agent.polymarket_ready)) return "polymarket_prep_required";
+  if (!normalizeAutopilotEnabled(agent.autopilot_enabled)) return "autopilot_off";
+
+  if (lastGlobalScanAt == null || lastGlobalScanAt < (Date.now() - AUTOPILOT_SCAN_INTERVAL_MS * 2)) {
+    return "scanner_idle";
+  }
+
+  return "none";
 }
 
 async function loadUsageStats(agentId: string): Promise<UsageStats> {
@@ -672,8 +892,8 @@ router.post("/agents", async (req: Request, res: Response) => {
         address: walletAddress,
         network: "Polygon (Mainnet)",
         required: {
-          pol: ">0.01 POL (gas fees)",
-          usdc: ">$1 USDC.e (trading)",
+          pol: `${AUTOPILOT_POL_REQUIREMENT} (gas fees)`,
+          usdc: `${AUTOPILOT_USDC_REQUIREMENT} (trading)`,
         },
         usdc_contract: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
         note: "Fund this address, then click Verify Readiness.",
@@ -776,7 +996,9 @@ router.post("/agents/:id/run-approvals", polymarketApprovalsLimit, async (req: R
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "Agent not found") { res.status(404).json({ error: "Agent not found" }); return; }
     console.error("[run-approvals] error:", msg);
-    res.status(500).json({ error: "Approvals failed. Ensure wallet has sufficient POL for gas fees." });
+    res.status(500).json({
+      error: `Approvals failed. Ensure the wallet still has ${AUTOPILOT_POL_REQUIREMENT} and ${AUTOPILOT_USDC_REQUIREMENT}.`,
+    });
   }
 });
 
@@ -1163,15 +1385,33 @@ router.patch("/agents/:id/autopilot", async (req: Request, res: Response) => {
   if (body.enabled) {
     const walletContext = await loadAgentWalletContext(agentId).catch(() => null);
     const funding = await getWalletFundingSnapshot(agent.wallet_address, walletContext?.privateKey);
+
     if (!funding.ready) {
       res.status(409).json({
         error: "AUTOPILOT_FUNDING_REQUIRED",
         message: funding.fundingMessage,
         wallet_address: funding.address,
+        polymarket_status: agent.polymarket_status,
         pol: funding.pol,
         on_chain_usdc: funding.onChainUsdc,
         funding_status: funding.fundingStatus,
         funding_message: funding.fundingMessage,
+        missing_items: buildPolymarketPrepMissingItems(agent, funding),
+      });
+      return;
+    }
+
+    if (!normalizeAutopilotEnabled(agent.polymarket_ready)) {
+      res.status(409).json({
+        error: "AUTOPILOT_POLYMARKET_PREP_REQUIRED",
+        message: buildPolymarketPrepMessage(agent),
+        wallet_address: funding.address,
+        polymarket_status: agent.polymarket_status,
+        pol: funding.pol,
+        on_chain_usdc: funding.onChainUsdc,
+        funding_status: funding.fundingStatus,
+        funding_message: funding.fundingMessage,
+        missing_items: buildPolymarketPrepMissingItems(agent, funding),
       });
       return;
     }
@@ -1188,6 +1428,96 @@ router.patch("/agents/:id/autopilot", async (req: Request, res: Response) => {
     agent_id: agentId,
     autopilot_enabled: body.enabled,
     autopilot_updated_at: now,
+  });
+});
+
+router.get("/agents/:id/autopilot-status", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const [walletContext, settings, activity] = await Promise.all([
+    loadAgentWalletContext(agentId).catch(() => null),
+    getSettings(),
+    loadAutopilotActivity(agentId),
+  ]);
+  const funding = await getWalletFundingSnapshot(agent.wallet_address, walletContext?.privateKey);
+  const scanner = getScannerStatus();
+  const lastGlobalScanAt = scanner.lastScan > 0 ? scanner.lastScan : null;
+
+  res.json({
+    agentId,
+    autopilotEnabled: normalizeAutopilotEnabled(agent.autopilot_enabled),
+    polymarketReady: normalizeAutopilotEnabled(agent.polymarket_ready),
+    polymarketStatus: agent.polymarket_status ?? null,
+    wallet: {
+      address: funding.address,
+      onChainUsdc: funding.onChainUsdc,
+      clobBalance: funding.clobBalance,
+      pol: funding.pol,
+      fundingStatus: funding.fundingStatus,
+      fundingMessage: funding.fundingMessage,
+      missingItems: buildPolymarketPrepMissingItems(agent, funding),
+    },
+    scheduler: {
+      scannerRunning: scanner.running,
+      lastGlobalScanAt,
+      scanIntervalMs: AUTOPILOT_SCAN_INTERVAL_MS,
+      paperMode: !!settings.paper_mode,
+    },
+    activity: {
+      tradesToday: activity.tradesToday,
+      lastExecutedAt: activity.lastExecutedAt,
+      lastDecisionAt: activity.lastDecisionAt,
+      lastDecision: activity.lastDecision,
+      lastReasonCode: activity.lastReasonCode,
+    },
+    blocker: determineAutopilotBlocker({
+      agent,
+      funding,
+      lastGlobalScanAt,
+    }),
+  });
+});
+
+router.get("/agents/:id/executions", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgent(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+  const sourceParam = typeof req.query.source === "string" ? req.query.source : null;
+  const source = sourceParam === "autopilot" || sourceParam === "manual"
+    ? sourceParam
+    : undefined;
+  const executions = await listOwnedAgentExecutions(agentId, limit, source);
+
+  res.json({
+    executions: executions.map((row) => ({
+      id: String(row.id),
+      slug: row.slug,
+      side: row.side,
+      direction: row.direction,
+      amount: Number(row.amount ?? 0),
+      executedAt: Number(row.executed_at),
+      status: row.status,
+      orderId: row.order_id,
+      fillPrice: row.fill_price == null ? null : Number(row.fill_price),
+      pnl: row.pnl == null ? null : Number(row.pnl),
+      source: row.source && row.source.trim() ? row.source : "unknown",
+    })),
   });
 });
 

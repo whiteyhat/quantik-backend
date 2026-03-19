@@ -190,6 +190,90 @@ describe("MarketScanner autopilot execution", () => {
     expect(insertAutopilotDecisionMock).not.toHaveBeenCalled();
   });
 
+  test("enabled agents that are not execution-ready still emit funding and prep skip decisions", async () => {
+    const { scanner } = await initScannerTest();
+
+    loadAutopilotExecutionContextsMock.mockResolvedValue([
+      {
+        userId: "user-funding",
+        agentId: "agent-funding",
+        status: "active",
+        agentType: "created",
+        walletAddress: "0x1111111111111111111111111111111111111111",
+        autopilotEnabled: true,
+        personality: "balanced",
+        decisionStyle: "analyst",
+        tradingInstinct: "trend_chaser",
+        timePatience: "swing",
+        moneyApproach: "smart_scaling",
+        protectionMindset: "flexible",
+        marketSense: "mood_reader",
+        polymarketReady: false,
+      },
+      {
+        userId: "user-prep",
+        agentId: "agent-prep",
+        status: "active",
+        agentType: "created",
+        walletAddress: "0x2222222222222222222222222222222222222222",
+        autopilotEnabled: true,
+        personality: "balanced",
+        decisionStyle: "analyst",
+        tradingInstinct: "trend_chaser",
+        timePatience: "swing",
+        moneyApproach: "smart_scaling",
+        protectionMindset: "flexible",
+        marketSense: "mood_reader",
+        polymarketReady: false,
+      },
+    ]);
+
+    getWalletFundingSnapshotMock
+      .mockResolvedValueOnce({
+        address: "0x1111111111111111111111111111111111111111",
+        onChainUsdc: 2,
+        pol: 0.5,
+        clobBalance: 0,
+        usdcStatus: "live",
+        polStatus: "live",
+        fundingStatus: "funding_required",
+        fundingMessage: "Deposit >= 3 POL for Polygon fees and >= 10 USDC.e for Polymarket trades before enabling autopilot.",
+        ready: false,
+      })
+      .mockResolvedValueOnce({
+        address: "0x2222222222222222222222222222222222222222",
+        onChainUsdc: 25,
+        pol: 4,
+        clobBalance: 25,
+        usdcStatus: "live",
+        polStatus: "live",
+        fundingStatus: "ready",
+        fundingMessage: "Wallet meets the >= 3 POL and >= 10 USDC.e autopilot requirements.",
+        ready: true,
+      });
+
+    await scanner.autoExecute(buildScanResult(), "Will BTC hit 100k?");
+
+    expect(executeManagedTradeMock).not.toHaveBeenCalled();
+    expect(insertAutopilotDecisionMock).toHaveBeenCalledTimes(2);
+    expect(insertAutopilotDecisionMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        agentId: "agent-funding",
+        decision: "skipped",
+        reasonCode: "funding",
+      })
+    );
+    expect(insertAutopilotDecisionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        agentId: "agent-prep",
+        decision: "skipped",
+        reasonCode: "polymarket_prep",
+      })
+    );
+  });
+
   test("recent manual trades do not trip autopilot cadence gates", async () => {
     const { scanner, db } = await initScannerTest();
 

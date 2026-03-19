@@ -47,16 +47,13 @@ import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
 import { decrypt } from "../infra/encryption";
 import { getPolBalanceSnapshot, getUsdcBalanceSnapshot } from "../utils/balances";
 import { emitToUser } from "../infra/socket";
-
-// ── Constants ────────────────────────────────────────────────────────────────
-
-// Minimum POL required for gas to submit 6 approval transactions on Polygon.
-const MIN_POL_BALANCE = 3;
-
-// Minimum USDC required to place any Polymarket order.
-// CLI approve doesn't spend USDC, but we gate on this to ensure the agent
-// can actually trade after approvals complete.
-const MIN_USDC_BALANCE = 10.0;
+import {
+  AUTOPILOT_MIN_POL_BALANCE,
+  AUTOPILOT_MIN_USDC_BALANCE,
+  AUTOPILOT_POL_REQUIREMENT,
+  AUTOPILOT_USDC_REQUIREMENT,
+  buildAutopilotFundingMissingItems,
+} from "../utils/autopilotFunding";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -185,19 +182,7 @@ function buildMissingItems(
   usdcBalance: number,
   approvalResult?: { allPassed: boolean; details: unknown }
 ): string[] {
-  const items: string[] = [];
-
-  if (polBalance < MIN_POL_BALANCE) {
-    items.push(
-      `Low POL: ${polBalance.toFixed(4)} POL (need >${MIN_POL_BALANCE} for gas fees)`
-    );
-  }
-
-  if (usdcBalance < MIN_USDC_BALANCE) {
-    items.push(
-      `Low USDC: $${usdcBalance.toFixed(2)} (need >$${MIN_USDC_BALANCE} for trading)`
-    );
-  }
+  const items = buildAutopilotFundingMissingItems(polBalance, usdcBalance);
 
   if (approvalResult && !approvalResult.allPassed) {
     // Try to extract specific missing approvals from the details
@@ -262,8 +247,8 @@ export async function checkPolymarketBalance(
       balances: {
         pol: polSnap.balance,
         usdc: usdcSnap.balance,
-        polSufficient: polSnap.balance >= MIN_POL_BALANCE,
-        usdcSufficient: usdcSnap.balance >= MIN_USDC_BALANCE,
+        polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
+        usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
       },
     };
   }
@@ -272,8 +257,8 @@ export async function checkPolymarketBalance(
     getPolBalanceSnapshot(address),
     getUsdcBalanceSnapshot(address),
   ]);
-  const polSufficient = polSnap.balance >= MIN_POL_BALANCE;
-  const usdcSufficient = usdcSnap.balance >= MIN_USDC_BALANCE;
+  const polSufficient = polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE;
+  const usdcSufficient = usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE;
   const balances = { pol: polSnap.balance, usdc: usdcSnap.balance, polSufficient, usdcSufficient };
 
   if (!polSufficient || !usdcSufficient) {
@@ -320,8 +305,8 @@ export async function runPolymarketApprovals(
       balances: {
         pol: polSnap.balance,
         usdc: usdcSnap.balance,
-        polSufficient: polSnap.balance >= MIN_POL_BALANCE,
-        usdcSufficient: usdcSnap.balance >= MIN_USDC_BALANCE,
+        polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
+        usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
       },
     };
   }
@@ -333,8 +318,8 @@ export async function runPolymarketApprovals(
   const balances = {
     pol: polSnap.balance,
     usdc: usdcSnap.balance,
-    polSufficient: polSnap.balance >= MIN_POL_BALANCE,
-    usdcSufficient: usdcSnap.balance >= MIN_USDC_BALANCE,
+    polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
+    usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
   };
 
   await updatePolymarketStatus(agentId, "approving", false);
@@ -432,7 +417,7 @@ export async function runPolymarketApprovals(
         balances,
         approvals: { allPassed: false, details: approvalResults },
         missingItems: failed.map((l) => `Approval failed: ${l}`),
-        error: "Some Polymarket approvals failed. Ensure wallet has sufficient POL for gas and retry.",
+        error: `Some Polymarket approvals failed. Ensure the wallet still has ${AUTOPILOT_POL_REQUIREMENT} and ${AUTOPILOT_USDC_REQUIREMENT}, then retry.`,
       };
     }
   } catch (err) {
@@ -445,8 +430,8 @@ export async function runPolymarketApprovals(
       polymarketReady: false,
       address,
       balances,
-      missingItems: ["Approval process failed — check POL balance for gas"],
-      error: "Approval transactions failed. Ensure wallet has sufficient POL for gas fees and retry.",
+      missingItems: [`Approval process failed — confirm the wallet still has ${AUTOPILOT_POL_REQUIREMENT}`],
+      error: `Approval transactions failed. Ensure the wallet still has ${AUTOPILOT_POL_REQUIREMENT} and ${AUTOPILOT_USDC_REQUIREMENT}, then retry.`,
     };
   } finally {
     // ── CRITICAL CLEANUP ─────────────────────────────────────────────────

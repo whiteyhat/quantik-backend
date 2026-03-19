@@ -125,6 +125,8 @@ function seedAgent(
     webhook_events: string[];
     autopilot_enabled: number;
     autopilot_updated_at: number | null;
+    polymarket_ready: number;
+    polymarket_status: string | null;
   }> = {}
 ) {
   const db = getDb();
@@ -158,6 +160,8 @@ function seedAgent(
     webhook_events: JSON.stringify(overrides.webhook_events ?? ["*"]),
     autopilot_enabled: overrides.autopilot_enabled ?? 0,
     autopilot_updated_at: overrides.autopilot_updated_at ?? null,
+    polymarket_ready: overrides.polymarket_ready ?? 0,
+    polymarket_status: overrides.polymarket_status ?? "pending_funding",
     created_at: now,
     updated_at: now,
   };
@@ -169,14 +173,14 @@ function seedAgent(
       money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
       system_prompt, wallet_address, user_id, agent_type, endpoint_url, agent_url,
       connection_status, last_heartbeat, description, webhook_secret, webhook_events,
-      autopilot_enabled, autopilot_updated_at, created_at, updated_at
+      autopilot_enabled, autopilot_updated_at, polymarket_ready, polymarket_status, created_at, updated_at
     ) VALUES (
       @id, @agent_code, @status, @name, @avatar_emoji,
       @personality, @decision_style, @trading_instinct, @time_patience, @profit_dream,
       @money_approach, @protection_mindset, @leverage_vibe, @market_sense, @asset_love,
       @system_prompt, @wallet_address, @user_id, @agent_type, @endpoint_url, @agent_url,
       @connection_status, @last_heartbeat, @description, @webhook_secret, @webhook_events,
-      @autopilot_enabled, @autopilot_updated_at, @created_at, @updated_at
+      @autopilot_enabled, @autopilot_updated_at, @polymarket_ready, @polymarket_status, @created_at, @updated_at
     )
   `).run(record);
 
@@ -197,11 +201,12 @@ beforeEach(() => {
   getWalletFundingSnapshotMock.mockResolvedValue({
     address: VALID_WALLET.address,
     onChainUsdc: 25,
-    pol: 1.25,
+    pol: 3.5,
+    clobBalance: 25,
     usdcStatus: "live",
     polStatus: "live",
     fundingStatus: "ready",
-    fundingMessage: "Wallet has both POL and USDC.e required for autonomous trading.",
+    fundingMessage: "Wallet meets the >= 3 POL and >= 10 USDC.e autopilot requirements.",
     ready: true,
   });
 });
@@ -478,6 +483,8 @@ describe("agent factory routes", () => {
         id: "agent-created-autopilot",
         agent_type: "created",
         avatar_emoji: "🦊",
+        polymarket_ready: 1,
+        polymarket_status: "ready",
       });
       const { agentId: byoAgentId } = seedAgent(getDb, currentUserId!, {
         id: "agent-byo-autopilot",
@@ -485,16 +492,26 @@ describe("agent factory routes", () => {
         avatar_emoji: "🦞",
         agent_url: "https://openclaw.example/agents/lobster",
         endpoint_url: "https://openclaw.example/webhook",
+        polymarket_ready: 1,
+        polymarket_status: "ready",
+      });
+      const { agentId: prepBlockedAgentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-prep-blocked",
+        agent_type: "created",
+        avatar_emoji: "🛑",
+        polymarket_ready: 0,
+        polymarket_status: "funding_detected",
       });
 
       getWalletFundingSnapshotMock.mockResolvedValueOnce({
         address: VALID_WALLET.address,
         onChainUsdc: 0,
         pol: 0,
+        clobBalance: 0,
         usdcStatus: "live",
         polStatus: "live",
         fundingStatus: "funding_required",
-        fundingMessage: "Deposit POL for Polygon fees and USDC.e for Polymarket trades before enabling autopilot.",
+        fundingMessage: "Deposit >= 3 POL for Polygon fees and >= 10 USDC.e for Polymarket trades before enabling autopilot.",
         ready: false,
       });
 
@@ -510,16 +527,49 @@ describe("agent factory routes", () => {
         wallet_address: string;
         pol: number;
         on_chain_usdc: number;
+        missing_items: string[];
       };
       expect(blockedBody.error).toBe("AUTOPILOT_FUNDING_REQUIRED");
       expect(blockedBody.wallet_address).toBe(VALID_WALLET.address);
       expect(blockedBody.pol).toBe(0);
       expect(blockedBody.on_chain_usdc).toBe(0);
+      expect(blockedBody.missing_items).toEqual([
+        "POL balance 0.0000 is below >= 3 POL",
+        "USDC.e balance 0.00 is below >= 10 USDC.e",
+      ]);
 
       const blockedRow = db.prepare("SELECT autopilot_enabled FROM agents WHERE id = ?").get(createdAgentId) as {
         autopilot_enabled: number;
       };
       expect(blockedRow.autopilot_enabled).toBe(0);
+
+      getWalletFundingSnapshotMock.mockResolvedValueOnce({
+        address: VALID_WALLET.address,
+        onChainUsdc: 25,
+        pol: 4,
+        clobBalance: 25,
+        usdcStatus: "live",
+        polStatus: "live",
+        fundingStatus: "ready",
+        fundingMessage: "Wallet meets the >= 3 POL and >= 10 USDC.e autopilot requirements.",
+        ready: true,
+      });
+
+      const prepBlockedRes = await fetch(`${baseUrl}/api/v1/agents/${prepBlockedAgentId}/autopilot`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+
+      expect(prepBlockedRes.status).toBe(409);
+      const prepBlockedBody = await prepBlockedRes.json() as {
+        error: string;
+        polymarket_status: string;
+        missing_items: string[];
+      };
+      expect(prepBlockedBody.error).toBe("AUTOPILOT_POLYMARKET_PREP_REQUIRED");
+      expect(prepBlockedBody.polymarket_status).toBe("funding_detected");
+      expect(prepBlockedBody.missing_items).toEqual(["Run the Polymarket approval flow for this wallet."]);
 
       const enableCreatedRes = await fetch(`${baseUrl}/api/v1/agents/${createdAgentId}/autopilot`, {
         method: "PATCH",
@@ -562,6 +612,97 @@ describe("agent factory routes", () => {
         autopilot_enabled: number;
       };
       expect(byoRow.autopilot_enabled).toBe(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test("agent-scoped autopilot status and executions routes return only owned data", async () => {
+    const { server, baseUrl, getDb } = await startTestServer();
+
+    try {
+      const db = seedUser(getDb, currentUserId!);
+      const { agentId } = seedAgent(getDb, currentUserId!, {
+        id: "agent-owned-status",
+        autopilot_enabled: 1,
+        polymarket_ready: 1,
+        polymarket_status: "ready",
+      });
+
+      db.prepare("INSERT INTO users (id, clerk_id, created_at) VALUES (?, ?, ?)").run(
+        "user-other",
+        "clerk-user-other",
+        Date.now()
+      );
+      const { agentId: foreignAgentId } = seedAgent(getDb, "user-other", {
+        id: "agent-foreign-status",
+        autopilot_enabled: 1,
+        polymarket_ready: 1,
+        polymarket_status: "ready",
+      });
+
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO autopilot_decisions (
+          id, agent_id, user_id, slug, direction, decision, reason_code, size_usdc,
+          scanned_at, policy_snapshot, signal_snapshot, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        "decision-owned-1",
+        agentId,
+        currentUserId,
+        "btc-100k",
+        "YES",
+        "skipped",
+        "cadence",
+        null,
+        now - 60_000,
+        JSON.stringify({
+          derived: { cadenceMinutes: 15, cooldownMinutes: 60, maxTradesPerDay: 10, maxBetUsdc: 25, minSigma: 0.7, minKelly: 0.03, kellyMultiplier: 0.25, maxPositionFraction: 0.08, dailyLossLimitPct: 0.08, useAuraSentiment: false },
+          overrides: { cadenceMinutes: null, cooldownMinutes: null, maxTradesPerDay: null, maxBetUsdc: null, updatedAt: null },
+          effective: { cadenceMinutes: 15, cooldownMinutes: 60, maxTradesPerDay: 10, maxBetUsdc: 25, minSigma: 0.7, minKelly: 0.03, kellyMultiplier: 0.25, maxPositionFraction: 0.08, dailyLossLimitPct: 0.08, useAuraSentiment: false },
+        }),
+        JSON.stringify({ question: "Will BTC hit 100k?", sigmaConfidence: 0.8, kellyFraction: 0.12 }),
+        null
+      );
+
+      db.prepare(`
+        INSERT INTO executions (
+          user_id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(currentUserId, agentId, "btc-100k", "buy", "YES", "autopilot", 25, now - 120_000, "paper", 0.62, 1.5);
+      db.prepare(`
+        INSERT INTO executions (
+          user_id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("user-other", foreignAgentId, "eth-5k", "buy", "NO", "autopilot", 15, now - 90_000, "paper", 0.38, -0.5);
+
+      const statusRes = await fetch(`${baseUrl}/api/v1/agents/${agentId}/autopilot-status`);
+      expect(statusRes.status).toBe(200);
+      const statusBody = await statusRes.json() as {
+        agentId: string;
+        wallet: { fundingStatus: string };
+        activity: { lastReasonCode: string | null };
+        blocker: string;
+      };
+      expect(statusBody.agentId).toBe(agentId);
+      expect(statusBody.wallet.fundingStatus).toBe("ready");
+      expect(statusBody.activity.lastReasonCode).toBe("cadence");
+      expect(statusBody.blocker).toBe("scanner_idle");
+
+      const executionsRes = await fetch(`${baseUrl}/api/v1/agents/${agentId}/executions?limit=10`);
+      expect(executionsRes.status).toBe(200);
+      const executionsBody = await executionsRes.json() as {
+        executions: Array<{ slug: string; source: string }>;
+      };
+      expect(executionsBody.executions).toHaveLength(1);
+      expect(executionsBody.executions[0]).toMatchObject({
+        slug: "btc-100k",
+        source: "autopilot",
+      });
+
+      const foreignRes = await fetch(`${baseUrl}/api/v1/agents/${foreignAgentId}/executions?limit=10`);
+      expect(foreignRes.status).toBe(404);
     } finally {
       await closeServer(server);
     }

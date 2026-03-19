@@ -835,6 +835,22 @@ export class MarketScanner {
         continue;
       }
 
+      if (!executionContext.walletAddress) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "wallet",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null,
+          "No wallet is assigned to this agent."
+        );
+        continue;
+      }
+
       emitAgentAlert(executionContext.userId, {
         type: "signal",
         title: `${result.recommendation}: ${question.slice(0, 60)}`,
@@ -860,6 +876,22 @@ export class MarketScanner {
           funding.fundingMessage
         );
         console.log(`[autoExecute] Funding check blocked ${result.slug} for ${executionContext.agentId}: ${funding.fundingMessage}`);
+        continue;
+      }
+
+      if (!executionContext.polymarketReady) {
+        await logAutopilotDecision(
+          executionContext,
+          result,
+          direction,
+          question,
+          "polymarket_prep",
+          "skipped",
+          policy,
+          signalMetrics.sigmaConfidence,
+          null,
+          "Polymarket approvals are incomplete for this agent."
+        );
         continue;
       }
 
