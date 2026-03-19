@@ -12,6 +12,10 @@ export interface MarketData {
   yes_token_id?: string;
   no_token_id?: string;
   category?: string;
+  /** The parent event slug used in Polymarket frontend URLs */
+  event_slug?: string;
+  /** The condition ID on the CLOB */
+  condition_id?: string;
 }
 
 export function parseClobTokenIds(raw: unknown): { noTokenId: string | null; yesTokenId: string | null } {
@@ -80,6 +84,8 @@ export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
     yes_token_id: tokens.yesTokenId ?? undefined,
     no_token_id: tokens.noTokenId ?? undefined,
     category: m.category,
+    event_slug: m.groupSlug || m.eventSlug || undefined,
+    condition_id: m.conditionId || undefined,
   };
 }
 

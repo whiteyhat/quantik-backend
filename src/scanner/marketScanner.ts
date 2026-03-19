@@ -1053,6 +1053,12 @@ export class MarketScanner {
         console.warn(`[autoExecute] Flux check failed for ${result.slug}:`, err instanceof Error ? err.message : err);
       }
 
+      // Mark alert_sent = 1 BEFORE executing so the AlertPoller doesn't send a
+      // premature alert without execution metadata — we send our own alert below
+      // with the real orderId and status.
+      const runId = `scanner-${result.slug}-${result.scannedAt}`;
+      db.prepare("UPDATE pipeline_runs SET alert_sent = 1 WHERE id = ?").run(runId);
+
       try {
         const tradeResult = await executeManagedTrade({
           userId: executionContext.userId,
@@ -1099,6 +1105,7 @@ export class MarketScanner {
           amount
         );
 
+        // Only send Telegram alert for successfully executed trades
         const { sendSignalAlert } = await import("../alerts/telegramAlert");
         await sendSignalAlert({
           id: result.slug,
@@ -1112,9 +1119,9 @@ export class MarketScanner {
           market_price: result.yesPrice ?? result.probability,
           edge: result.kellyFraction,
           sigma_thesis: (result.pipelineResult as any)?.sigma?.thesis ?? `Scanner: ${result.recommendation}`,
-          clause_risk_level: (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
+          clause_risk_level: (result.pipelineResult as any)?.clause?.riskLevel ?? (result.pipelineResult as any)?.clause?.risk_level ?? "LOW",
           clause_summary: "",
-          orderId: tradeResult.orderId ?? (tradeResult.paper ? "PAPER-MODE" : "UNKNOWN"),
+          orderId: tradeResult.orderId ?? (tradeResult.paper ? "PAPER-MODE" : undefined),
           executionStatus: tradeResult.status,
           pnlToday: pnlRow.total,
           tradesToday: tradesRow.cnt + 1,
