@@ -12,6 +12,7 @@ const pgQueryOneMock = jest.fn();
 const pgExecMock = jest.fn();
 const generateWalletMock = jest.fn();
 const getWalletFundingSnapshotMock = jest.fn();
+const loadAgentWalletContextWithDiagMock = jest.fn();
 
 jest.mock("../src/middleware/auth", () => ({
   getUserId: jest.fn(() => currentUserId),
@@ -35,6 +36,11 @@ jest.mock("../src/wallet/generate", () => ({
 
 jest.mock("../src/utils/balances", () => ({
   getWalletFundingSnapshot: (...args: unknown[]) => getWalletFundingSnapshotMock(...args),
+}));
+
+jest.mock("../src/utils/agentKey", () => ({
+  ...jest.requireActual("../src/utils/agentKey"),
+  loadAgentWalletContextWithDiag: (...args: unknown[]) => loadAgentWalletContextWithDiagMock(...args),
 }));
 
 const VALID_WALLET = {
@@ -197,7 +203,16 @@ beforeEach(() => {
   pgExecMock.mockReset();
   generateWalletMock.mockReset();
   getWalletFundingSnapshotMock.mockReset();
+  loadAgentWalletContextWithDiagMock.mockReset();
   generateWalletMock.mockResolvedValue(VALID_WALLET);
+  loadAgentWalletContextWithDiagMock.mockResolvedValue({
+    context: {
+      agentId: "mock-agent",
+      walletAddress: VALID_WALLET.address,
+      privateKey: VALID_WALLET.privateKey,
+    },
+    error: null,
+  });
   getWalletFundingSnapshotMock.mockResolvedValue({
     address: VALID_WALLET.address,
     onChainUsdc: 25,

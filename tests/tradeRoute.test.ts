@@ -68,6 +68,14 @@ async function startTradeServer(paperMode: boolean) {
 
   jest.doMock("../src/utils/agentKey", () => ({
     loadAgentWalletContext: (...args: unknown[]) => loadAgentWalletContextMock(...args),
+    loadAgentWalletContextWithDiag: async (...args: unknown[]) => {
+      try {
+        const context = await loadAgentWalletContextMock(...args);
+        return { context, error: null };
+      } catch (err: any) {
+        return { context: null, error: err?.message ?? "Unknown wallet error" };
+      }
+    },
   }));
 
   jest.doMock("../src/utils/linkedAgent", () => ({
