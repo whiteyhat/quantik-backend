@@ -67,6 +67,12 @@ describe("autopilot policy derivation", () => {
         cooldownMinutes: null,
         maxTradesPerDay: 18,
         maxBetUsdc: 75,
+        minSigma: null,
+        minKelly: null,
+        kellyMultiplier: null,
+        maxPositionFraction: null,
+        dailyLossLimitPct: null,
+        useAuraSentiment: null,
         updatedAt: 123,
       }
     );

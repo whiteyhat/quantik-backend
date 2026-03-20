@@ -76,7 +76,7 @@ describe("PostgreSQL stability regressions", () => {
 
     jest.doMock("../src/db/postgres", () => ({
       isPgEnabled: () => true,
-      pgQuery: (...args: unknown[]) => pgQueryMock(...args),
+      pgQuery: (sql: string, _params?: unknown[]) => pgQueryMock(sql),
       pgQueryOne: jest.fn().mockResolvedValue(null),
       pgExec: jest.fn(),
     }));
@@ -102,7 +102,7 @@ describe("PostgreSQL stability regressions", () => {
 
     jest.doMock("../src/db/postgres", () => ({
       isPgEnabled: () => true,
-      pgQuery: (...args: unknown[]) => pgQueryMock(...args),
+      pgQuery: (sql: string, _params?: unknown[]) => pgQueryMock(sql),
       pgQueryOne: jest.fn().mockResolvedValue(null),
       pgExec: (...args: unknown[]) => pgExecMock(...args),
     }));
@@ -140,6 +140,8 @@ describe("PostgreSQL stability regressions", () => {
   });
 
   test("migratePg creates and seeds the PG risk state tables", async () => {
+    jest.resetModules();
+    jest.unmock("../src/db/postgres");
     const queryMock = jest.fn().mockResolvedValue({ rows: [], rowCount: 1 });
 
     jest.doMock("pg", () => ({
