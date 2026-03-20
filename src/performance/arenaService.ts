@@ -74,7 +74,7 @@ async function loadArenaExecutions(agentIds: string[], sinceMs?: number): Promis
       return pgQuery<ArenaExecutionRecord>(
         `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
          FROM executions
-         WHERE agent_id = ANY($1::text[])
+         WHERE agent_id = ANY($1::uuid[])
            AND (executed_at >= $2 OR (pnl IS NULL AND (status = 'placed' OR status = 'paper')))
          ORDER BY executed_at DESC`,
         [agentIds, sinceMs]
@@ -83,7 +83,7 @@ async function loadArenaExecutions(agentIds: string[], sinceMs?: number): Promis
     return pgQuery<ArenaExecutionRecord>(
       `SELECT id, agent_id, slug, side, direction, source, amount, executed_at, status, fill_price, pnl, closed_at, updated_at
        FROM executions
-       WHERE agent_id = ANY($1::text[])
+       WHERE agent_id = ANY($1::uuid[])
        ORDER BY executed_at DESC`,
       [agentIds]
     );

@@ -100,11 +100,13 @@ app.use(apiKeyAuth);
 app.use(apiRateLimit);
 
 // Initialize databases on startup
-getDb();
-ensureCircuitBreakerTable();
-if (isPgEnabled()) {
-  migratePg().then(() => console.log("[startup] PostgreSQL ready"))
-    .catch((err) => console.error("[startup] PostgreSQL migration failed:", err.message));
+async function initializeDatastores(): Promise<void> {
+  getDb();
+  ensureCircuitBreakerTable();
+  if (isPgEnabled()) {
+    await migratePg();
+    console.log("[startup] PostgreSQL ready");
+  }
 }
 
 // Root route
@@ -188,20 +190,26 @@ app.use(
 const httpServer = createServer(app);
 initSocketIO(httpServer);
 
-httpServer.listen(PORT, () => {
-  console.log(`[quantik-backend] Running on http://localhost:${PORT}`);
-  console.log(`[quantik-backend] Health: http://localhost:${PORT}/api/health`);
-  console.log(`[quantik-backend] Redis: ${isRedisEnabled() ? "enabled (BullMQ)" : "disabled (setInterval fallback)"}`);
-  console.log(`[quantik-backend] WebSocket: enabled (Socket.IO)`);
+async function bootstrap(): Promise<void> {
+  await initializeDatastores();
 
-  // Pre-warm Gemini
-  warmGemini().catch(() => {});
+  httpServer.listen(PORT, () => {
+    console.log(`[quantik-backend] Running on http://localhost:${PORT}`);
+    console.log(`[quantik-backend] Health: http://localhost:${PORT}/api/health`);
+    console.log(`[quantik-backend] Redis: ${isRedisEnabled() ? "enabled (BullMQ)" : "disabled (setInterval fallback)"}`);
+    console.log(`[quantik-backend] WebSocket: enabled (Socket.IO)`);
 
-  // Start all scheduled jobs — BullMQ when Redis available, setInterval fallback otherwise
-  initScheduler().catch((err) => {
-    console.error("[startup] Scheduler init failed:", err.message);
+    // Pre-warm Gemini
+    warmGemini().catch(() => {});
+
+    // Start all scheduled jobs — BullMQ when Redis available, setInterval fallback otherwise
+    initScheduler().catch((err) => {
+      console.error("[startup] Scheduler init failed:", err.message);
+    });
   });
-});
+
+  ensureClobAllowances().catch(() => {});
+}
 
 // Set CLOB allowances at startup (EOA mode — approve CLOB contracts to spend USDC)
 async function ensureClobAllowances(): Promise<void> {
@@ -223,4 +231,7 @@ async function ensureClobAllowances(): Promise<void> {
     console.error("[startup] CLOB allowance setup failed:", err);
   }
 }
-ensureClobAllowances().catch(() => {});
+bootstrap().catch((err) => {
+  console.error("[startup] Initialization failed:", err);
+  process.exit(1);
+});

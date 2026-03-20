@@ -30,6 +30,7 @@ const TABLES: { name: string; conflict: string }[] = [
   { name: "risk_configurations", conflict: "id" },
   { name: "agent_thresholds", conflict: "id" },
   { name: "global_circuit_breakers", conflict: "id" },
+  { name: "circuit_breaker_state", conflict: "id" },
   { name: "panic_mode_events", conflict: "id" },
   { name: "liquidation_reports", conflict: "id" },
   { name: "liquidation_line_items", conflict: "id" },
@@ -62,7 +63,7 @@ const TABLES: { name: string; conflict: string }[] = [
 // SQLite columns that need quoting in PG (camelCase)
 const QUOTED_COLS = new Set([
   "marketSlug", "scoredAt", "ambiguityScore", "riskLevel",
-  "ambiguityFlags", "resolutionCriteria", "disputeHistory",
+  "ambiguityFlags", "resolutionCriteria", "disputeHistory", "window",
 ]);
 
 function quoteCol(col: string): string {

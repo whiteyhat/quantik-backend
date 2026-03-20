@@ -10,6 +10,7 @@ let POLYMARKET_BIN = process.env.POLYMARKET_CLI || "polymarket";
 
 // Tracks whether we've already confirmed/installed the binary this process.
 let cliReady: boolean | null = null;
+let cliReadyPromise: Promise<void> | null = null;
 
 export class CliError extends Error {
   constructor(
@@ -29,47 +30,49 @@ export class CliError extends Error {
 
 async function ensureCliInstalled(): Promise<void> {
   if (cliReady === true) return;
-
-  // If POLYMARKET_BIN is a full path, check it directly.
-  // Otherwise check if it resolves on PATH.
-  const isMissing = POLYMARKET_BIN.startsWith("/")
-    ? !existsSync(POLYMARKET_BIN)
-    : !await commandExists(POLYMARKET_BIN);
-
-  if (!isMissing) {
-    cliReady = true;
+  if (cliReadyPromise) {
+    await cliReadyPromise;
     return;
   }
 
-  console.warn(`[cli] Polymarket binary not found at "${POLYMARKET_BIN}" — installing...`);
+  cliReadyPromise = (async () => {
+    const resolvedPath = await resolveCliPath();
+    if (resolvedPath) {
+      POLYMARKET_BIN = resolvedPath;
+      cliReady = true;
+      return;
+    }
+
+    console.warn(`[cli] Polymarket binary not found at "${POLYMARKET_BIN}" — installing...`);
+
+    try {
+      await execAsync(
+        "curl -sSL https://raw.githubusercontent.com/Polymarket/polymarket-cli/main/install.sh | sh",
+        { timeout: 120_000 }
+      );
+      console.log("[cli] Polymarket CLI installed successfully");
+    } catch (installErr) {
+      const msg = installErr instanceof Error ? installErr.message : String(installErr);
+      throw new Error(`Failed to install Polymarket CLI: ${msg}`);
+    }
+
+    const installedPath = await resolveCliPath();
+    if (!installedPath) {
+      const home = process.env.HOME || "/root";
+      throw new Error(
+        `Polymarket CLI install completed but binary not found at "${home}/.local/bin/polymarket" or on PATH`
+      );
+    }
+
+    POLYMARKET_BIN = installedPath;
+    cliReady = true;
+  })();
 
   try {
-    await execAsync(
-      "curl -sSL https://raw.githubusercontent.com/Polymarket/polymarket-cli/main/install.sh | sh",
-      { timeout: 120_000 }
-    );
-    console.log("[cli] Polymarket CLI installed successfully");
-  } catch (installErr) {
-    const msg = installErr instanceof Error ? installErr.message : String(installErr);
-    throw new Error(`Failed to install Polymarket CLI: ${msg}`);
+    await cliReadyPromise;
+  } finally {
+    cliReadyPromise = null;
   }
-
-  // The install script always drops the binary at ~/.local/bin/polymarket.
-  // The configured POLYMARKET_BIN may point to a different absolute path
-  // (e.g. /root/.local/bin/polymarket on a Linux env var but we're on macOS).
-  // Always resolve to the real installed location.
-  const home = process.env.HOME || "/root";
-  const installedPath = `${home}/.local/bin/polymarket`;
-
-  if (existsSync(installedPath)) {
-    POLYMARKET_BIN = installedPath;
-  } else if (!existsSync(POLYMARKET_BIN)) {
-    throw new Error(
-      `Polymarket CLI install completed but binary not found at "${installedPath}" or "${POLYMARKET_BIN}"`
-    );
-  }
-
-  cliReady = true;
 }
 
 async function commandExists(cmd: string): Promise<boolean> {
@@ -79,6 +82,28 @@ async function commandExists(cmd: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function resolveCliPath(): Promise<string | null> {
+  if (POLYMARKET_BIN.startsWith("/") && existsSync(POLYMARKET_BIN)) {
+    return POLYMARKET_BIN;
+  }
+
+  if (!POLYMARKET_BIN.startsWith("/") && await commandExists(POLYMARKET_BIN)) {
+    return POLYMARKET_BIN;
+  }
+
+  const home = process.env.HOME || "/root";
+  const installedPath = `${home}/.local/bin/polymarket`;
+  if (existsSync(installedPath)) {
+    return installedPath;
+  }
+
+  if (POLYMARKET_BIN !== "polymarket" && await commandExists("polymarket")) {
+    return "polymarket";
+  }
+
+  return null;
 }
 
 // ── runCli ───────────────────────────────────────────────────────────────────

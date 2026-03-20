@@ -1,6 +1,7 @@
 import { getDb } from "../db/schema";
 import { computeHealthScore, type HealthScore } from "../monitoring/healthScore";
 import { getCircuitBreaker, getCorrelationMonitor } from "../risk";
+import { loadCircuitBreakerState } from "../risk/state";
 import { getScannerStatus } from "../scanner/marketScanner";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
@@ -712,18 +713,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   const exposurePct = totalValue && totalValue > 0 ? (deployedCapital / totalValue) * 100 : 0;
   const winRate = total > 0 ? (wins ?? 0) / total : 0;
 
-  let cbRow: { state: string; drawdown_pct: number } | undefined;
-
-  if (isPgEnabled()) {
-    cbRow = (await pgQueryOne<{ state: string; drawdown_pct: number }>(
-      "SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1"
-    )) ?? undefined;
-  } else {
-    const db6 = getDb();
-    cbRow = db6.prepare(
-      "SELECT state, drawdown_pct FROM circuit_breaker_state WHERE id = 1"
-    ).get() as { state: string; drawdown_pct: number } | undefined;
-  }
+  const cbRow = await loadCircuitBreakerState();
   const { config } = await getRiskConfig();
   const kellyMultiplier = config?.kelly_fraction_multiplier ?? 0.25;
   const kellyUtilization = totalValue !== null && totalValue > 0 && kellyMultiplier > 0
@@ -782,7 +772,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
 export async function loadRiskSnapshot(context: ToolExecutionContext | null): Promise<RiskSnapshot> {
   const portfolio = await loadPortfolioSnapshot(context);
   const correlation = getCorrelationMonitor();
-  const cbStatus = getCircuitBreaker().getStatus();
+  const cbStatus = await getCircuitBreaker().getStatus();
   const { config, lucifer } = await getRiskConfig();
 
   const totalCapital = portfolio.totalValue ?? 0;

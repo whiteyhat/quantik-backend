@@ -59,15 +59,15 @@ async function writeSnapshot(window: ArenaWindow): Promise<ArenaLeaderboardEntry
     }
 
     await pgExec(
-      `INSERT INTO arena_snapshots (agent_id, window, rank, selected_pnl, all_time_pnl, win_rate, total_trades, snapshot_at)
+      `INSERT INTO arena_snapshots (agent_id, "window", rank, selected_pnl, all_time_pnl, win_rate, total_trades, snapshot_at)
        VALUES ${values.join(", ")}
-       ON CONFLICT (agent_id, window, snapshot_at) DO NOTHING`,
+       ON CONFLICT (agent_id, "window", snapshot_at) DO NOTHING`,
       params,
     );
   } else {
     const db = getDb();
     const insert = db.prepare(
-      `INSERT OR IGNORE INTO arena_snapshots (agent_id, window, rank, selected_pnl, all_time_pnl, win_rate, total_trades, snapshot_at)
+      `INSERT OR IGNORE INTO arena_snapshots (agent_id, "window", rank, selected_pnl, all_time_pnl, win_rate, total_trades, snapshot_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
@@ -107,7 +107,7 @@ export async function loadPreviousRanks(window: ArenaWindow, beforeTimestamp?: n
     // Get the most recent snapshot_at before `before`
     const [timeRow] = await pgQuery<{ snapshot_at: number }>(
       `SELECT DISTINCT snapshot_at FROM arena_snapshots
-       WHERE window = $1 AND snapshot_at < $2
+       WHERE "window" = $1 AND snapshot_at < $2
        ORDER BY snapshot_at DESC LIMIT 1`,
       [window, before],
     );
@@ -115,21 +115,21 @@ export async function loadPreviousRanks(window: ArenaWindow, beforeTimestamp?: n
 
     rows = await pgQuery<{ agent_id: string; rank: number }>(
       `SELECT agent_id, rank FROM arena_snapshots
-       WHERE window = $1 AND snapshot_at = $2`,
+       WHERE "window" = $1 AND snapshot_at = $2`,
       [window, timeRow.snapshot_at],
     );
   } else {
     const db = getDb();
     const timeRow = db.prepare(
       `SELECT DISTINCT snapshot_at FROM arena_snapshots
-       WHERE window = ? AND snapshot_at < ?
+       WHERE "window" = ? AND snapshot_at < ?
        ORDER BY snapshot_at DESC LIMIT 1`,
     ).get(window, before) as { snapshot_at: number } | undefined;
     if (!timeRow) return new Map();
 
     rows = db.prepare(
       `SELECT agent_id, rank FROM arena_snapshots
-       WHERE window = ? AND snapshot_at = ?`,
+       WHERE "window" = ? AND snapshot_at = ?`,
     ).all(window, timeRow.snapshot_at) as Array<{ agent_id: string; rank: number }>;
   }
 
@@ -154,7 +154,7 @@ export async function loadAgentHistory(
   if (isPgEnabled()) {
     rows = await pgQuery<{ snapshot_at: number; selected_pnl: number; rank: number }>(
       `SELECT snapshot_at, selected_pnl, rank FROM arena_snapshots
-       WHERE agent_id = $1 AND window = $2
+       WHERE agent_id = $1 AND "window" = $2
        ORDER BY snapshot_at DESC LIMIT $3`,
       [agentId, window, limit],
     );
@@ -162,7 +162,7 @@ export async function loadAgentHistory(
     const db = getDb();
     rows = db.prepare(
       `SELECT snapshot_at, selected_pnl, rank FROM arena_snapshots
-       WHERE agent_id = ? AND window = ?
+       WHERE agent_id = ? AND "window" = ?
        ORDER BY snapshot_at DESC LIMIT ?`,
     ).all(agentId, window, limit) as typeof rows;
   }

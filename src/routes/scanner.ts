@@ -24,7 +24,7 @@ router.post("/run", async (_req: Request, res: Response) => {
 // ── GET /api/scanner/status ────────────────────────────────────
 router.get("/status", async (_req: Request, res: Response) => {
   const s = getScannerStatus();
-  const cb = getCircuitBreaker().getStatus();
+  const cb = await getCircuitBreaker().getStatus();
   const portfolio = getPortfolioManager();
   const settings = await getSettings();
 

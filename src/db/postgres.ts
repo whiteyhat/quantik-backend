@@ -346,6 +346,14 @@ export async function migratePg(): Promise<void> {
       updated_at BIGINT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+      id INTEGER PRIMARY KEY,
+      state TEXT NOT NULL DEFAULT 'ARMED',
+      drawdown_pct REAL NOT NULL DEFAULT 0,
+      triggered_at BIGINT,
+      last_checked_at BIGINT NOT NULL
+    );
+
     -- Panic Mode & Liquidation
     CREATE TABLE IF NOT EXISTS panic_mode_events (
       id TEXT PRIMARY KEY,
@@ -478,6 +486,46 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS reason TEXT;
     ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS cooldown_until BIGINT;
     ALTER TABLE panic_mode_events ADD COLUMN IF NOT EXISTS rearmed_at BIGINT;
+  `);
+
+  await safeQuery("seed default risk state", `
+    INSERT INTO risk_configurations (id, user_id, version, is_active, created_at, updated_at)
+    SELECT 'rc-default-001', 'system', 1, 1, EXTRACT(EPOCH FROM NOW())::BIGINT * 1000, EXTRACT(EPOCH FROM NOW())::BIGINT * 1000
+    WHERE NOT EXISTS (
+      SELECT 1 FROM risk_configurations WHERE is_active = 1
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO global_circuit_breakers (
+      id,
+      risk_configuration_id,
+      panic_mode_enabled,
+      drawdown_limit_pct,
+      max_position_size_pct,
+      kelly_fraction_multiplier,
+      created_at,
+      updated_at
+    )
+    SELECT
+      'gcb-default-001',
+      COALESCE(
+        (SELECT id FROM risk_configurations WHERE is_active = 1 ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1),
+        'rc-default-001'
+      ),
+      0,
+      0.15,
+      0.10,
+      0.25,
+      EXTRACT(EPOCH FROM NOW())::BIGINT * 1000,
+      EXTRACT(EPOCH FROM NOW())::BIGINT * 1000
+    WHERE NOT EXISTS (
+      SELECT 1 FROM global_circuit_breakers WHERE id = 'gcb-default-001'
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO circuit_breaker_state (id, state, drawdown_pct, triggered_at, last_checked_at)
+    VALUES (1, 'ARMED', 0, NULL, EXTRACT(EPOCH FROM NOW())::BIGINT * 1000)
+    ON CONFLICT (id) DO NOTHING;
   `);
 
   // ── Agent result tables ─────────────────────────────────────────────────────
@@ -795,17 +843,17 @@ export async function migratePg(): Promise<void> {
     CREATE TABLE IF NOT EXISTS arena_snapshots (
       id BIGSERIAL PRIMARY KEY,
       agent_id TEXT NOT NULL,
-      window TEXT NOT NULL,
+      "window" TEXT NOT NULL,
       rank INTEGER NOT NULL,
       selected_pnl REAL NOT NULL,
       all_time_pnl REAL NOT NULL,
       win_rate REAL NOT NULL,
       total_trades INTEGER NOT NULL DEFAULT 0,
       snapshot_at BIGINT NOT NULL,
-      UNIQUE(agent_id, window, snapshot_at)
+      UNIQUE(agent_id, "window", snapshot_at)
     );
     CREATE INDEX IF NOT EXISTS idx_arena_snapshots_agent_window
-      ON arena_snapshots(agent_id, window, snapshot_at DESC);
+      ON arena_snapshots(agent_id, "window", snapshot_at DESC);
     CREATE INDEX IF NOT EXISTS idx_arena_snapshots_time
       ON arena_snapshots(snapshot_at DESC);
   `);

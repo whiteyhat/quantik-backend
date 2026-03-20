@@ -8,6 +8,7 @@ import {
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import { requireClerkAuth } from "../middleware/auth";
+import { resetRiskState } from "../risk/state";
 
 const router = Router();
 
@@ -116,10 +117,14 @@ router.post("/approve", async (req: Request, res: Response) => {
   res.json(approval);
 });
 
-router.post("/circuit-breaker/reset", (_req: Request, res: Response) => {
+router.post("/circuit-breaker/reset", async (_req: Request, res: Response) => {
   const cb = getCircuitBreaker();
-  cb.reset();
-  res.json({ message: "Circuit breaker reset to ARMED.", circuitBreaker: cb.getStatus() });
+  try {
+    await cb.reset();
+    res.json({ message: "Circuit breaker reset to ARMED.", circuitBreaker: await cb.getStatus() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // ── EMERGENCY RESET ───────────────────────────────────────────
@@ -137,8 +142,7 @@ router.get("/emergency/reset-panic", requireClerkAuth, async (_req: Request, res
         });
         return;
       }
-      await pgQuery("UPDATE global_circuit_breakers SET panic_mode_enabled = 0");
-      await pgQuery("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1");
+      await resetRiskState(Date.now());
       if (latestEvent?.id) {
         await pgQuery("UPDATE panic_mode_events SET rearmed_at = $1 WHERE id = $2", [Date.now(), latestEvent.id]);
       }
@@ -155,8 +159,7 @@ router.get("/emergency/reset-panic", requireClerkAuth, async (_req: Request, res
         });
         return;
       }
-      db.prepare("UPDATE global_circuit_breakers SET panic_mode_enabled = 0").run();
-      db.prepare("UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL WHERE id = 1").run();
+      await resetRiskState(Date.now());
       if (latestEvent?.id) {
         db.prepare("UPDATE panic_mode_events SET rearmed_at = ? WHERE id = ?").run(Date.now(), latestEvent.id);
       }

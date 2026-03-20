@@ -5,6 +5,12 @@ import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
 import { runCliWithWallet } from "../cli";
 import { tryLoadActiveAgentContext } from "../utils/agentKey";
 import {
+  isPanicModeEnabled,
+  resetRiskState,
+  setPanicModeEnabled,
+  tripCircuitBreaker,
+} from "../risk/state";
+import {
   emitAutopilotStatus,
   emitNotification,
   emitPanicCooldown,
@@ -128,14 +134,9 @@ async function getLatestPanicModeEvent(): Promise<PanicModeEventRow | null> {
 async function getPanicModeStatus(): Promise<PanicModeStatusPayload> {
   const now = Date.now();
   const latestEvent = await getLatestPanicModeEvent();
-
-  let panicRow: { panic_mode_enabled: number } | undefined | null;
   let reportRow: { id: string } | undefined | null = null;
 
   if (isPgEnabled()) {
-    panicRow = await pgQueryOne<{ panic_mode_enabled: number }>(
-      "SELECT panic_mode_enabled FROM global_circuit_breakers WHERE id = 'gcb-default-001' LIMIT 1"
-    );
     if (latestEvent) {
       reportRow = await pgQueryOne<{ id: string }>(
         "SELECT id FROM liquidation_reports WHERE panic_mode_event_id = $1 ORDER BY completion_timestamp DESC LIMIT 1",
@@ -143,13 +144,8 @@ async function getPanicModeStatus(): Promise<PanicModeStatusPayload> {
       );
     }
   } else {
-    const db = getDb();
-    panicRow = db
-      .prepare<[], { panic_mode_enabled: number }>(
-        "SELECT panic_mode_enabled FROM global_circuit_breakers WHERE id = 'gcb-default-001' LIMIT 1"
-      )
-      .get();
     if (latestEvent) {
+      const db = getDb();
       reportRow = db
         .prepare<[string], { id: string }>(
           "SELECT id FROM liquidation_reports WHERE panic_mode_event_id = ? ORDER BY completion_timestamp DESC LIMIT 1"
@@ -161,7 +157,7 @@ async function getPanicModeStatus(): Promise<PanicModeStatusPayload> {
   const cooldownEndsAt = latestEvent?.cooldown_until ?? null;
   const cooldownRemainingMs =
     cooldownEndsAt && cooldownEndsAt > now ? cooldownEndsAt - now : 0;
-  const active = panicRow?.panic_mode_enabled === 1;
+  const active = await isPanicModeEnabled();
 
   return {
     active,
@@ -447,14 +443,8 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
 
   if (isPgEnabled()) {
     // 1. Trip circuit breaker + global kill switch immediately
-    await pgExec(
-      "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = $1 WHERE id = 'gcb-default-001'",
-      [now]
-    );
-    await pgExec(
-      "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = $1, last_checked_at = $2 WHERE id = 1",
-      [now, now]
-    );
+    await setPanicModeEnabled(true, now);
+    await tripCircuitBreaker(now);
 
     // Explicitly disable autopilot on ALL active agents
     await pgExec("UPDATE agents SET autopilot_enabled = 0, updated_at = $1 WHERE autopilot_enabled = 1", [now]);
@@ -614,12 +604,8 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
     const db = getDb();
 
     // 1. Trip circuit breaker + global kill switch immediately
-    db.prepare(
-      "UPDATE global_circuit_breakers SET panic_mode_enabled = 1, updated_at = ? WHERE id = 'gcb-default-001'"
-    ).run(now);
-    db.prepare(
-      "UPDATE circuit_breaker_state SET state = 'TRIGGERED', triggered_at = ?, last_checked_at = ? WHERE id = 1"
-    ).run(now, now);
+    await setPanicModeEnabled(true, now);
+    await tripCircuitBreaker(now);
 
     // Explicitly disable autopilot on ALL active agents so the flag is correct even after panic resets
     db.prepare("UPDATE agents SET autopilot_enabled = 0, updated_at = ? WHERE autopilot_enabled = 1").run(now);
@@ -819,14 +805,7 @@ router.post("/panic-mode/rearm", async (req: Request, res: Response) => {
   }
 
   if (isPgEnabled()) {
-    await pgExec(
-      "UPDATE global_circuit_breakers SET panic_mode_enabled = 0, updated_at = $1 WHERE id = 'gcb-default-001'",
-      [now]
-    );
-    await pgExec(
-      "UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL, last_checked_at = $1 WHERE id = 1",
-      [now]
-    );
+    await resetRiskState(now);
     if (status.latestEvent?.id) {
       await pgExec(
         "UPDATE panic_mode_events SET rearmed_at = $1, status = CASE WHEN status = 'processing' THEN 'rearmed' ELSE status END WHERE id = $2",
@@ -834,13 +813,8 @@ router.post("/panic-mode/rearm", async (req: Request, res: Response) => {
       );
     }
   } else {
+    await resetRiskState(now);
     const db = getDb();
-    db.prepare(
-      "UPDATE global_circuit_breakers SET panic_mode_enabled = 0, updated_at = ? WHERE id = 'gcb-default-001'"
-    ).run(now);
-    db.prepare(
-      "UPDATE circuit_breaker_state SET state = 'ARMED', drawdown_pct = 0, triggered_at = NULL, last_checked_at = ? WHERE id = 1"
-    ).run(now);
     if (status.latestEvent?.id) {
       db.prepare(
         "UPDATE panic_mode_events SET rearmed_at = ?, status = CASE WHEN status = 'processing' THEN 'rearmed' ELSE status END WHERE id = ?"

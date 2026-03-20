@@ -74,29 +74,29 @@ export async function loadLinkedAgentForUser(userId: string): Promise<LinkedAgen
   if (isPgEnabled()) {
     // Primary: join via users.agent_id
     const row = await pgQueryOne<AgentLinkRow>(
-      `SELECT users.id AS user_id,
-              agents.id AS agent_id,
+      `SELECT users.id::text AS user_id,
+              agents.id::text AS agent_id,
               agents.status,
               agents.agent_type,
               agents.wallet_address,
               agents.autopilot_enabled
        FROM users
        JOIN agents ON agents.id = users.agent_id
-       WHERE users.id = $1`,
+       WHERE users.id = $1::uuid`,
       [userId]
     );
     if (row) return buildContext(row);
 
     // Fallback: find agent by user_id on agents table (covers users.agent_id sync gap)
     const fallbackRow = await pgQueryOne<AgentLinkRow>(
-      `SELECT $1::text AS user_id,
-              agents.id AS agent_id,
+      `SELECT $1::uuid::text AS user_id,
+              agents.id::text AS agent_id,
               agents.status,
               agents.agent_type,
               agents.wallet_address,
               agents.autopilot_enabled
        FROM agents
-       WHERE agents.user_id = $1 AND agents.status != 'terminated'
+       WHERE agents.user_id = $1::uuid AND agents.status != 'terminated'
        ORDER BY agents.created_at DESC
        LIMIT 1`,
       [userId]
@@ -105,7 +105,7 @@ export async function loadLinkedAgentForUser(userId: string): Promise<LinkedAgen
 
     // Auto-heal: link this agent back to the user so future queries use the primary path
     try {
-      await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [fallbackRow.agent_id, userId]);
+      await pgExec("UPDATE users SET agent_id = $1::uuid WHERE id = $2::uuid", [fallbackRow.agent_id, userId]);
     } catch {
       // Non-fatal — the fallback data is still usable
     }
@@ -162,8 +162,8 @@ export async function loadSingleAutopilotExecutionContext(): Promise<LinkedAgent
 export async function loadAutopilotExecutionContexts(): Promise<AutopilotExecutionContext[]> {
   if (isPgEnabled()) {
     const rows = await pgQuery<AutopilotAgentRow>(
-      `SELECT agents.user_id,
-              agents.id AS agent_id,
+      `SELECT agents.user_id::text AS user_id,
+              agents.id::text AS agent_id,
               agents.status,
               agents.agent_type,
               agents.wallet_address,

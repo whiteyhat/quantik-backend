@@ -1,10 +1,10 @@
-import { CircuitBreaker } from "../risk/circuitBreaker";
 import { runOracle } from "../oracle/index";
 import { runEdge } from "../edge/index";
 import { runClause } from "../clause/index";
 import { runAura } from "../aura/index";
 import { runFlux } from "../flux/index";
 import { getDb } from "../db/schema";
+import { isPanicModeEnabled } from "../risk/state";
 import { loadAutopilotExecutionContexts, type AutopilotExecutionContext } from "../utils/linkedAgent";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { emitAgentAlert, emitAutopilotStatus } from "../infra/socket";
@@ -431,9 +431,7 @@ async function logAutopilotDecision(
 export class MarketScanner {
   async scan(): Promise<void> {
     // GLOBAL KILL SWITCH: Respect panic_mode and circuit breaker
-    const db = getDb();
-    const panicMode = db.prepare("SELECT panic_mode_enabled FROM global_circuit_breakers LIMIT 1").get() as { panic_mode_enabled: number } | undefined;
-    if (panicMode?.panic_mode_enabled === 1) {
+    if (await isPanicModeEnabled()) {
       console.log("[Scanner] GLOBAL KILL SWITCH: panic_mode_enabled is 1. Stopping scan.");
       return;
     }
