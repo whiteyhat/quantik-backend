@@ -615,7 +615,9 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     amount: round2(execution.amount),
     status: String(execution.status ?? "").toUpperCase(),
     source: execution.source === "autopilot" ? ("autopilot" as const) : ("manual" as const),
-    executedAt: new Date(execution.executed_at).toISOString(),
+    executedAt: execution.executed_at && Number.isFinite(Number(execution.executed_at))
+      ? new Date(Number(execution.executed_at)).toISOString()
+      : null,
   }));
 
   let lastTrades: Array<{ pnl: number }>;

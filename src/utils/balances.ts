@@ -1,4 +1,4 @@
-import { runCli, runCliWithWallet } from "../cli";
+import { runCliWithWallet } from "../cli";
 import { tryLoadActiveAgentContext } from "./agentKey";
 import {
   AUTOPILOT_MIN_POL_BALANCE,
@@ -117,8 +117,9 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
 export async function getClobBalance(privateKey?: string): Promise<number> {
   try {
     const key = privateKey ?? (await tryLoadActiveAgentContext())?.privateKey;
+    if (!key) return 0;
     const args = ["clob", "balance", "--asset-type", "collateral"];
-    const raw = key ? await runCliWithWallet(args, key) : await runCli(args);
+    const raw = await runCliWithWallet(args, key);
     if (raw && typeof raw === "object") return Number((raw as any).balance ?? 0);
   } catch {}
   return 0;

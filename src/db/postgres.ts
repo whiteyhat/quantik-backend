@@ -781,7 +781,7 @@ export async function migratePg(): Promise<void> {
        AND EXISTS (
          SELECT 1
            FROM autopilot_decisions d
-          WHERE d.agent_id = executions.agent_id
+          WHERE d.agent_id = executions.agent_id::TEXT
             AND d.slug = executions.slug
             AND d.decision = 'executed'
             AND ABS(d.scanned_at - executions.executed_at) <= 1800000
