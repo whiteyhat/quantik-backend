@@ -113,7 +113,7 @@ export async function updateCircuitBreakerAfterCheck(
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO circuit_breaker_state (id, state, drawdown_pct, triggered_at, last_checked_at)
-       VALUES (1, $1, $2, CASE WHEN $1 = 'TRIGGERED' THEN $3 ELSE NULL END, $3)
+       VALUES (1, $1, $2, CASE WHEN $1 = 'TRIGGERED' THEN $3::BIGINT ELSE NULL END, $3::BIGINT)
        ON CONFLICT (id) DO UPDATE
        SET state = EXCLUDED.state,
            drawdown_pct = EXCLUDED.drawdown_pct,

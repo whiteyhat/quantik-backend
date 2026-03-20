@@ -13,6 +13,7 @@ import { resetRiskState } from "../risk/state";
 const router = Router();
 
 router.get("/status", async (_req: Request, res: Response) => {
+  try {
   const portfolio = getPortfolioManager();
   const correlation = getCorrelationMonitor();
   const cb = getCircuitBreaker();
@@ -85,6 +86,10 @@ router.get("/status", async (_req: Request, res: Response) => {
     kellyFraction: gcb?.kelly_fraction_multiplier ?? 0.25,
     luciferVetoThreshold: luciferRow?.var_threshold ?? 0.03,
   });
+  } catch (err) {
+    console.error("[riskL3] /status error:", err);
+    res.status(500).json({ error: "Failed to load risk status" });
+  }
 });
 
 router.get("/positions", async (_req: Request, res: Response) => {
