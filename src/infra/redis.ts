@@ -5,6 +5,7 @@ import IORedis from "ioredis";
 // Falls back to in-memory stubs when REDIS_URL is not set.
 
 let connection: IORedis | null = null;
+let redisHealthy = true;
 
 export function getRedis(): IORedis {
   if (!connection) {
@@ -16,6 +17,15 @@ export function getRedis(): IORedis {
     connection = new IORedis(url, {
       maxRetriesPerRequest: null, // required by BullMQ
       enableReadyCheck: false,
+      connectTimeout: 10000,      // fail fast: 10s connection timeout
+      retryStrategy(times) {
+        if (times > 5) {
+          console.error("[redis] Max retries reached — giving up");
+          redisHealthy = false;
+          return null; // stop retrying
+        }
+        return Math.min(times * 1000, 5000); // 1s, 2s, 3s, 4s, 5s
+      },
       ...(url.startsWith("rediss://") ? { tls: { rejectUnauthorized: false } } : {}),
     });
 
@@ -24,10 +34,16 @@ export function getRedis(): IORedis {
     });
 
     connection.on("connect", () => {
+      redisHealthy = true;
       console.log("[redis] Connected");
     });
   }
   return connection;
+}
+
+/** Returns false if Redis exhausted its retries and is unreachable */
+export function isRedisHealthy(): boolean {
+  return redisHealthy;
 }
 
 export function isRedisEnabled(): boolean {

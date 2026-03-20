@@ -1,4 +1,4 @@
-import { isRedisEnabled } from "./redis";
+import { isRedisEnabled, getRedis } from "./redis";
 import { scheduleRepeatable, QUEUE_NAMES } from "./queues";
 import { MarketScanner } from "../scanner/marketScanner";
 import { AlertPoller, ensureAlertColumns } from "../alerts/telegramAlert";
@@ -217,8 +217,16 @@ export function startLegacyScheduler(): void {
 
 export async function initScheduler(): Promise<void> {
   if (isRedisEnabled()) {
-    console.log("[scheduler] BullMQ mode (Redis detected)");
-    await startBullMQScheduler();
+    // Verify Redis is actually reachable before committing to BullMQ
+    try {
+      const redis = getRedis();
+      await redis.ping();
+      console.log("[scheduler] BullMQ mode (Redis connected)");
+      await startBullMQScheduler();
+    } catch (err: any) {
+      console.warn(`[scheduler] Redis unreachable (${err.message}) — falling back to legacy mode`);
+      startLegacyScheduler();
+    }
   } else {
     console.log("[scheduler] Legacy mode (no Redis — using setInterval)");
     startLegacyScheduler();
