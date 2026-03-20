@@ -749,7 +749,7 @@ export class MarketScanner {
             (id, market_slug, market_question, created_at, completed_at, decision, confidence,
              aura_output, flux_output, oracle_output, edge_output, sigma_output, clause_output, lucifer_output,
              alert_sent, signal_state)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'TRADE')
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'TRADE')
         `).run(
           runId,
           result.slug,
