@@ -242,9 +242,9 @@ function computeAgentEntry(
     const metrics = calculateOpenExecutionMetrics(execution, currentYesPrice, scannerDirection);
     lifetimeUnrealizedPnl += metrics.pnl;
 
-    if (withinWindow(execution.executed_at, windowStart, window)) {
-      selectedUnrealizedPnl += metrics.pnl;
-    }
+    // Open positions are live — their unrealized PnL reflects current value,
+    // so always include them regardless of when the position was opened.
+    selectedUnrealizedPnl += metrics.pnl;
   }
 
   const allTimePnl = lifetimeRealizedPnl + lifetimeUnrealizedPnl;
