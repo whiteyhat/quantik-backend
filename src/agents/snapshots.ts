@@ -611,13 +611,13 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
   const recentTrades = recentTradeRows.map((execution) => ({
     id: execution.id,
     slug: execution.slug,
-    direction: resolveExecutionDirection(execution, scannerDirections.get(execution.slug)).direction,
+    direction: resolveExecutionDirection(execution, scannerDirections.get(execution.slug)).direction as "YES" | "NO",
     amount: round2(execution.amount),
     status: String(execution.status ?? "").toUpperCase(),
     source: execution.source === "autopilot" ? ("autopilot" as const) : ("manual" as const),
     executedAt: execution.executed_at && Number.isFinite(Number(execution.executed_at))
       ? new Date(Number(execution.executed_at)).toISOString()
-      : null,
+      : new Date().toISOString(),
   }));
 
   let lastTrades: Array<{ pnl: number }>;
