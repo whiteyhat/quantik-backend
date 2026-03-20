@@ -1419,8 +1419,9 @@ async function resolveRecipe(
 
 interface GeminiPart {
   text?: string;
-  functionCall?: { name: string; args: Record<string, unknown> };
-  functionResponse?: { name: string; response: unknown };
+  functionCall?: { name: string; args: Record<string, unknown>; id?: string };
+  functionResponse?: { name: string; response: unknown; id?: string };
+  thoughtSignature?: string;
 }
 
 interface GeminiContent {
@@ -1460,11 +1461,18 @@ async function geminiGenerate(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
       );
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        console.warn(`[agentChat] Gemini ${model} returned ${res.status}: ${errBody.slice(0, 300)}`);
+        continue;
+      }
       const data = await res.json() as { candidates?: { content?: { parts?: GeminiPart[] } }[] };
       const parts = data.candidates?.[0]?.content?.parts ?? [];
       if (parts.length > 0) return { parts, model };
-    } catch { continue; }
+    } catch (err) {
+      console.warn(`[agentChat] Gemini ${model} fetch error:`, err);
+      continue;
+    }
   }
   return { parts: [{ text: "Agent is momentarily offline." }], model: "fallback" };
 }
@@ -1509,9 +1517,10 @@ async function resolveGenericToolFlow(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const { parts, model: usedModel } = await geminiGenerate(workingContents, systemInstruction, true);
     model = usedModel;
-    const functionCalls = parts
-      .map((part) => part.functionCall)
-      .filter((call): call is { name: string; args: Record<string, unknown> } => Boolean(call));
+    const functionCallParts = parts.filter((part) => Boolean(part.functionCall));
+    const functionCalls = functionCallParts
+      .map((part) => part.functionCall!)
+      .filter((call): call is { name: string; args: Record<string, unknown>; id?: string } => Boolean(call));
     const replyText = parts.find((part) => typeof part.text === "string" && part.text.trim())?.text?.trim();
 
     if (functionCalls.length === 0) {
@@ -1527,7 +1536,9 @@ async function resolveGenericToolFlow(
       };
     }
 
-    for (const functionCall of functionCalls) {
+    for (let i = 0; i < functionCalls.length; i++) {
+      const functionCall = functionCalls[i];
+      const sourcePart = functionCallParts[i];
       const trace = TOOL_TRACE_META[functionCall.name];
       if (trace) emitTrace(res, trace, `Running ${trace.label.toLowerCase()}`);
 
@@ -1557,15 +1568,20 @@ async function resolveGenericToolFlow(
         });
       }
 
+      // Preserve thoughtSignature from the original part — required by Gemini thinking models
+      const modelPart: GeminiPart = { functionCall };
+      if (sourcePart?.thoughtSignature) modelPart.thoughtSignature = sourcePart.thoughtSignature;
+
       workingContents = [
         ...workingContents,
-        { role: "model", parts: [{ functionCall }] },
+        { role: "model", parts: [modelPart] },
         {
           role: "user",
           parts: [{
             functionResponse: {
               name: functionCall.name,
               response: toolResult.data,
+              ...(functionCall.id ? { id: functionCall.id } : {}),
             },
           }],
         },
@@ -1786,7 +1802,8 @@ router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: 
     clearTimeout(timeoutHandle);
     safeEnd();
 
-  } catch {
+  } catch (err) {
+    console.error("[agentChat] Unhandled error in chat handler:", err);
     clearTimeout(timeoutHandle);
     if (!clientGone) emitSse(res, { type: "error", error: "Agent is momentarily offline." });
     safeEnd();
