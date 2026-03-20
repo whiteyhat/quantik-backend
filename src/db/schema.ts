@@ -735,6 +735,9 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_enabled INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "ALTER TABLE agents ADD COLUMN autopilot_updated_at INTEGER");
 
+  // Migration: Policy setup completion tracking for BYO agents
+  addColumn(db, "ALTER TABLE agents ADD COLUMN policy_setup_completed_at INTEGER");
+
   // Migration: Polymarket wallet preparation (server-side encrypted key storage)
   addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_private_key TEXT");
   addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_seed_phrase TEXT");
@@ -886,6 +889,93 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_es TEXT");
   addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_fr TEXT");
   addColumn(db, "ALTER TABLE versions ADD COLUMN fixes_de TEXT");
+
+  // ── Autopilot policy: store full per-agent policy (not just 4 overrides) ──
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN min_sigma REAL");
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN min_kelly REAL");
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN kelly_multiplier REAL");
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN max_position_fraction REAL");
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN daily_loss_limit_pct REAL");
+  addColumn(db, "ALTER TABLE autopilot_policies ADD COLUMN use_aura_sentiment INTEGER");
+
+  // Backfill: derive full policy for existing agents that have NULL in new columns
+  {
+    const { deriveAutopilotPolicy } = require("../services/autopilotPolicy") as typeof import("../services/autopilotPolicy");
+
+    // 1. Backfill existing autopilot_policies rows with NULL new columns
+    const existingPolicies = db.prepare(
+      `SELECT ap.agent_id, a.personality, a.decision_style, a.trading_instinct,
+              a.time_patience, a.money_approach, a.protection_mindset, a.market_sense
+       FROM autopilot_policies ap
+       JOIN agents a ON a.id = ap.agent_id
+       WHERE ap.min_sigma IS NULL`
+    ).all() as Array<{
+      agent_id: string; personality: string; decision_style: string;
+      trading_instinct: string; time_patience: string; money_approach: string;
+      protection_mindset: string; market_sense: string;
+    }>;
+
+    const updateStmt = db.prepare(
+      `UPDATE autopilot_policies
+       SET min_sigma = ?, min_kelly = ?, kelly_multiplier = ?,
+           max_position_fraction = ?, daily_loss_limit_pct = ?, use_aura_sentiment = ?
+       WHERE agent_id = ?`
+    );
+
+    for (const row of existingPolicies) {
+      const derived = deriveAutopilotPolicy({
+        personality: row.personality, decision_style: row.decision_style,
+        trading_instinct: row.trading_instinct, time_patience: row.time_patience,
+        money_approach: row.money_approach, protection_mindset: row.protection_mindset,
+        market_sense: row.market_sense,
+      });
+      updateStmt.run(
+        derived.minSigma, derived.minKelly, derived.kellyMultiplier,
+        derived.maxPositionFraction, derived.dailyLossLimitPct,
+        derived.useAuraSentiment ? 1 : 0, row.agent_id
+      );
+    }
+
+    // 2. Insert policy rows for agents that have autopilot_enabled but no policy row
+    const missingPolicies = db.prepare(
+      `SELECT a.id, a.personality, a.decision_style, a.trading_instinct,
+              a.time_patience, a.money_approach, a.protection_mindset, a.market_sense
+       FROM agents a
+       LEFT JOIN autopilot_policies ap ON ap.agent_id = a.id
+       WHERE ap.agent_id IS NULL AND a.autopilot_enabled = 1`
+    ).all() as Array<{
+      id: string; personality: string; decision_style: string;
+      trading_instinct: string; time_patience: string; money_approach: string;
+      protection_mindset: string; market_sense: string;
+    }>;
+
+    const insertStmt = db.prepare(
+      `INSERT OR IGNORE INTO autopilot_policies
+       (agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
+        min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
+        daily_loss_limit_pct, use_aura_sentiment, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    for (const row of missingPolicies) {
+      const derived = deriveAutopilotPolicy({
+        personality: row.personality, decision_style: row.decision_style,
+        trading_instinct: row.trading_instinct, time_patience: row.time_patience,
+        money_approach: row.money_approach, protection_mindset: row.protection_mindset,
+        market_sense: row.market_sense,
+      });
+      insertStmt.run(
+        row.id, derived.cadenceMinutes, derived.cooldownMinutes,
+        derived.maxTradesPerDay, derived.maxBetUsdc, derived.minSigma,
+        derived.minKelly, derived.kellyMultiplier, derived.maxPositionFraction,
+        derived.dailyLossLimitPct, derived.useAuraSentiment ? 1 : 0, Date.now()
+      );
+    }
+
+    if (existingPolicies.length || missingPolicies.length) {
+      console.log(`[schema] Backfilled autopilot policies: ${existingPolicies.length} updated, ${missingPolicies.length} inserted`);
+    }
+  }
 
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);

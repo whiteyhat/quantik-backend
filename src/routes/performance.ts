@@ -223,8 +223,8 @@ router.get("/summary", async (req: Request, res) => {
       ? await loadToolExecutionContextByAgentId(linkedAgent.agentId, userId)
       : null;
     const snapshot = await loadPortfolioSnapshot(context);
-    const attribution = attributionEngine.getAttributionBySignal();
-    const alphaDecay = attributionEngine.getAlphaDecayStatus();
+    const attribution = await attributionEngine.getAttributionBySignal();
+    const alphaDecay = await attributionEngine.getAlphaDecayStatus();
 
     res.json({
       ...snapshot,
@@ -237,8 +237,8 @@ router.get("/summary", async (req: Request, res) => {
   }
 });
 
-router.get("/attribution", (_req, res) => {
-  const data = attributionEngine.getAttributionBySignal();
+router.get("/attribution", async (_req, res) => {
+  const data = await attributionEngine.getAttributionBySignal();
   res.json(data);
 });
 
@@ -424,10 +424,10 @@ router.get("/brier", async (_req, res) => {
   res.json(rows);
 });
 
-router.get("/drift", (_req, res) => {
+router.get("/drift", async (_req, res) => {
   try {
-    const microstructure = driftDetection.checkMicrostructureDrift();
-    const concept = driftDetection.checkConceptDrift();
+    const microstructure = await driftDetection.checkMicrostructureDrift();
+    const concept = await driftDetection.checkConceptDrift();
     res.json({
       microstructure: microstructure.detected ? "detected" : "clear",
       concept: concept.detected ? "detected" : "clear",

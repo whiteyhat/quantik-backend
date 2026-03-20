@@ -23,6 +23,7 @@ import {
 } from "../utils/executionDirection";
 import { loadArenaLeaderboard } from "../performance/arenaService";
 import { parseArenaWindow, type ArenaWindow } from "../performance/arena";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -231,6 +232,28 @@ export const TOOL_DECLARATIONS: GeminiFunctionDeclaration[] = [
     description: "Request submission of the 6 required on-chain USDC.e approval transactions to Polymarket's CTF Exchange and Neg-Risk contracts. This will return a confirmation request — the actual transactions are only submitted after the user explicitly confirms. Only call when the user specifically asks to approve or enable Polymarket trading.",
     parameters: { type: "object", properties: {}, required: [] },
   },
+  {
+    name: "get_policy_setup",
+    description: "Get the autopilot trading policy questionnaire. Returns 7 simple questions about the user's risk tolerance, decision style, and trading preferences. If the policy setup is already complete, returns the current trait configuration. IMPORTANT: Call this right after onboarding — the user must answer these questions before autopilot trading can begin. If the setup is not complete, ask the user each question one at a time in a friendly, conversational tone.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "submit_policy_setup",
+    description: "Submit the user's answers to the 7 trading policy questions. This configures the agent's autopilot trading behavior based on the user's preferences. Call this after the user has answered all 7 questions from get_policy_setup. All 7 fields are required.",
+    parameters: {
+      type: "object",
+      properties: {
+        personality: { type: "string", description: "Risk attitude: guardian, balanced, or adventurer" },
+        decision_style: { type: "string", description: "Evidence threshold: gut, analyst, or observer" },
+        trading_instinct: { type: "string", description: "Deal-finding style: speed_demon, trend_chaser, reversal_spotter, or value_hunter" },
+        time_patience: { type: "string", description: "Results timeline: lightning, swing, or longterm" },
+        money_approach: { type: "string", description: "Position sizing: fixed_safe, smart_scaling, or aggressive" },
+        protection_mindset: { type: "string", description: "Loss tolerance: tight, flexible, or hands_off" },
+        market_sense: { type: "string", description: "Sentiment usage: fixed_rules or mood_reader" },
+      },
+      required: ["personality", "decision_style", "trading_instinct", "time_patience", "money_approach", "protection_mindset", "market_sense"],
+    },
+  },
 ];
 
 // ── Tool Executors ───────────────────────────────────────────────────────────
@@ -284,12 +307,12 @@ async function executeSearchMarkets(args: { query?: string; category?: string })
 
   let url: string;
   if (args.query) {
-    url = `https://gamma-api.polymarket.com/markets?${params.toString()}&slug_contains=${encodeURIComponent(args.query)}`;
+    url = `${GAMMA_API_BASE}/markets?${params.toString()}&slug_contains=${encodeURIComponent(args.query)}`;
   } else {
-    url = `https://gamma-api.polymarket.com/markets?${params.toString()}`;
+    url = `${GAMMA_API_BASE}/markets?${params.toString()}`;
   }
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(8000),
   });
@@ -548,8 +571,8 @@ async function executeClosePosition(args: { slug: string }, context: ToolExecuti
 
 async function executeGetMarketPrice(args: { slug: string }): Promise<unknown> {
   try {
-    const res = await fetch(
-      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(args.slug)}`,
+    const res = await fetchWithRetry(
+      `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(args.slug)}`,
       { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) },
     );
 

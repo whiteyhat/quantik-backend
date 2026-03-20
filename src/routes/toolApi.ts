@@ -4,7 +4,8 @@ import { executeTool } from "../agents/tools";
 import { loadToolExecutionContextByAgentId } from "../agents/snapshots";
 import { rateLimit } from "../infra/rateLimit";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgExec } from "../db/postgres";
+import { isPgEnabled, pgExec, pgQueryOne } from "../db/postgres";
+import { persistFullDerivedPolicy } from "../services/autopilotPolicy";
 import { isArenaWindow, parseArenaWindow } from "../performance/arena";
 
 const router = Router();
@@ -361,6 +362,249 @@ router.post("/run_polymarket_approvals", requireApiKey, requireScope("config"), 
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Approval submission failed";
     logRequest(agentId, userId, "run_polymarket_approvals", "POST", 500, Date.now() - start, msg);
+    res.status(500).json({ success: false, error: msg, code: "INTERNAL_ERROR" });
+  }
+});
+
+// ── Policy Setup — Questionnaire for OpenClaw agents ─────────────────────────
+
+const POLICY_QUESTIONS = [
+  {
+    id: "personality",
+    question: "How do you feel about risk?",
+    options: [
+      { label: "Play it safe — I'd rather miss a win than take a loss", value: "guardian" },
+      { label: "Calculated risks are fine — I like balance", value: "balanced" },
+      { label: "Go big or go home — I'm here for the upside", value: "adventurer" },
+    ],
+  },
+  {
+    id: "decision_style",
+    question: "When you make a big decision, how much proof do you need?",
+    options: [
+      { label: "Trust my gut — move fast, figure it out later", value: "gut" },
+      { label: "Show me the data, then I'll decide", value: "analyst" },
+      { label: "I want overwhelming evidence before I commit", value: "observer" },
+    ],
+  },
+  {
+    id: "trading_instinct",
+    question: "If you were shopping for deals, what's your style?",
+    options: [
+      { label: "Flash sales — I want to be first in line", value: "speed_demon" },
+      { label: "Follow what's hot — if everyone's buying, there's a reason", value: "trend_chaser" },
+      { label: "Find what everyone's sleeping on", value: "reversal_spotter" },
+      { label: "Wait for the perfect bargain, even if it takes a while", value: "value_hunter" },
+    ],
+  },
+  {
+    id: "time_patience",
+    question: "How patient are you when it comes to seeing results?",
+    options: [
+      { label: "I want action all day — check in constantly", value: "lightning" },
+      { label: "A few moves a day is fine — I check in a couple of times", value: "swing" },
+      { label: "Set it and forget it — I'll look once or twice a week", value: "longterm" },
+    ],
+  },
+  {
+    id: "money_approach",
+    question: "When something looks good, how much should I put on the line?",
+    options: [
+      { label: "Keep it small and steady — never bet the farm", value: "fixed_safe" },
+      { label: "Scale up when confidence is high, pull back when it's not", value: "smart_scaling" },
+      { label: "When it's good, go hard", value: "aggressive" },
+    ],
+  },
+  {
+    id: "protection_mindset",
+    question: "If things start going wrong in a day, when should I stop?",
+    options: [
+      { label: "Pull the plug early — I hate losing streaks", value: "tight" },
+      { label: "Give me some room, but know when to call it", value: "flexible" },
+      { label: "I can stomach a rough day — don't panic", value: "hands_off" },
+    ],
+  },
+  {
+    id: "market_sense",
+    question: "Should I pay attention to what people are feeling about the market, or just stick to the numbers?",
+    options: [
+      { label: "Stick to the numbers — emotions are noise", value: "fixed_rules" },
+      { label: "Read the room — sentiment matters", value: "mood_reader" },
+    ],
+  },
+];
+
+const VALID_TRAIT_VALUES: Record<string, string[]> = {
+  personality: ["guardian", "balanced", "adventurer"],
+  decision_style: ["gut", "analyst", "observer"],
+  trading_instinct: ["speed_demon", "trend_chaser", "reversal_spotter", "value_hunter"],
+  time_patience: ["lightning", "swing", "longterm"],
+  money_approach: ["fixed_safe", "smart_scaling", "aggressive"],
+  protection_mindset: ["tight", "flexible", "hands_off"],
+  market_sense: ["fixed_rules", "mood_reader"],
+};
+
+const DEFAULT_TRAIT_VALUES: Record<string, string> = {
+  personality: "balanced",
+  decision_style: "analyst",
+  trading_instinct: "value_hunter",
+  time_patience: "swing",
+  money_approach: "smart_scaling",
+  protection_mindset: "flexible",
+  market_sense: "mood_reader",
+};
+
+function isPolicySetupComplete(agent: Record<string, unknown>): boolean {
+  // The policy_setup_completed_at column is set when submit_policy_setup is called
+  return agent.policy_setup_completed_at != null;
+}
+
+// GET /get_policy_setup — Returns the questionnaire questions and current setup status
+router.get("/get_policy_setup", requireApiKey, requireScope("config"), configRateLimit, async (req: Request, res: Response) => {
+  const { agentId, userId } = req.apiKeyAgent!;
+  const start = Date.now();
+
+  try {
+    let agent: Record<string, unknown> | undefined | null;
+    if (isPgEnabled()) {
+      agent = await pgQueryOne<Record<string, unknown>>(
+        "SELECT personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense, policy_setup_completed_at FROM agents WHERE id = $1",
+        [agentId]
+      );
+    } else {
+      const db = getDb();
+      agent = db.prepare(
+        "SELECT personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense, policy_setup_completed_at FROM agents WHERE id = ?"
+      ).get(agentId) as Record<string, unknown> | undefined;
+    }
+
+    if (!agent) {
+      logRequest(agentId, userId, "get_policy_setup", "GET", 404, Date.now() - start);
+      res.status(404).json({ success: false, error: "Agent not found", code: "INVALID_PARAMS" });
+      return;
+    }
+
+    const completed = isPolicySetupComplete(agent);
+
+    logRequest(agentId, userId, "get_policy_setup", "GET", 200, Date.now() - start);
+    res.json({
+      success: true,
+      data: {
+        completed,
+        questions: POLICY_QUESTIONS,
+        current_traits: completed ? {
+          personality: agent.personality,
+          decision_style: agent.decision_style,
+          trading_instinct: agent.trading_instinct,
+          time_patience: agent.time_patience,
+          money_approach: agent.money_approach,
+          protection_mindset: agent.protection_mindset,
+          market_sense: agent.market_sense,
+        } : null,
+        instructions: completed
+          ? "Policy setup is already complete. You can call this endpoint again to view the current configuration."
+          : "Ask the user each question one at a time in a conversational, friendly tone. Once all 7 are answered, call POST /submit_policy_setup with the answers. Remind the user that Quantik needs these answers before autopilot trading can begin.",
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to fetch policy setup";
+    logRequest(agentId, userId, "get_policy_setup", "GET", 500, Date.now() - start, msg);
+    res.status(500).json({ success: false, error: msg, code: "INTERNAL_ERROR" });
+  }
+});
+
+// POST /submit_policy_setup — Submit answers and derive autopilot policy
+router.post("/submit_policy_setup", requireApiKey, requireScope("config"), configRateLimit, async (req: Request, res: Response) => {
+  const { agentId, userId } = req.apiKeyAgent!;
+  const start = Date.now();
+
+  try {
+    const body = req.body as Record<string, string>;
+
+    // Validate all 7 traits are present and valid
+    const errors: string[] = [];
+    for (const [traitId, validValues] of Object.entries(VALID_TRAIT_VALUES)) {
+      const value = body[traitId];
+      if (!value) {
+        errors.push(`Missing required field: ${traitId}`);
+      } else if (!validValues.includes(value)) {
+        errors.push(`Invalid value for ${traitId}: "${value}". Must be one of: ${validValues.join(", ")}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      logRequest(agentId, userId, "submit_policy_setup", "POST", 400, Date.now() - start);
+      res.status(400).json({
+        success: false,
+        error: errors.join("; "),
+        code: "INVALID_PARAMS",
+        valid_values: VALID_TRAIT_VALUES,
+      });
+      return;
+    }
+
+    const now = Date.now();
+
+    // Update agent traits + mark policy setup as complete
+    if (isPgEnabled()) {
+      await pgExec(`
+        UPDATE agents SET
+          personality = $1, decision_style = $2, trading_instinct = $3, time_patience = $4,
+          money_approach = $5, protection_mindset = $6, market_sense = $7,
+          policy_setup_completed_at = $8, updated_at = $8
+        WHERE id = $9
+      `, [
+        body.personality, body.decision_style, body.trading_instinct, body.time_patience,
+        body.money_approach, body.protection_mindset, body.market_sense,
+        now, agentId,
+      ]);
+    } else {
+      const db = getDb();
+      db.prepare(`
+        UPDATE agents SET
+          personality = ?, decision_style = ?, trading_instinct = ?, time_patience = ?,
+          money_approach = ?, protection_mindset = ?, market_sense = ?,
+          policy_setup_completed_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        body.personality, body.decision_style, body.trading_instinct, body.time_patience,
+        body.money_approach, body.protection_mindset, body.market_sense,
+        now, now, agentId,
+      );
+    }
+
+    // Rebuild autopilot policy from updated traits
+    const autopilotPolicy = await persistFullDerivedPolicy(agentId, {
+      agentId,
+      personality: body.personality,
+      decision_style: body.decision_style,
+      trading_instinct: body.trading_instinct,
+      time_patience: body.time_patience,
+      money_approach: body.money_approach,
+      protection_mindset: body.protection_mindset,
+      market_sense: body.market_sense,
+    });
+
+    logRequest(agentId, userId, "submit_policy_setup", "POST", 200, Date.now() - start);
+    res.json({
+      success: true,
+      data: {
+        message: "Trading policy saved successfully. Autopilot is now configured based on the user's preferences.",
+        traits: {
+          personality: body.personality,
+          decision_style: body.decision_style,
+          trading_instinct: body.trading_instinct,
+          time_patience: body.time_patience,
+          money_approach: body.money_approach,
+          protection_mindset: body.protection_mindset,
+          market_sense: body.market_sense,
+        },
+        autopilot_policy: autopilotPolicy,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to submit policy setup";
+    logRequest(agentId, userId, "submit_policy_setup", "POST", 500, Date.now() - start, msg);
     res.status(500).json({ success: false, error: msg, code: "INTERNAL_ERROR" });
   }
 });

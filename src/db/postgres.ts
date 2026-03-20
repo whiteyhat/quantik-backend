@@ -176,6 +176,7 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_seed_phrase TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_ready INTEGER DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_status TEXT DEFAULT 'pending_funding';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS policy_setup_completed_at BIGINT;
   `);
 
   await safeQuery("create api_keys", `
@@ -846,6 +847,14 @@ export async function migratePg(): Promise<void> {
   } catch (err) {
     console.error("[postgres] Releases seed failed:", err);
   }
+
+  // ── Autopilot policy: store full per-agent policy ──
+  await safeQuery("autopilot_policies.min_sigma", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS min_sigma REAL`);
+  await safeQuery("autopilot_policies.min_kelly", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS min_kelly REAL`);
+  await safeQuery("autopilot_policies.kelly_multiplier", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS kelly_multiplier REAL`);
+  await safeQuery("autopilot_policies.max_position_fraction", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS max_position_fraction REAL`);
+  await safeQuery("autopilot_policies.daily_loss_limit_pct", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS daily_loss_limit_pct REAL`);
+  await safeQuery("autopilot_policies.use_aura_sentiment", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS use_aura_sentiment INTEGER`);
 
   console.log("[postgres] Migration complete — all tables ready");
 }

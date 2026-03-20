@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/schema";
 import { runSigma, SigmaInputs } from "../sigma";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 const router = Router();
 
@@ -49,7 +50,7 @@ router.get("/:slug", async (req: Request, res: Response) => {
   // Market data
   let marketData: any = null;
   try {
-    const mktRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${slug}`);
+    const mktRes = await fetchWithRetry(`${GAMMA_API_BASE}/markets?slug=${slug}`, { signal: AbortSignal.timeout(8000) });
     const arr = await mktRes.json() as any[];
     marketData = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
   } catch { /* ignore */ }

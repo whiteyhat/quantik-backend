@@ -5,6 +5,7 @@ import {
   getLatestScannerDirectionMap,
   resolveExecutionDirection,
 } from "../utils/executionDirection";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 interface ExecutionRow {
   id: number;
@@ -43,7 +44,7 @@ export async function settle(): Promise<void> {
 
     for (const row of rows) {
       try {
-        const res = await fetch(`https://gamma-api.polymarket.com/markets?slug=${row.slug}`);
+        const res = await fetchWithRetry(`${GAMMA_API_BASE}/markets?slug=${row.slug}`, { signal: AbortSignal.timeout(10000) });
         if (!res.ok) continue;
 
         const markets = await res.json() as GammaMarket[];
@@ -71,7 +72,7 @@ export async function settle(): Promise<void> {
         let fillPrice = row.fill_price;
         if (fillPrice == null || fillPrice === 0) {
           // FIXED PS2: don't use oracle probability as fill_price — use latest market price as estimate
-          const priceRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${row.slug}`).catch(() => null);
+          const priceRes = await fetchWithRetry(`${GAMMA_API_BASE}/markets?slug=${row.slug}`, { signal: AbortSignal.timeout(10000) }).catch(() => null);
           if (priceRes?.ok) {
             const mkt = await priceRes.json().catch(() => []) as any[];
             if (Array.isArray(mkt) && mkt[0]) {

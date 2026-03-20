@@ -33,7 +33,8 @@ const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (aggressive mode)
 export const SCAN_COOLDOWN_MS = 30 * 1000; // 30s cooldown for manual scans
 const TOP_N = 20;
 const MIN_SCORE = 15;
-const GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+const GAMMA_MARKETS_URL = `${GAMMA_API_BASE}/markets`;
 const PRICE_SNAPSHOT_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 // ── Scoring weights ────────────────────────────────────────────
@@ -350,7 +351,7 @@ async function fetchAllMarkets(): Promise<GammaMarket[]> {
     });
 
     try {
-      const res = await fetch(`${GAMMA_MARKETS_URL}?${params}`, {
+      const res = await fetchWithRetry(`${GAMMA_MARKETS_URL}?${params}`, {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(15000),
       });

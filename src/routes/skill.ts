@@ -104,7 +104,13 @@ ${baseUrl}/api/v1/agents/byo/claim/CLAIM_TOKEN
 OpenClaw onboarding sequence:
 1. \`GET\` the claim URL to read the handshake document
 2. \`POST\` the identity payload back to the same URL
-3. Store the returned credentials and begin normal Quantik runtime calls
+3. Store the returned credentials
+4. Call \`GET /get_policy_setup\` to retrieve the 7 trading preference questions
+5. Ask the user each question one at a time in a friendly, conversational tone
+6. Call \`POST /submit_policy_setup\` with all 7 answers to configure autopilot
+7. Begin normal Quantik runtime calls
+
+**IMPORTANT:** The trading policy setup (steps 4-6) is required before autopilot trading can begin. If the user hasn't completed the questionnaire, remind them that Quantik needs their answers to configure how the agent trades on their behalf.
 
 **Claim payload:**
 \`\`\`json

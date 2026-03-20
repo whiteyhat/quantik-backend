@@ -18,6 +18,12 @@ export interface AutopilotPolicyOverrides {
   cooldownMinutes: number | null;
   maxTradesPerDay: number | null;
   maxBetUsdc: number | null;
+  minSigma: number | null;
+  minKelly: number | null;
+  kellyMultiplier: number | null;
+  maxPositionFraction: number | null;
+  dailyLossLimitPct: number | null;
+  useAuraSentiment: boolean | null;
   updatedAt: number | null;
 }
 
@@ -74,6 +80,12 @@ interface AutopilotPolicyRow {
   cooldown_minutes: number | null;
   max_trades_per_day: number | null;
   max_bet_usdc: number | null;
+  min_sigma: number | null;
+  min_kelly: number | null;
+  kelly_multiplier: number | null;
+  max_position_fraction: number | null;
+  daily_loss_limit_pct: number | null;
+  use_aura_sentiment: number | null;
   updated_at: number | null;
 }
 
@@ -89,6 +101,35 @@ function sanitizeOptionalMoney(value: unknown): number | null {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return null;
   return Math.max(1, Math.round(parsed * 100) / 100);
+}
+
+function sanitizeOptionalRatio(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.round(parsed * 1000) / 1000;
+}
+
+function sanitizeOptionalBoolean(value: unknown): boolean | null {
+  if (value == null) return null;
+  return !!value;
+}
+
+/** Clamp all effective policy values to safe operational ranges */
+export function validatePolicyBounds(policy: AutopilotPolicyEffective): AutopilotPolicyEffective {
+  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+  return {
+    cadenceMinutes: clamp(Math.round(policy.cadenceMinutes), 5, 1440),
+    cooldownMinutes: clamp(Math.round(policy.cooldownMinutes), 15, 2880),
+    maxTradesPerDay: clamp(Math.round(policy.maxTradesPerDay), 1, 50),
+    maxBetUsdc: clamp(Math.round(policy.maxBetUsdc * 100) / 100, 1, 10000),
+    minSigma: clamp(Math.round(policy.minSigma * 1000) / 1000, 0.40, 0.95),
+    minKelly: clamp(Math.round(policy.minKelly * 1000) / 1000, 0.005, 0.20),
+    kellyMultiplier: clamp(Math.round(policy.kellyMultiplier * 1000) / 1000, 0.05, 1.0),
+    maxPositionFraction: clamp(Math.round(policy.maxPositionFraction * 1000) / 1000, 0.01, 0.50),
+    dailyLossLimitPct: clamp(Math.round(policy.dailyLossLimitPct * 1000) / 1000, 0.01, 0.30),
+    useAuraSentiment: policy.useAuraSentiment,
+  };
 }
 
 function roundMoney(value: number): number {
@@ -110,6 +151,12 @@ function normalizeOverrides(row: AutopilotPolicyRow | null): AutopilotPolicyOver
       cooldownMinutes: null,
       maxTradesPerDay: null,
       maxBetUsdc: null,
+      minSigma: null,
+      minKelly: null,
+      kellyMultiplier: null,
+      maxPositionFraction: null,
+      dailyLossLimitPct: null,
+      useAuraSentiment: null,
       updatedAt: null,
     };
   }
@@ -119,6 +166,12 @@ function normalizeOverrides(row: AutopilotPolicyRow | null): AutopilotPolicyOver
     cooldownMinutes: sanitizeOptionalInteger(row.cooldown_minutes),
     maxTradesPerDay: sanitizeOptionalInteger(row.max_trades_per_day),
     maxBetUsdc: sanitizeOptionalMoney(row.max_bet_usdc),
+    minSigma: sanitizeOptionalRatio(row.min_sigma),
+    minKelly: sanitizeOptionalRatio(row.min_kelly),
+    kellyMultiplier: sanitizeOptionalRatio(row.kelly_multiplier),
+    maxPositionFraction: sanitizeOptionalRatio(row.max_position_fraction),
+    dailyLossLimitPct: sanitizeOptionalRatio(row.daily_loss_limit_pct),
+    useAuraSentiment: row.use_aura_sentiment == null ? null : !!row.use_aura_sentiment,
     updatedAt: row.updated_at == null ? null : Number(row.updated_at),
   };
 }
@@ -204,12 +257,12 @@ export function buildAutopilotPolicyEnvelope(
     cooldownMinutes: overrides.cooldownMinutes ?? derived.cooldownMinutes,
     maxTradesPerDay: overrides.maxTradesPerDay ?? derived.maxTradesPerDay,
     maxBetUsdc: overrides.maxBetUsdc ?? derived.maxBetUsdc,
-    minSigma: derived.minSigma,
-    minKelly: derived.minKelly,
-    kellyMultiplier: derived.kellyMultiplier,
-    maxPositionFraction: derived.maxPositionFraction,
-    dailyLossLimitPct: derived.dailyLossLimitPct,
-    useAuraSentiment: derived.useAuraSentiment,
+    minSigma: overrides.minSigma ?? derived.minSigma,
+    minKelly: overrides.minKelly ?? derived.minKelly,
+    kellyMultiplier: overrides.kellyMultiplier ?? derived.kellyMultiplier,
+    maxPositionFraction: overrides.maxPositionFraction ?? derived.maxPositionFraction,
+    dailyLossLimitPct: overrides.dailyLossLimitPct ?? derived.dailyLossLimitPct,
+    useAuraSentiment: overrides.useAuraSentiment ?? derived.useAuraSentiment,
   };
 
   return {
@@ -235,10 +288,14 @@ export function buildAutopilotPolicyEnvelope(
   };
 }
 
+const ALL_POLICY_COLUMNS = `cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
+       min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
+       daily_loss_limit_pct, use_aura_sentiment, updated_at`;
+
 export async function loadAutopilotPolicyOverrides(agentId: string): Promise<AutopilotPolicyOverrides> {
   if (isPgEnabled()) {
     const row = await pgQueryOne<AutopilotPolicyRow>(
-      `SELECT cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc, updated_at
+      `SELECT ${ALL_POLICY_COLUMNS}
        FROM autopilot_policies
        WHERE agent_id = $1`,
       [agentId]
@@ -248,7 +305,7 @@ export async function loadAutopilotPolicyOverrides(agentId: string): Promise<Aut
 
   const db = getDb();
   const row = db.prepare(
-    `SELECT cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc, updated_at
+    `SELECT ${ALL_POLICY_COLUMNS}
      FROM autopilot_policies
      WHERE agent_id = ?`
   ).get(agentId) as AutopilotPolicyRow | undefined;
@@ -260,9 +317,11 @@ export async function getAutopilotPolicyEnvelope(attrs: AutopilotTraitInput): Pr
   return buildAutopilotPolicyEnvelope(attrs, overrides);
 }
 
+export type AutopilotPolicyPatch = Partial<Omit<AutopilotPolicyOverrides, "updatedAt">>;
+
 export async function upsertAutopilotPolicyOverrides(
   agentId: string,
-  overrides: Partial<Pick<AutopilotPolicyOverrides, "cadenceMinutes" | "cooldownMinutes" | "maxTradesPerDay" | "maxBetUsdc">>
+  overrides: AutopilotPolicyPatch
 ): Promise<AutopilotPolicyOverrides> {
   const now = Date.now();
   const normalized: AutopilotPolicyOverrides = {
@@ -270,52 +329,102 @@ export async function upsertAutopilotPolicyOverrides(
     cooldownMinutes: overrides.cooldownMinutes == null ? null : sanitizeOptionalInteger(overrides.cooldownMinutes),
     maxTradesPerDay: overrides.maxTradesPerDay == null ? null : sanitizeOptionalInteger(overrides.maxTradesPerDay),
     maxBetUsdc: overrides.maxBetUsdc == null ? null : sanitizeOptionalMoney(overrides.maxBetUsdc),
+    minSigma: sanitizeOptionalRatio(overrides.minSigma),
+    minKelly: sanitizeOptionalRatio(overrides.minKelly),
+    kellyMultiplier: sanitizeOptionalRatio(overrides.kellyMultiplier),
+    maxPositionFraction: sanitizeOptionalRatio(overrides.maxPositionFraction),
+    dailyLossLimitPct: sanitizeOptionalRatio(overrides.dailyLossLimitPct),
+    useAuraSentiment: sanitizeOptionalBoolean(overrides.useAuraSentiment),
     updatedAt: now,
   };
+
+  const params = [
+    agentId,
+    normalized.cadenceMinutes, normalized.cooldownMinutes,
+    normalized.maxTradesPerDay, normalized.maxBetUsdc,
+    normalized.minSigma, normalized.minKelly, normalized.kellyMultiplier,
+    normalized.maxPositionFraction, normalized.dailyLossLimitPct,
+    normalized.useAuraSentiment == null ? null : normalized.useAuraSentiment ? 1 : 0,
+    normalized.updatedAt,
+  ];
 
   const db = getDb();
   db.prepare(
     `INSERT INTO autopilot_policies (
-       agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?)
+       agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
+       min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
+       daily_loss_limit_pct, use_aura_sentiment, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(agent_id) DO UPDATE SET
        cadence_minutes = excluded.cadence_minutes,
        cooldown_minutes = excluded.cooldown_minutes,
        max_trades_per_day = excluded.max_trades_per_day,
        max_bet_usdc = excluded.max_bet_usdc,
+       min_sigma = excluded.min_sigma,
+       min_kelly = excluded.min_kelly,
+       kelly_multiplier = excluded.kelly_multiplier,
+       max_position_fraction = excluded.max_position_fraction,
+       daily_loss_limit_pct = excluded.daily_loss_limit_pct,
+       use_aura_sentiment = excluded.use_aura_sentiment,
        updated_at = excluded.updated_at`
-  ).run(
-    agentId,
-    normalized.cadenceMinutes,
-    normalized.cooldownMinutes,
-    normalized.maxTradesPerDay,
-    normalized.maxBetUsdc,
-    normalized.updatedAt
-  );
+  ).run(...params);
 
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO autopilot_policies (
-         agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6)
+         agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
+         min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
+         daily_loss_limit_pct, use_aura_sentiment, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (agent_id) DO UPDATE SET
          cadence_minutes = EXCLUDED.cadence_minutes,
          cooldown_minutes = EXCLUDED.cooldown_minutes,
          max_trades_per_day = EXCLUDED.max_trades_per_day,
          max_bet_usdc = EXCLUDED.max_bet_usdc,
+         min_sigma = EXCLUDED.min_sigma,
+         min_kelly = EXCLUDED.min_kelly,
+         kelly_multiplier = EXCLUDED.kelly_multiplier,
+         max_position_fraction = EXCLUDED.max_position_fraction,
+         daily_loss_limit_pct = EXCLUDED.daily_loss_limit_pct,
+         use_aura_sentiment = EXCLUDED.use_aura_sentiment,
          updated_at = EXCLUDED.updated_at`,
-      [
-        agentId,
-        normalized.cadenceMinutes,
-        normalized.cooldownMinutes,
-        normalized.maxTradesPerDay,
-        normalized.maxBetUsdc,
-        normalized.updatedAt,
-      ]
+      params
     );
   }
 
   return normalized;
+}
+
+/** Persist the full derived policy at agent creation time */
+export async function persistFullDerivedPolicy(
+  agentId: string,
+  attrs: AutopilotTraitInput
+): Promise<AutopilotPolicyEnvelope> {
+  const derived = deriveAutopilotPolicy(attrs);
+  const validated = validatePolicyBounds(derived);
+
+  await upsertAutopilotPolicyOverrides(agentId, {
+    cadenceMinutes: validated.cadenceMinutes,
+    cooldownMinutes: validated.cooldownMinutes,
+    maxTradesPerDay: validated.maxTradesPerDay,
+    maxBetUsdc: validated.maxBetUsdc,
+    minSigma: validated.minSigma,
+    minKelly: validated.minKelly,
+    kellyMultiplier: validated.kellyMultiplier,
+    maxPositionFraction: validated.maxPositionFraction,
+    dailyLossLimitPct: validated.dailyLossLimitPct,
+    useAuraSentiment: validated.useAuraSentiment,
+  });
+
+  return getAutopilotPolicyEnvelope(attrs);
+}
+
+/** Reset policy to the recommended baseline derived from agent traits */
+export async function resetAutopilotPolicyToBaseline(
+  agentId: string,
+  attrs: AutopilotTraitInput
+): Promise<AutopilotPolicyEnvelope> {
+  return persistFullDerivedPolicy(agentId, attrs);
 }
 
 export async function insertAutopilotDecision(input: AutopilotDecisionInput): Promise<void> {

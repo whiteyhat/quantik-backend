@@ -3,7 +3,8 @@
 import { getDb } from "../db/schema";
 import { v4 as uuid } from "uuid";
 
-const GAMMA_API = "https://gamma-api.polymarket.com";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+const GAMMA_API = GAMMA_API_BASE;
 
 interface GammaMarket {
   condition_id: string;
@@ -63,7 +64,7 @@ export class ResolutionMonitor {
 
     for (const slug of slugs) {
       try {
-        const res = await fetch(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`);
+        const res = await fetchWithRetry(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`, { signal: AbortSignal.timeout(10000) });
         if (!res.ok) continue;
 
         const markets = (await res.json()) as GammaMarket[];

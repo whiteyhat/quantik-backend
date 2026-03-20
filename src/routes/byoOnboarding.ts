@@ -51,6 +51,7 @@ interface AgentSummary {
   wallet_address: string | null;
   api_key_prefix: string | null;
   connection_status: string | null;
+  policy_setup_completed_at: number | null;
 }
 
 interface ProvisionedByoAgent {
@@ -384,7 +385,7 @@ async function loadSessionByToken(tokenHash: string): Promise<ByoSessionRecord |
 function buildSqliteAgentSummary(agentId: string): AgentSummary | null {
   const db = getDb();
   const row = db.prepare(`
-    SELECT id, name, avatar_emoji, description, agent_url, endpoint_url, webhook_events, wallet_address, connection_status
+    SELECT id, name, avatar_emoji, description, agent_url, endpoint_url, webhook_events, wallet_address, connection_status, policy_setup_completed_at
     FROM agents
     WHERE id = ?
   `).get(agentId) as {
@@ -397,6 +398,7 @@ function buildSqliteAgentSummary(agentId: string): AgentSummary | null {
     webhook_events: string | null;
     wallet_address: string | null;
     connection_status: string | null;
+    policy_setup_completed_at: number | null;
   } | undefined;
 
   if (!row) return null;
@@ -424,8 +426,9 @@ async function buildPgAgentSummary(agentId: string): Promise<AgentSummary | null
     webhook_events: string | null;
     wallet_address: string | null;
     connection_status: string | null;
+    policy_setup_completed_at: number | null;
   }>(`
-    SELECT id, name, avatar_emoji, description, agent_url, endpoint_url, webhook_events, wallet_address, connection_status
+    SELECT id, name, avatar_emoji, description, agent_url, endpoint_url, webhook_events, wallet_address, connection_status, policy_setup_completed_at
     FROM agents
     WHERE id = $1
   `, [agentId]);
@@ -660,6 +663,7 @@ export async function provisionByoAgent(
       wallet_address: wallet.address,
       api_key_prefix: keyPrefix,
       connection_status: "pending",
+      policy_setup_completed_at: null,
     },
     walletEscrowCiphertext,
     credentials: {
@@ -825,6 +829,8 @@ router.get("/agents/byo/onboarding/:sessionId", async (req: Request, res: Respon
     connection_status: agent?.connection_status ?? null,
     wallet_download_ready: Boolean(session.encrypted_wallet_bundle),
     wallet_downloaded_at: session.wallet_downloaded_at,
+    policy_setup_completed: Boolean(agent?.policy_setup_completed_at),
+    policy_setup_completed_at: agent?.policy_setup_completed_at ?? null,
     last_error: session.last_error,
   });
 });
@@ -851,11 +857,18 @@ router.get("/agents/byo/claim/:claimToken", async (req: Request, res: Response) 
     method: "POST",
     required_fields: ["name", "agent_url"],
     optional_fields: ["description", "endpoint_url", "webhook_events"],
-    instructions: "POST your identity payload to this same URL. Include your public agent URL. Quantik will return your runtime credentials in the response, and the owner will finalize webhook delivery in the dashboard before activation.",
+    instructions: "POST your identity payload to this same URL. Include your public agent URL. Quantik will return your runtime credentials in the response. IMPORTANT: After claiming, you must complete the trading policy setup by asking the user 7 simple questions — call GET /get_policy_setup to retrieve them, then POST /submit_policy_setup with the answers. The owner will finalize webhook delivery in the dashboard before activation.",
     runtime_urls: {
       skill_manifest_url: `${getBaseUrl(req)}/api/skill.md`,
       skill_json_url: `${getBaseUrl(req)}/api/skill.json`,
     },
+    post_claim_steps: [
+      "1. Claim credentials by POSTing identity to this URL",
+      "2. Call GET /get_policy_setup to retrieve the 7 trading preference questions",
+      "3. Ask the user each question in a friendly, non-technical way",
+      "4. Call POST /submit_policy_setup with all 7 answers to configure autopilot",
+      "5. Owner activates the agent from the Quantik dashboard",
+    ],
   });
 });
 
@@ -951,6 +964,13 @@ router.post("/agents/byo/claim/:claimToken", async (req: Request, res: Response)
       success: true,
       agent: provisioned.agent,
       credentials: provisioned.credentials,
+      policy_setup: {
+        required: true,
+        completed: false,
+        get_url: `${getBaseUrl(req)}/api/v1/tools/get_policy_setup`,
+        submit_url: `${getBaseUrl(req)}/api/v1/tools/submit_policy_setup`,
+        instructions: "IMPORTANT: Before autopilot trading can begin, you must ask the user 7 simple questions about their risk tolerance and trading preferences. Call GET /get_policy_setup to retrieve the questions, then ask the user each one in a friendly, conversational tone. Once all 7 are answered, call POST /submit_policy_setup with the answers. If the user tries to skip, remind them that Quantik needs these answers to configure how the agent trades on their behalf.",
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to provision BYO agent";

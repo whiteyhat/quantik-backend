@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 const router = Router();
 
@@ -71,8 +72,8 @@ async function writeCache(key: string, data: unknown[]): Promise<void> {
 
 // ── Gamma API fetch ────────────────────────────────────────────
 
-const GAMMA_MARKETS_BASE = "https://gamma-api.polymarket.com/markets";
-const GAMMA_EVENTS_BASE  = "https://gamma-api.polymarket.com/events";
+const GAMMA_MARKETS_BASE = `${GAMMA_API_BASE}/markets`;
+const GAMMA_EVENTS_BASE  = `${GAMMA_API_BASE}/events`;
 
 // Maps our category keys → tag slugs used in the Gamma events API.
 // A single category can match multiple slugs (OR logic).
@@ -153,7 +154,7 @@ async function fetchGammaMarkets(
     });
 
     const url = `${GAMMA_EVENTS_BASE}?${params.toString()}`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       headers: { "Accept": "application/json" },
       signal: AbortSignal.timeout(15000),
     });
@@ -304,8 +305,8 @@ router.get("/trending", async (_req: Request, res: Response) => {
 
   try {
     const url =
-      "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=20";
-    const apiRes = await fetch(url, {
+      `${GAMMA_MARKETS_BASE}?active=true&closed=false&order=volume24hr&ascending=false&limit=20`;
+    const apiRes = await fetchWithRetry(url, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(10000),
     });
@@ -421,13 +422,13 @@ router.get("/:slug", async (req: Request, res: Response) => {
   try {
     // Gamma bulk endpoint with slug filter is unreliable — search in active markets list
     const urls = [
-      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}&limit=1`,
-      `https://gamma-api.polymarket.com/markets?active=true&limit=100&order=volume24hr&ascending=false`,
+      `${GAMMA_MARKETS_BASE}?slug=${encodeURIComponent(slug)}&limit=1`,
+      `${GAMMA_MARKETS_BASE}?active=true&limit=100&order=volume24hr&ascending=false`,
     ];
     let raw: Record<string, unknown> | null = null;
 
     for (const url of urls) {
-      const r = await fetch(url, {
+      const r = await fetchWithRetry(url, {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(8000),
       });
@@ -536,8 +537,8 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
 
   // 3) Final fallback: synthetic data anchored to actual market price from Gamma
   try {
-    const gammaSlugRes = await fetch(
-      `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(tokenId)}&active=true&limit=1`,
+    const gammaSlugRes = await fetchWithRetry(
+      `${GAMMA_MARKETS_BASE}?slug=${encodeURIComponent(tokenId)}&active=true&limit=1`,
       { signal: AbortSignal.timeout(4000) }
     );
     if (gammaSlugRes.ok) {

@@ -17,6 +17,9 @@ import {
   getAutopilotPolicyEnvelope,
   listAutopilotDecisions,
   upsertAutopilotPolicyOverrides,
+  persistFullDerivedPolicy,
+  resetAutopilotPolicyToBaseline,
+  validatePolicyBounds,
 } from "../services/autopilotPolicy";
 import { loadAgentWalletContext } from "../utils/agentKey";
 import {
@@ -856,7 +859,7 @@ router.post("/agents", async (req: Request, res: Response) => {
       }
     }
 
-    const autopilotPolicy = await getAutopilotPolicyEnvelope({
+    const agentTraits = {
       agentId: id,
       personality: body.personality ?? "balanced",
       decision_style: body.decisionStyle ?? "analyst",
@@ -865,7 +868,9 @@ router.post("/agents", async (req: Request, res: Response) => {
       money_approach: body.moneyApproach ?? "smart_scaling",
       protection_mindset: body.protectionMindset ?? "flexible",
       market_sense: body.marketSense ?? "fixed_rules",
-    });
+    };
+
+    const autopilotPolicy = await persistFullDerivedPolicy(id, agentTraits);
 
     res.status(201).json({
       id,
@@ -1335,7 +1340,21 @@ router.patch("/agents/:id", async (req: Request, res: Response) => {
     );
   }
 
-  res.json({ ok: true, system_prompt: systemPrompt });
+  // Rebuild autopilot policy from updated traits
+  const agentIdStr = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agentTraits = {
+    agentId: agentIdStr,
+    personality: merged.personality,
+    decision_style: merged.decisionStyle,
+    trading_instinct: merged.tradingInstinct,
+    time_patience: merged.timePatience,
+    money_approach: merged.moneyApproach,
+    protection_mindset: merged.protectionMindset,
+    market_sense: merged.marketSense,
+  };
+  const autopilotPolicy = await persistFullDerivedPolicy(agentIdStr, agentTraits);
+
+  res.json({ ok: true, system_prompt: systemPrompt, autopilot_policy: autopilotPolicy });
 });
 
 // ── POST /api/v1/agents/:id/deploy — Activate agent ─────────
@@ -1552,6 +1571,12 @@ router.patch("/agents/:id/autopilot-policy", async (req: Request, res: Response)
     cooldownMinutes?: number | null;
     maxTradesPerDay?: number | null;
     maxBetUsdc?: number | null;
+    minSigma?: number | null;
+    minKelly?: number | null;
+    kellyMultiplier?: number | null;
+    maxPositionFraction?: number | null;
+    dailyLossLimitPct?: number | null;
+    useAuraSentiment?: boolean | null;
   };
 
   await upsertAutopilotPolicyOverrides(agentId, {
@@ -1559,6 +1584,12 @@ router.patch("/agents/:id/autopilot-policy", async (req: Request, res: Response)
     cooldownMinutes: body.cooldownMinutes ?? null,
     maxTradesPerDay: body.maxTradesPerDay ?? null,
     maxBetUsdc: body.maxBetUsdc ?? null,
+    minSigma: body.minSigma ?? null,
+    minKelly: body.minKelly ?? null,
+    kellyMultiplier: body.kellyMultiplier ?? null,
+    maxPositionFraction: body.maxPositionFraction ?? null,
+    dailyLossLimitPct: body.dailyLossLimitPct ?? null,
+    useAuraSentiment: body.useAuraSentiment ?? null,
   });
 
   res.json(
@@ -1573,6 +1604,32 @@ router.patch("/agents/:id/autopilot-policy", async (req: Request, res: Response)
       market_sense: agent.market_sense,
     })
   );
+});
+
+// Reset autopilot policy to recommended baseline derived from agent traits
+router.post("/agents/:id/autopilot-policy/reset", async (req: Request, res: Response) => {
+  const userId = await getRequiredUserId(req, res);
+  if (!userId) return;
+  const agentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const agent = await loadOwnedAgentContext(agentId, userId);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  const envelope = await resetAutopilotPolicyToBaseline(agentId, {
+    agentId,
+    personality: agent.personality,
+    decision_style: agent.decision_style,
+    trading_instinct: agent.trading_instinct,
+    time_patience: agent.time_patience,
+    money_approach: agent.money_approach,
+    protection_mindset: agent.protection_mindset,
+    market_sense: agent.market_sense,
+  });
+
+  res.json(envelope);
 });
 
 router.get("/agents/:id/autopilot-decisions", async (req: Request, res: Response) => {

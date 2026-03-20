@@ -29,10 +29,10 @@ router.get("/brier", (_req: Request, res: Response) => {
 });
 
 // ── GET /api/monitoring/attribution — P&L attribution by signal ──
-router.get("/attribution", (_req: Request, res: Response) => {
+router.get("/attribution", async (_req: Request, res: Response) => {
   try {
-    const attribution = attributionEngine.getAttributionBySignal();
-    const decay = attributionEngine.getAlphaDecayStatus();
+    const attribution = await attributionEngine.getAttributionBySignal();
+    const decay = await attributionEngine.getAlphaDecayStatus();
     res.json({ attribution, alphaDecay: decay });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -53,10 +53,10 @@ router.get("/calibration", (_req: Request, res: Response) => {
 });
 
 // ── GET /api/monitoring/drift — drift detection status ───────────
-router.get("/drift", (_req: Request, res: Response) => {
+router.get("/drift", async (_req: Request, res: Response) => {
   try {
-    const microstructure = driftDetection.checkMicrostructureDrift();
-    const concept = driftDetection.checkConceptDrift();
+    const microstructure = await driftDetection.checkMicrostructureDrift();
+    const concept = await driftDetection.checkConceptDrift();
     res.json({ microstructure, concept, lastChecked: Date.now() });
   } catch (err) {
     res.status(500).json({ error: String(err) });

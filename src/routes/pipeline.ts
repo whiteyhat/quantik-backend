@@ -24,6 +24,7 @@ import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 const router = Router();
 
@@ -588,8 +589,8 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   } catch {
     // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
     try {
-      const gammaRes = await fetch(
-        `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(effectiveSlug)}`,
+      const gammaRes = await fetchWithRetry(
+        `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(effectiveSlug)}`,
         { signal: AbortSignal.timeout(8000) }
       );
       if (gammaRes.ok) {

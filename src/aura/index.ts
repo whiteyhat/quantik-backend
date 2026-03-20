@@ -9,6 +9,7 @@ import { fetchCryptoPanic, scoreCryptoPanic } from "./cryptopanic";
 import { fetchFred, scoreFredMacro } from "./fred";
 import { fetchBls, scoreBlsMacro } from "./bls";
 import { fetchMetaculusSentiment, scoreMetaculusCrowdTrend } from "./metaculus";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 export interface AuraResult {
   marketSlug: string;
@@ -75,7 +76,7 @@ const MARKET_CACHE_TTL = 10 * 60 * 1000;
 
 async function getMarketData(slug: string): Promise<{ yesProbability: number; volume24h: number }> {
   try {
-    const res = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(slug)}&order=volume24hr&limit=5`);
+    const res = await fetchWithRetry(`${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(slug)}&order=volume24hr&limit=5`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return { yesProbability: 0.5, volume24h: 0 };
     const data = await res.json() as { outcomePrices?: string; volume24hr?: number }[];
     if (!Array.isArray(data) || data.length === 0) return { yesProbability: 0.5, volume24h: 0 };
@@ -289,7 +290,7 @@ export async function runAura(market: { slug: string; question: string; category
       ]);
 
       if (older.length === 0) {
-        const gammaRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(market.slug)}&limit=1`);
+        const gammaRes = await fetchWithRetry(`${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(market.slug)}&limit=1`, { signal: AbortSignal.timeout(8000) });
         if (gammaRes.ok) {
           const data = await gammaRes.json() as any[];
           const m = Array.isArray(data) && data.length > 0 ? data[0] : null;

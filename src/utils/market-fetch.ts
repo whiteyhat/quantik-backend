@@ -1,5 +1,45 @@
 // Shared utility for agent re-run endpoints
 
+export const GAMMA_API_BASE = "https://gamma-api.polymarket.com";
+
+/** Transient error codes that warrant a retry */
+const RETRYABLE_CODES = new Set(["ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "UND_ERR_CONNECT_TIMEOUT"]);
+
+function isTransientError(err: unknown): boolean {
+  if (err && typeof err === "object") {
+    const cause = (err as any).cause;
+    if (cause && typeof cause === "object" && RETRYABLE_CODES.has((cause as any).code)) return true;
+    if (RETRYABLE_CODES.has((err as any).code)) return true;
+  }
+  return false;
+}
+
+/**
+ * Fetch with automatic retry on transient network errors (DNS failures, timeouts, resets).
+ * Uses exponential backoff: 1s, 2s, 4s by default.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+  maxRetries = 3
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries && isTransientError(err)) {
+        const delay = 1000 * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 export interface MarketData {
   slug: string;
   question: string;
@@ -38,9 +78,9 @@ export function parseClobTokenIds(raw: unknown): { noTokenId: string | null; yes
 }
 
 export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
-  const res = await fetch(
-    `https://gamma-api.polymarket.com/markets?slug=${slug}`,
-    { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5000) }
+  const res = await fetchWithRetry(
+    `${GAMMA_API_BASE}/markets?slug=${slug}`,
+    { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10000) }
   );
   if (!res.ok) throw new Error(`Gamma API ${res.status}`);
   const raw: unknown = await res.json();
@@ -96,9 +136,9 @@ export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
  */
 export async function resolvePolymarketUrl(marketSlug: string): Promise<string> {
   try {
-    const res = await fetch(
-      `https://gamma-api.polymarket.com/markets?slug=${marketSlug}`,
-      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(3000) }
+    const res = await fetchWithRetry(
+      `${GAMMA_API_BASE}/markets?slug=${marketSlug}`,
+      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5000) }
     );
     if (res.ok) {
       const raw: unknown = await res.json();

@@ -11,6 +11,7 @@ import { emitAgentAlert, emitAutopilotStatus } from "../infra/socket";
 import { loadAgentWalletContext } from "../utils/agentKey";
 import { executeManagedTrade, type ManagedTradeDirection } from "../services/tradeExecution";
 import { getAutopilotPolicyEnvelope, insertAutopilotDecision } from "../services/autopilotPolicy";
+import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -552,7 +553,7 @@ export class MarketScanner {
     // Always use Gamma API (polymarket-cli returns oldest markets by ID, not active ones)
     console.log("[Scanner] Fetching from Gamma API...");
     // Sort by liquidity to favour political/geopolitical markets over daily sports
-    const res = await fetch(`https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=200&order=liquidity&ascending=false`);
+    const res = await fetchWithRetry(`${GAMMA_API_BASE}/markets?closed=false&active=true&limit=200&order=liquidity&ascending=false`, { signal: AbortSignal.timeout(15000) });
     if (!res.ok) throw new Error(`Gamma API error: ${res.status}`);
     const data = await res.json() as unknown[];
     rawMarkets = Array.isArray(data) ? data : [];

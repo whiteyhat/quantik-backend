@@ -47,6 +47,8 @@ const TOOL_ROUTE_META: Record<
   get_health_score: { method: "GET", scope: "read", rateLimitBucket: "read" },
   get_polymarket_status: { method: "GET", scope: "read", rateLimitBucket: "read" },
   run_polymarket_approvals: { method: "POST", scope: "config", rateLimitBucket: "config" },
+  get_policy_setup: { method: "GET", scope: "config", rateLimitBucket: "config" },
+  submit_policy_setup: { method: "POST", scope: "config", rateLimitBucket: "config" },
 };
 
 export const BYO_RATE_LIMITS = {
