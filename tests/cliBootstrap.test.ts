@@ -51,7 +51,7 @@ describe("Polymarket CLI bootstrap", () => {
       runCli(["wallet", "balance"]),
     ]);
 
-    expect(execMock.mock.calls.filter(([cmd]: [string]) => cmd.includes("install.sh"))).toHaveLength(1);
+    expect(execMock.mock.calls.filter(([cmd]: [string, ...unknown[]]) => cmd.includes("install.sh"))).toHaveLength(1);
     expect(execFileMock).toHaveBeenCalledTimes(2);
     expect(execFileMock.mock.calls[0][0]).toBe("/tmp/quantik-home/.local/bin/polymarket");
   });
