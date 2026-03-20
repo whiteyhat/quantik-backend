@@ -223,9 +223,10 @@ function computeAgentEntry(
   const settledExecutions = validExecutions.filter((execution) => execution.pnl != null);
 
   let selectedRealizedPnl = 0;
-  let selectedUnrealizedPnl = 0;
   let lifetimeRealizedPnl = 0;
-  let lifetimeUnrealizedPnl = 0;
+  // Open positions are live — their unrealized PnL reflects current value
+  // regardless of when the position was opened, so a single accumulator suffices.
+  let unrealizedPnl = 0;
 
   for (const execution of settledExecutions) {
     lifetimeRealizedPnl += Number(execution.pnl ?? 0);
@@ -240,17 +241,13 @@ function computeAgentEntry(
     const stale = isScannerPriceStale(execution.slug, now, scannerTimestamps, stalenessThresholdMs);
     const currentYesPrice = stale ? entryPrice : (latestPrices.get(execution.slug) ?? entryPrice);
     const metrics = calculateOpenExecutionMetrics(execution, currentYesPrice, scannerDirection);
-    lifetimeUnrealizedPnl += metrics.pnl;
-
-    // Open positions are live — their unrealized PnL reflects current value,
-    // so always include them regardless of when the position was opened.
-    selectedUnrealizedPnl += metrics.pnl;
+    unrealizedPnl += metrics.pnl;
   }
 
-  const allTimePnl = lifetimeRealizedPnl + lifetimeUnrealizedPnl;
+  const allTimePnl = lifetimeRealizedPnl + unrealizedPnl;
   const selectedPnl = window === "all"
     ? allTimePnl
-    : selectedRealizedPnl + selectedUnrealizedPnl;
+    : selectedRealizedPnl + unrealizedPnl;
 
   const bestTrade = settledExecutions
     .filter((execution) => withinWindow(settlementTime(execution), windowStart, window))
@@ -310,7 +307,7 @@ function computeAgentEntry(
       polymarketReady: normalizeBoolean(agent.polymarket_ready),
       selectedPnl: round2(selectedPnl),
       selectedRealizedPnl: round2(window === "all" ? lifetimeRealizedPnl : selectedRealizedPnl),
-      selectedUnrealizedPnl: round2(window === "all" ? lifetimeUnrealizedPnl : selectedUnrealizedPnl),
+      selectedUnrealizedPnl: round2(unrealizedPnl),
       allTimePnl: round2(allTimePnl),
       totalTrades: validExecutions.length,
       winRate: round2(winRate * 100),
