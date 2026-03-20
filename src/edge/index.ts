@@ -1,10 +1,12 @@
 // src/edge/index.ts - Edge Calibration Agent
-import { execSync } from "child_process";
 import { getDb } from "../db/schema";
 import { getFeeConfig } from "./fees";
 import { detectArbitrage, ArbOpportunity } from "./arb";
 import { computeCorrelationPenalty } from "./correlation";
 import { kellyMultiplier } from "./kelly";
+import { getUsdcBalance } from "../utils/balances";
+import { getClobBalance } from "../utils/balances";
+import { tryLoadActiveAgentContext } from "../utils/agentKey";
 
 export interface EdgeResult {
   marketSlug: string;
@@ -28,38 +30,34 @@ export interface EdgeResult {
 }
 
 /** Fetch portfolio USDC balance.
- * Priority: (1) polymarket-cli wallet balance, (2) env var PORTFOLIO_USDC_FALLBACK.
- * Never silently falls back to $1000 — always logs a warning.
+ * Priority: (1) PORTFOLIO_USDC env override, (2) on-chain RPC + CLOB balance,
+ * (3) PORTFOLIO_USDC_FALLBACK env, (4) hardcoded $1000.
  */
-function fetchPortfolioUsdc(slug: string): { value: number; source: string } {
-  // Priority 0: PORTFOLIO_USDC env var (set via Railway)
+async function fetchPortfolioUsdc(): Promise<{ value: number; source: string }> {
+  // Priority 0: explicit env override (set via Railway)
   const envValue = parseFloat(process.env.PORTFOLIO_USDC ?? "");
   if (!isNaN(envValue) && envValue > 0) {
     return { value: envValue, source: "env_var" };
   }
 
-  // Try polymarket-cli with 3s timeout (only if binary path is set and exists)
-  const cliPath = process.env.POLYMARKET_CLI;
-  if (cliPath) {
-    try {
-      const output = execSync(`"${cliPath}" wallet balance`, {
-        timeout: 3000,
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"], // suppress stderr — avoids shell error spam
-      });
-      const match = output.match(/(?:USDC|Balance)[:\s]+([\d.]+)/i);
-      if (match) {
-        const value = parseFloat(match[1]);
-        if (!isNaN(value) && value > 0) {
-          return { value, source: "cli" };
-        }
+  // Priority 1: live on-chain USDC + CLOB collateral via Polygon RPC
+  try {
+    const ctx = await tryLoadActiveAgentContext();
+    if (ctx) {
+      const [onChain, clob] = await Promise.all([
+        getUsdcBalance(ctx.walletAddress),
+        getClobBalance(ctx.privateKey).catch(() => 0),
+      ]);
+      const total = onChain + clob;
+      if (total > 0) {
+        return { value: total, source: "rpc_live" };
       }
-    } catch (_) {
-      // CLI unavailable or binary not found — continue to fallback
     }
+  } catch {
+    // RPC/DB unavailable — continue to fallback
   }
 
-  // Fallback: env var
+  // Priority 2: explicit fallback env var
   const envVal = process.env.PORTFOLIO_USDC_FALLBACK;
   if (envVal) {
     const value = parseFloat(envVal);
@@ -69,8 +67,8 @@ function fetchPortfolioUsdc(slug: string): { value: number; source: string } {
     }
   }
 
-  // Last resort: $1000 — but log loudly
-  console.warn("[Edge] portfolio_usdc: no live source available. Using $1000 default. Set PORTFOLIO_USDC_FALLBACK or ensure polymarket-cli is reachable.");
+  // Last resort
+  console.warn("[Edge] portfolio_usdc: no live source available. Using $1000 default. Set PORTFOLIO_USDC_FALLBACK or ensure agent wallet is funded.");
   return { value: 1000, source: "hardcoded_fallback" };
 }
 
@@ -122,7 +120,7 @@ export async function runEdge(market: any, oracleResult: any): Promise<EdgeResul
   }
 
   // ── Portfolio USDC ───────────────────────────────────────────────────────
-  const { value: portfolio_usdc, source: portfolio_source } = fetchPortfolioUsdc(slug);
+  const { value: portfolio_usdc, source: portfolio_source } = await fetchPortfolioUsdc();
 
   // Track data sources
   const data_sources: Record<string, string> = {

@@ -5,7 +5,7 @@ import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
 import { tradeRateLimit } from "../infra/rateLimit";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
-import { loadAgentWalletContext } from "../utils/agentKey";
+import { loadAgentWalletContext, loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { insertExecutionRecord } from "../utils/executions";
 import { executeManagedTrade } from "../services/tradeExecution";
 import { emitNotification } from "../infra/socket";
@@ -133,7 +133,7 @@ router.post("/execute", async (req: Request, res: Response) => {
       });
       return;
     }
-    const walletContext = linkedAgent ? await loadAgentWalletContext(linkedAgent.agentId).catch(() => null) : null;
+    const walletDiag = linkedAgent ? await loadAgentWalletContextWithDiag(linkedAgent.agentId) : { context: null, error: "No agent linked to user" };
     const tradeSlug = requestedSlug ?? requestedTokenId ?? "";
     const result = await executeManagedTrade({
       userId,
@@ -147,7 +147,8 @@ router.post("/execute", async (req: Request, res: Response) => {
       netEv: typeof body["netEv"] === "number" ? body["netEv"] : null,
       evGrade: typeof body["evGrade"] === "string" ? body["evGrade"] : null,
       pipelineRunId: typeof body["pipelineRunId"] === "string" ? body["pipelineRunId"] : null,
-      walletPrivateKey: walletContext?.privateKey ?? null,
+      walletPrivateKey: walletDiag.context?.privateKey ?? null,
+      walletError: walletDiag.error ?? undefined,
       emitUserId: getUserId(req),
     });
 
@@ -198,12 +199,12 @@ router.post("/cancel", async (req: Request, res: Response) => {
     }
     const userId = await getUserIdAsync(req);
     const linked = userId ? await loadLinkedAgentForUser(userId) : null;
-    const walletContext = linked ? await loadAgentWalletContext(linked.agentId).catch(() => null) : null;
-    if (!walletContext?.privateKey) {
-      res.status(400).json({ error: "No wallet configured." });
+    const walletDiag = linked ? await loadAgentWalletContextWithDiag(linked.agentId) : { context: null, error: "No agent linked to user" };
+    if (!walletDiag.context?.privateKey) {
+      res.status(400).json({ error: walletDiag.error ?? "No wallet configured." });
       return;
     }
-    const data = await runCliWithWallet(["clob", "cancel", String(orderId)], walletContext.privateKey);
+    const data = await runCliWithWallet(["clob", "cancel", String(orderId)], walletDiag.context.privateKey);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);
@@ -215,12 +216,12 @@ router.post("/cancel-all", async (req: Request, res: Response) => {
   try {
     const userId = await getUserIdAsync(req);
     const linked = userId ? await loadLinkedAgentForUser(userId) : null;
-    const walletContext = linked ? await loadAgentWalletContext(linked.agentId).catch(() => null) : null;
-    if (!walletContext?.privateKey) {
-      res.status(400).json({ error: "No wallet configured." });
+    const walletDiag = linked ? await loadAgentWalletContextWithDiag(linked.agentId) : { context: null, error: "No agent linked to user" };
+    if (!walletDiag.context?.privateKey) {
+      res.status(400).json({ error: walletDiag.error ?? "No wallet configured." });
       return;
     }
-    const data = await runCliWithWallet(["clob", "cancel-all"], walletContext.privateKey);
+    const data = await runCliWithWallet(["clob", "cancel-all"], walletDiag.context.privateKey);
     res.json(data);
   } catch (err: unknown) {
     handleCliError(res, err);

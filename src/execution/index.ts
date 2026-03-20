@@ -32,7 +32,6 @@ const fillMonitor = new FillMonitor();
 
 
 const PAPER_TRADING = process.env.PAPER_TRADING !== "false"; // default true
-const MAX_BET_USDC = Number(process.env.MAX_BET_USDC ?? 10);  // default $10 hard cap
 const DRY_RUN = process.env.DRY_RUN === "true";               // log CLI cmd, no exec
 
 // ── Rate limit: max 1 execution per market per 60 s ─────────────
@@ -61,12 +60,10 @@ export async function execute(
     };
   }
 
-  // MAX_BET_USDC guard
-  const rawSize = riskApproval.adjustedSize;
-  const size = Math.min(rawSize, MAX_BET_USDC);
-  if (rawSize > MAX_BET_USDC) {
-    console.warn("[ExecutionEngine] Size capped from $" + rawSize + " to MAX_BET_USDC=$" + MAX_BET_USDC);
-  }
+  // Size is already validated upstream:
+  //   - Scanner path: capped by agent's autopilot policy (maxBetUsdc from DB)
+  //   - Pipeline path: validated by approvePosition() risk checks
+  const size = riskApproval.adjustedSize;
 
   if (PAPER_TRADING) {
     const order = paperEngine.placePaperOrder(signal.slug, signal.direction, size);

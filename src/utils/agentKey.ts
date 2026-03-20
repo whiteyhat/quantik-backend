@@ -108,14 +108,19 @@ export async function loadAgentWalletContext(agentId: string): Promise<AgentWall
     throw new Error("Agent has no wallet address.");
   }
   if (!row.encrypted_private_key) {
-    throw new Error("Agent has no encrypted private key.");
+    throw new Error("Agent has no encrypted private key. Please re-assign your wallet in Manage Agent.");
   }
 
-  return {
-    agentId: row.id,
-    walletAddress: row.wallet_address,
-    privateKey: decrypt(row.encrypted_private_key),
-  };
+  try {
+    return {
+      agentId: row.id,
+      walletAddress: row.wallet_address,
+      privateKey: decrypt(row.encrypted_private_key),
+    };
+  } catch (decryptErr) {
+    console.error(`[agentKey] Failed to decrypt private key for agent ${agentId}:`, decryptErr instanceof Error ? decryptErr.message : decryptErr);
+    throw new Error("Wallet key decryption failed. The server encryption key may have changed. Please re-assign your wallet in Manage Agent.");
+  }
 }
 
 export async function tryLoadAgentWalletContext(agentId: string): Promise<AgentWalletContext | null> {
@@ -123,5 +128,23 @@ export async function tryLoadAgentWalletContext(agentId: string): Promise<AgentW
     return await loadAgentWalletContext(agentId);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Diagnostic version — returns { context, error } instead of throwing.
+ * Use when you need to surface the actual failure reason to the user.
+ */
+export async function loadAgentWalletContextWithDiag(agentId: string): Promise<{
+  context: AgentWalletContext | null;
+  error: string | null;
+}> {
+  try {
+    const context = await loadAgentWalletContext(agentId);
+    return { context, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown wallet error";
+    console.error(`[agentKey] loadAgentWalletContext failed for agent ${agentId}: ${msg}`);
+    return { context: null, error: msg };
   }
 }

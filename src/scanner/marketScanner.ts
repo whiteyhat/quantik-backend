@@ -8,7 +8,7 @@ import { isPanicModeEnabled } from "../risk/state";
 import { loadAutopilotExecutionContexts, type AutopilotExecutionContext } from "../utils/linkedAgent";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { emitAgentAlert, emitAutopilotStatus } from "../infra/socket";
-import { loadAgentWalletContext } from "../utils/agentKey";
+import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { executeManagedTrade, type ManagedTradeDirection } from "../services/tradeExecution";
 import { getAutopilotPolicyEnvelope, insertAutopilotDecision } from "../services/autopilotPolicy";
 import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
@@ -859,8 +859,11 @@ export class MarketScanner {
         timestamp: Date.now(),
       });
 
-      const walletContext = await loadAgentWalletContext(executionContext.agentId).catch(() => null);
-      const funding = await getWalletFundingSnapshot(executionContext.walletAddress, walletContext?.privateKey);
+      const walletDiag = await loadAgentWalletContextWithDiag(executionContext.agentId);
+      if (walletDiag.error) {
+        console.error(`[autoExecute] Wallet error for agent ${executionContext.agentId}: ${walletDiag.error}`);
+      }
+      const funding = await getWalletFundingSnapshot(executionContext.walletAddress, walletDiag.context?.privateKey);
       if (!funding.ready) {
         await logAutopilotDecision(
           executionContext,
@@ -1072,7 +1075,8 @@ export class MarketScanner {
             : (result.yesPrice == null && result.probability == null ? null : 1 - (result.yesPrice ?? result.probability ?? 0.5)),
           netEv: result.kellyFraction * result.probability,
           evGrade: signalMetrics.sigmaConfidence >= 0.7 ? "A" : signalMetrics.sigmaConfidence >= 0.5 ? "B" : "C",
-          walletPrivateKey: walletContext?.privateKey ?? null,
+          walletPrivateKey: walletDiag.context?.privateKey ?? null,
+          walletError: walletDiag.error ?? undefined,
           emitUserId: executionContext.userId,
         });
 

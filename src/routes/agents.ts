@@ -21,7 +21,7 @@ import {
   resetAutopilotPolicyToBaseline,
   validatePolicyBounds,
 } from "../services/autopilotPolicy";
-import { loadAgentWalletContext } from "../utils/agentKey";
+import { loadAgentWalletContext, loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import {
   AUTOPILOT_POL_REQUIREMENT,
   AUTOPILOT_USDC_REQUIREMENT,
@@ -498,10 +498,11 @@ function determineAutopilotBlocker(params: {
   agent: OwnedAgentContext;
   funding: Awaited<ReturnType<typeof getWalletFundingSnapshot>>;
   lastGlobalScanAt: number | null;
+  walletKeyError?: string | null;
 }): "none" | "no_wallet" | "funding_required" | "polymarket_prep_required" | "scanner_idle" | "autopilot_off" {
-  const { agent, funding, lastGlobalScanAt } = params;
+  const { agent, funding, lastGlobalScanAt, walletKeyError } = params;
 
-  if (!agent.wallet_address) return "no_wallet";
+  if (!agent.wallet_address || walletKeyError) return "no_wallet";
   if (funding.fundingStatus !== "ready") return "funding_required";
   if (!normalizeAutopilotEnabled(agent.polymarket_ready)) return "polymarket_prep_required";
   if (!normalizeAutopilotEnabled(agent.autopilot_enabled)) return "autopilot_off";
@@ -1461,12 +1462,12 @@ router.get("/agents/:id/autopilot-status", async (req: Request, res: Response) =
     return;
   }
 
-  const [walletContext, settings, activity] = await Promise.all([
-    loadAgentWalletContext(agentId).catch(() => null),
+  const [walletDiag, settings, activity] = await Promise.all([
+    loadAgentWalletContextWithDiag(agentId),
     getSettings(),
     loadAutopilotActivity(agentId),
   ]);
-  const funding = await getWalletFundingSnapshot(agent.wallet_address, walletContext?.privateKey);
+  const funding = await getWalletFundingSnapshot(agent.wallet_address, walletDiag.context?.privateKey);
   const scanner = getScannerStatus();
   const lastGlobalScanAt = scanner.lastScan > 0 ? scanner.lastScan : null;
 
@@ -1481,8 +1482,9 @@ router.get("/agents/:id/autopilot-status", async (req: Request, res: Response) =
       clobBalance: funding.clobBalance,
       pol: funding.pol,
       fundingStatus: funding.fundingStatus,
-      fundingMessage: funding.fundingMessage,
+      fundingMessage: walletDiag.error ?? funding.fundingMessage,
       missingItems: buildPolymarketPrepMissingItems(agent, funding),
+      walletError: walletDiag.error ?? null,
     },
     scheduler: {
       scannerRunning: scanner.running,
@@ -1501,6 +1503,7 @@ router.get("/agents/:id/autopilot-status", async (req: Request, res: Response) =
       agent,
       funding,
       lastGlobalScanAt,
+      walletKeyError: walletDiag.error,
     }),
   });
 });

@@ -498,12 +498,57 @@ function generateSyntheticPriceHistory(basePrice = 0.5, points = 30): { t: numbe
 }
 
 // ── GET /api/markets/:tokenId/price-history ────────────────────
+
+/** CLOB token IDs are long numeric strings; slugs contain lowercase letters and dashes */
+function looksLikeSlug(value: string): boolean {
+  return /[a-z]/.test(value) && value.includes("-");
+}
+
+/** Resolve a slug to a CLOB token ID via the Gamma API */
+async function resolveSlugToTokenId(slug: string): Promise<string | null> {
+  try {
+    const res = await fetchWithRetry(
+      `${GAMMA_MARKETS_BASE}?slug=${encodeURIComponent(slug)}&active=true&limit=1`,
+      { signal: AbortSignal.timeout(4000) }
+    );
+    if (!res.ok) return null;
+    const markets = (await res.json()) as any[];
+    if (!markets?.[0]) return null;
+    const tokens = parseClobTokenIds(markets[0].clobTokenIds);
+    return tokens.noTokenId || tokens.yesTokenId || null;
+  } catch {
+    return null;
+  }
+}
+
 router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
-  const tokenId = String(req.params["tokenId"] ?? "");
+  let tokenId = String(req.params["tokenId"] ?? "");
   const interval =
     typeof req.query.interval === "string" ? req.query.interval : undefined;
   const fidelity =
     typeof req.query.fidelity === "string" ? req.query.fidelity : undefined;
+
+  // If a slug was passed instead of a token ID, resolve it first
+  let lastTradePrice: number | null = null;
+  if (looksLikeSlug(tokenId)) {
+    try {
+      const res = await fetchWithRetry(
+        `${GAMMA_MARKETS_BASE}?slug=${encodeURIComponent(tokenId)}&active=true&limit=1`,
+        { signal: AbortSignal.timeout(4000) }
+      );
+      if (res.ok) {
+        const markets = (await res.json()) as any[];
+        if (markets?.[0]) {
+          const tokens = parseClobTokenIds(markets[0].clobTokenIds);
+          const resolved = tokens.noTokenId || tokens.yesTokenId;
+          if (resolved) {
+            tokenId = resolved;
+          }
+          lastTradePrice = parseFloat(markets[0].lastTradePrice ?? "0");
+        }
+      }
+    } catch { /* slug resolution failed — continue with original value */ }
+  }
 
   // 1) Try CLI first — only use if it returns non-empty data
   try {
@@ -515,7 +560,7 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
     // CLI returned [] — fall through to CLOB REST API
   } catch {}
 
-  // 2) Try Gamma API for price history (tokenId is the condition ID or token ID)
+  // 2) Try CLOB REST API for price history
   try {
     // Map frontend intervals to CLOB API intervals
     const clobInterval = interval === "1h" ? "1h" : interval === "1w" ? "1w" : interval === "all" ? "max" : "1d";
@@ -535,7 +580,10 @@ router.get("/:tokenId/price-history", async (req: Request, res: Response) => {
     }
   } catch {}
 
-  // 3) Final fallback: synthetic data anchored to actual market price from Gamma
+  // 3) Final fallback: synthetic data anchored to actual market price
+  if (lastTradePrice && lastTradePrice > 0) {
+    return res.json(generateSyntheticPriceHistory(lastTradePrice, 30));
+  }
   try {
     const gammaSlugRes = await fetchWithRetry(
       `${GAMMA_MARKETS_BASE}?slug=${encodeURIComponent(tokenId)}&active=true&limit=1`,

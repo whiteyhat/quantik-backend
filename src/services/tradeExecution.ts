@@ -20,6 +20,7 @@ export interface ManagedTradeRequest {
   evGrade?: string | null;
   pipelineRunId?: string | null;
   walletPrivateKey?: string | null;
+  walletError?: string;
   emitUserId?: string | null;
 }
 
@@ -201,6 +202,8 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
   }
 
   if (!input.walletPrivateKey) {
+    const walletMsg = input.walletError
+      ?? "No wallet configured. Go to Manage Agent -> assign a wallet and run approvals.";
     return {
       ok: false,
       orderId: null,
@@ -211,8 +214,8 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       size: input.sizeUsdc,
       price: quotedPrice,
       slug: input.marketSlug,
-      rawData: { error: "No wallet configured. Go to Manage Agent -> assign a wallet and run approvals." },
-      error: "No wallet configured. Go to Manage Agent -> assign a wallet and run approvals.",
+      rawData: { error: walletMsg },
+      error: walletMsg,
     };
   }
 

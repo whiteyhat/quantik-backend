@@ -121,9 +121,7 @@ router.post("/dry-run", (req: Request, res: Response) => {
       return;
     }
 
-    const MAX_BET_USDC = Number(process.env.MAX_BET_USDC ?? 10);
-    const rawSize = Number(amount);
-    const size = Math.min(rawSize, MAX_BET_USDC);
+    const size = Number(amount);
     const PAPER_TRADING = process.env.PAPER_TRADING !== "false";
 
     const cliArgs = [
@@ -140,8 +138,6 @@ router.post("/dry-run", (req: Request, res: Response) => {
       slug: String(slug),
       side: dir,
       amount: size,
-      capped_from: rawSize > MAX_BET_USDC ? rawSize : undefined,
-      max_bet_usdc: MAX_BET_USDC,
       execution_mode: PAPER_TRADING ? "paper" : "live",
     });
   } catch (err) {
