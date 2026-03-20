@@ -10,8 +10,8 @@ import type { ArenaRankDelta } from "./arenaSnapshots";
 
 const TRADE_MILESTONES = [10, 50, 100, 500] as const;
 
-/** Previous badge counts per agent, cached between snapshot runs. */
-let previousBadgeCounts = new Map<string, number>();
+/** Previous badge IDs per agent, cached between snapshot runs. */
+let previousBadgeIds = new Map<string, Set<string>>();
 
 /** Previous trade counts per agent, cached between snapshot runs. */
 let previousTradeCounts = new Map<string, number>();
@@ -19,12 +19,12 @@ let previousTradeCounts = new Map<string, number>();
 /** Agent ID of the previous crown holder per window. */
 let previousCrown = new Map<ArenaWindow, string>();
 
-function findUserId(
-  agentId: string,
-  agents: ArenaAgentRecord[],
-): string | null {
-  const agent = agents.find((a) => a.id === agentId);
-  return agent?.user_id ?? null;
+function buildUserIdMap(agents: ArenaAgentRecord[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const agent of agents) {
+    if (agent.user_id) map.set(agent.id, agent.user_id);
+  }
+  return map;
 }
 
 export function emitArenaNotifications(
@@ -34,6 +34,7 @@ export function emitArenaNotifications(
   deltas: ArenaRankDelta[],
 ): void {
   const now = Date.now();
+  const userIdMap = buildUserIdMap(agents);
 
   // ── Crown change ──────────────────────────────────────────────────────
   const currentCrown = leaders[0]?.agentId ?? null;
@@ -54,7 +55,7 @@ export function emitArenaNotifications(
   // ── Rank movements into/out of top 10 ─────────────────────────────────
   for (const delta of deltas) {
     if (delta.rankChange === 0) continue;
-    const userId = findUserId(delta.agentId, agents);
+    const userId = userIdMap.get(delta.agentId);
     if (!userId) continue;
 
     const enteredTop10 = delta.currentRank <= 10 && (delta.previousRank == null || delta.previousRank > 10);
@@ -83,24 +84,26 @@ export function emitArenaNotifications(
 
   // ── New badges earned ─────────────────────────────────────────────────
   for (const entry of leaders) {
-    const prevCount = previousBadgeCounts.get(entry.agentId) ?? 0;
-    const currentCount = entry.badges.length;
-    if (currentCount > prevCount && prevCount > 0) {
-      const userId = findUserId(entry.agentId, agents);
-      if (userId) {
-        const newBadges = entry.badges.slice(prevCount);
-        const badgeNames = newBadges.map((b) => `${b.emoji} ${b.name}`).join(", ");
-        emitNotification(userId, {
-          id: `arena-badge-${entry.agentId}-${now}`,
-          level: "success",
-          title: "New Badge Earned!",
-          message: `${entry.name} earned: ${badgeNames}`,
-          category: "arena_badge",
-          timestamp: now,
-        });
+    const prevIds = previousBadgeIds.get(entry.agentId);
+    const currentIds = new Set(entry.badges.map((b) => b.id));
+    if (prevIds && prevIds.size > 0) {
+      const newBadges = entry.badges.filter((b) => !prevIds.has(b.id));
+      if (newBadges.length > 0) {
+        const userId = userIdMap.get(entry.agentId);
+        if (userId) {
+          const badgeNames = newBadges.map((b) => `${b.emoji} ${b.name}`).join(", ");
+          emitNotification(userId, {
+            id: `arena-badge-${entry.agentId}-${now}`,
+            level: "success",
+            title: "New Badge Earned!",
+            message: `${entry.name} earned: ${badgeNames}`,
+            category: "arena_badge",
+            timestamp: now,
+          });
+        }
       }
     }
-    previousBadgeCounts.set(entry.agentId, currentCount);
+    previousBadgeIds.set(entry.agentId, currentIds);
   }
 
   // ── Trade milestones ──────────────────────────────────────────────────
@@ -110,7 +113,7 @@ export function emitArenaNotifications(
 
     for (const milestone of TRADE_MILESTONES) {
       if (currentTrades >= milestone && prevTrades < milestone) {
-        const userId = findUserId(entry.agentId, agents);
+        const userId = userIdMap.get(entry.agentId);
         if (userId) {
           emitNotification(userId, {
             id: `arena-milestone-${entry.agentId}-${milestone}-${now}`,
@@ -130,7 +133,7 @@ export function emitArenaNotifications(
 
 /** Reset cached state (useful for tests). */
 export function resetArenaNotificationState(): void {
-  previousBadgeCounts = new Map();
+  previousBadgeIds = new Map();
   previousTradeCounts = new Map();
   previousCrown = new Map();
 }

@@ -715,7 +715,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     trackAgent("flux", () =>
       withAgentTimeout(
         "flux",
-        runFlux({ slug: marketInput.slug, token_id: marketInput.token_id }),
+        runFlux({ slug: marketInput.slug, token_id: marketInput.token_id, token_id_alt: token_id_no }),
         10000
       )
     ),

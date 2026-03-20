@@ -305,6 +305,21 @@ function normalizeAutopilotEnabled(value: number | boolean | null | undefined): 
   return value === true || value === 1;
 }
 
+async function decorateAgentResponse(agent: Record<string, unknown>, agentId: string): Promise<void> {
+  agent.autopilot_enabled = normalizeAutopilotEnabled(agent.autopilot_enabled as number | boolean | null | undefined);
+  agent.polymarket_ready = normalizeAutopilotEnabled(agent.polymarket_ready as number | boolean | null | undefined);
+
+  const [autopilotPolicy, walletDiag] = await Promise.all([
+    buildAutopilotPolicy(agent as unknown as AgentPolicySource),
+    loadAgentWalletContextWithDiag(agentId),
+  ]);
+
+  agent.autopilot_policy = autopilotPolicy;
+  agent.wallet_health = walletDiag.error
+    ? { ok: false as const, error: walletDiag.error }
+    : { ok: true as const, error: null };
+}
+
 type AgentExecutionSource = "autopilot" | "manual";
 
 interface AutopilotDecisionSummary {
@@ -1169,13 +1184,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
       }
     }
 
-    (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
-      (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
-    );
-    (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
-      (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
-    );
-    (agent as Record<string, unknown>).autopilot_policy = await buildAutopilotPolicy(agent as unknown as AgentPolicySource);
+    await decorateAgentResponse(agent as Record<string, unknown>, user.agent_id);
 
     res.json(agent);
   } else {
@@ -1205,13 +1214,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
       }
     }
 
-    (agent as Record<string, unknown>).autopilot_enabled = normalizeAutopilotEnabled(
-      (agent as Record<string, unknown>).autopilot_enabled as number | boolean | null | undefined
-    );
-    (agent as Record<string, unknown>).polymarket_ready = normalizeAutopilotEnabled(
-      (agent as Record<string, unknown>).polymarket_ready as number | boolean | null | undefined
-    );
-    (agent as Record<string, unknown>).autopilot_policy = await buildAutopilotPolicy(agent as unknown as AgentPolicySource);
+    await decorateAgentResponse(agent as Record<string, unknown>, user.agent_id);
 
     res.json(agent);
   }

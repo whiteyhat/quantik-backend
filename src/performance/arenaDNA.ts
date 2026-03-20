@@ -101,34 +101,34 @@ export function computeAgentDNA(
   executions: ArenaExecutionRecord[],
   arenaStats: ArenaDNAStats,
 ): AgentDNA {
-  const valid = executions.filter((e) => e.status !== "failed");
-  if (valid.length === 0) return EMPTY_DNA;
+  // Executions are pre-filtered (failed excluded) by buildArenaLeaderboard
+  if (executions.length === 0) return EMPTY_DNA;
 
   // Volume: trade count relative to the arena's most active agent
   const volume = arenaStats.maxTrades > 0
-    ? clamp01(valid.length / arenaStats.maxTrades)
+    ? clamp01(executions.length / arenaStats.maxTrades)
     : 0;
 
   // Diversity: unique markets traded, capped at 10
-  const uniqueMarkets = new Set(valid.map((e) => e.slug)).size;
+  const uniqueMarkets = new Set(executions.map((e) => e.slug)).size;
   const diversity = clamp01(uniqueMarkets / 10);
 
   // Speed: inverse of average close time (faster = higher)
-  const avgCloseHours = computeAvgCloseHours(valid);
+  const avgCloseHours = computeAvgCloseHours(executions);
   const speed = clamp01(1 - avgCloseHours / 168);
 
   // Streak: max historical consecutive-win run
-  const maxStreak = computeMaxStreak(valid);
+  const maxStreak = computeMaxStreak(executions);
   const streak = clamp01(maxStreak / 15);
 
   // Risk appetite: average position size relative to arena median
-  const avgAmount = valid.reduce((sum, e) => sum + e.amount, 0) / valid.length;
+  const avgAmount = executions.reduce((sum, e) => sum + e.amount, 0) / executions.length;
   const riskAppetite = arenaStats.medianAmount > 0
     ? clamp01(avgAmount / (2 * arenaStats.medianAmount))
     : 0;
 
   // Timing: recency-weighted win rate
-  const timing = clamp01(computeRecentWinRate(valid) / 100);
+  const timing = clamp01(computeRecentWinRate(executions) / 100);
 
   return { volume, diversity, speed, streak, riskAppetite, timing };
 }
@@ -140,10 +140,10 @@ export function computeArenaDNAStats(
   let maxTrades = 0;
   const allAmounts: number[] = [];
 
+  // Executions are pre-filtered (failed excluded) by buildArenaLeaderboard
   for (const [, agentExecs] of executionsByAgent) {
-    const valid = agentExecs.filter((e) => e.status !== "failed");
-    maxTrades = Math.max(maxTrades, valid.length);
-    for (const e of valid) {
+    maxTrades = Math.max(maxTrades, agentExecs.length);
+    for (const e of agentExecs) {
       allAmounts.push(e.amount);
     }
   }

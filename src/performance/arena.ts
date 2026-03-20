@@ -218,9 +218,9 @@ function computeAgentEntry(
   scannerTimestamps?: Map<string, number>,
   stalenessThresholdMs?: number,
 ): ArenaEntryComputation {
-  const validExecutions = executions.filter((execution) => execution.status !== "failed");
-  const openExecutions = validExecutions.filter(isOpenExecution);
-  const settledExecutions = validExecutions.filter((execution) => execution.pnl != null);
+  // Executions are pre-filtered (failed excluded) by buildArenaLeaderboard
+  const openExecutions = executions.filter(isOpenExecution);
+  const settledExecutions = executions.filter((execution) => execution.pnl != null);
 
   let selectedRealizedPnl = 0;
   let lifetimeRealizedPnl = 0;
@@ -255,14 +255,14 @@ function computeAgentEntry(
 
   const lifetimeWins = settledExecutions.filter((execution) => Number(execution.pnl ?? 0) > 0).length;
   const winRate = settledExecutions.length > 0 ? lifetimeWins / settledExecutions.length : 0;
-  const lastTradeAt = validExecutions.reduce<number | null>((latest, execution) => {
+  const lastTradeAt = executions.reduce<number | null>((latest, execution) => {
     if (latest == null) return execution.executed_at;
     return Math.max(latest, execution.executed_at);
   }, null);
 
   // Market-level breakdown
   const marketMap = new Map<string, { pnl: number; trades: number; wins: number; settled: number; open: number }>();
-  for (const execution of validExecutions) {
+  for (const execution of executions) {
     const entry = marketMap.get(execution.slug) ?? { pnl: 0, trades: 0, wins: 0, settled: 0, open: 0 };
     entry.trades += 1;
     if (execution.pnl != null) {
@@ -292,8 +292,10 @@ function computeAgentEntry(
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
     .slice(0, 10);
 
+  const currentStreak = computeCurrentStreak(executions);
+
   return {
-    eligible: agent.status === "active" && validExecutions.length > 0,
+    eligible: agent.status === "active" && executions.length > 0,
     entry: {
       rank: 0,
       agentId: agent.id,
@@ -309,17 +311,17 @@ function computeAgentEntry(
       selectedRealizedPnl: round2(window === "all" ? lifetimeRealizedPnl : selectedRealizedPnl),
       selectedUnrealizedPnl: round2(unrealizedPnl),
       allTimePnl: round2(allTimePnl),
-      totalTrades: validExecutions.length,
+      totalTrades: executions.length,
       winRate: round2(winRate * 100),
       openPositions: openExecutions.length,
-      currentStreak: computeCurrentStreak(validExecutions),
+      currentStreak,
       lastTradeAt,
       bestTradeSlug: bestTrade?.slug ?? null,
       bestTradePnl: round2(Number(bestTrade?.pnl ?? 0)),
       rankChange: null,
       marketBreakdown,
       badges: [],  // populated after global pre-pass in buildArenaLeaderboard
-      heat: computeAgentHeat(validExecutions, computeCurrentStreak(validExecutions), now),
+      heat: computeAgentHeat(executions, currentStreak, now),
       dna: { volume: 0, diversity: 0, speed: 0, streak: 0, riskAppetite: 0, timing: 0 },  // populated after global pre-pass
     },
   };
@@ -343,7 +345,7 @@ export function buildArenaLeaderboard({
   const executionsByAgent = new Map<string, ArenaExecutionRecord[]>();
 
   for (const execution of executions) {
-    if (!execution.agent_id) continue;
+    if (!execution.agent_id || execution.status === "failed") continue;
     const agentExecutions = executionsByAgent.get(execution.agent_id) ?? [];
     agentExecutions.push(execution);
     executionsByAgent.set(execution.agent_id, agentExecutions);

@@ -134,10 +134,13 @@ async function getLatestArenaScannerPrices(): Promise<{
     ).all() as Array<{ slug: string; probability: number; scanned_at: number }>;
   }
 
-  return {
-    prices: new Map(rows.map((row) => [row.slug, Number(row.probability ?? 0.5)])),
-    timestamps: new Map(rows.map((row) => [row.slug, Number(row.scanned_at ?? 0)])),
-  };
+  const prices = new Map<string, number>();
+  const timestamps = new Map<string, number>();
+  for (const row of rows) {
+    prices.set(row.slug, Number(row.probability ?? 0.5));
+    timestamps.set(row.slug, Number(row.scanned_at ?? 0));
+  }
+  return { prices, timestamps };
 }
 
 async function loadSharedArenaSnapshot(): Promise<SharedArenaSnapshot> {

@@ -270,9 +270,19 @@ export async function processArenaSnapshots(): Promise<void> {
     // Load agents with user_id for notification routing
     const agentRecords = await loadCachedArenaAgents();
 
-    for (const window of WINDOWS) {
-      const previousRanks = await loadPreviousRanks(window);
-      const leaders = await writeSnapshot(window);
+    // Parallelize the DB-heavy snapshot + rank loading across all windows
+    const windowResults = await Promise.all(
+      WINDOWS.map(async (w) => {
+        const [prevRanks, leaders] = await Promise.all([
+          loadPreviousRanks(w),
+          writeSnapshot(w),
+        ]);
+        return { window: w, leaders, previousRanks: prevRanks };
+      }),
+    );
+
+    // Notifications use shared module state — run sequentially
+    for (const { window, leaders, previousRanks } of windowResults) {
       const deltas = computeDeltas(leaders, previousRanks);
       broadcastDelta(window, deltas);
       emitArenaNotifications(window, leaders, agentRecords, deltas);

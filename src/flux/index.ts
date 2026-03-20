@@ -39,7 +39,7 @@ interface OrderbookData {
 // Per architecture decision: Polymarket CLI is the sole data source.
 // If CLI fails (token unavailable, network), degrade gracefully to empty book.
 
-async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | null; source: "cli" | "api"; reason?: string }> {
+async function fetchOrderbookSingle(tokenId: string): Promise<{ book: OrderbookData | null; source: "cli" | "api"; reason?: string }> {
   if (!tokenId) {
     return { book: null, source: "cli", reason: "no_token_id" };
   }
@@ -69,8 +69,32 @@ async function fetchOrderbook(tokenId: string): Promise<{ book: OrderbookData | 
     return { book: raw as OrderbookData, source: "cli" };
   } catch (err) {
     console.warn(`[Flux] CLI orderbook also failed for ${tokenId}: ${(err as Error).message}`);
-    return { book: { bids: [], asks: [] }, source: "cli", reason: "cli_error" };
+    return { book: null, source: "cli", reason: "cli_error" };
   }
+}
+
+function hasOrderbookData(book: OrderbookData | null): boolean {
+  if (!book) return false;
+  return (book.bids?.length ?? 0) > 0 || (book.asks?.length ?? 0) > 0;
+}
+
+async function fetchOrderbook(tokenId: string, altTokenId?: string): Promise<{ book: OrderbookData | null; source: "cli" | "api"; reason?: string }> {
+  const result = await fetchOrderbookSingle(tokenId);
+  if (hasOrderbookData(result.book)) {
+    return result;
+  }
+
+  // Primary token had no orderbook — try the alternate outcome token
+  if (altTokenId && altTokenId !== tokenId) {
+    console.log(`[Flux] Primary token ${tokenId} has no orderbook, trying alternate token ${altTokenId}`);
+    const altResult = await fetchOrderbookSingle(altTokenId);
+    if (hasOrderbookData(altResult.book)) {
+      return altResult;
+    }
+  }
+
+  // Both tokens failed — return empty book
+  return result.book ? result : { book: { bids: [], asks: [] }, source: "cli", reason: "cli_error" };
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -170,10 +194,11 @@ function checkGradeDegrading(slug: string, currentGrade: string): boolean {
 
 // ── Main entry point ─────────────────────────────────────────
 
-export async function runFlux(market: { slug: string; token_id?: string; tokenID?: string }): Promise<FluxResult> {
+export async function runFlux(market: { slug: string; token_id?: string; token_id_alt?: string; tokenID?: string }): Promise<FluxResult> {
   const scoredAt = Date.now();
   const slug = market.slug;
   const tokenId = market.token_id || market.tokenID || "";
+  const altTokenId = market.token_id_alt || "";
 
   // Mock mode
   if (process.env.FLUX_MOCK === "true") {
@@ -213,7 +238,7 @@ export async function runFlux(market: { slug: string; token_id?: string; tokenID
     persist(result); return result;
   }
 
-  const { book, source: bookSource, reason } = await fetchOrderbook(tokenId);
+  const { book, source: bookSource, reason } = await fetchOrderbook(tokenId, altTokenId);
 
   // tokenId missing but market may have liquidity — grade C, no veto
   if (book === null && reason === "no_token_id") {
