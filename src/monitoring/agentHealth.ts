@@ -2,9 +2,7 @@
 // Records { agent, timestamp, success, latencyMs } for each invocation.
 // Used by GET /api/agents/health to return real-time status.
 
-import { AgentName, AGENT_NAMES } from "../agents/constants";
-export type { AgentName };
-export { AGENT_NAMES };
+import { type AgentName, AGENT_NAMES } from "../agents/constants";
 export type AgentRuntimeStatus = "live" | "idle" | "degraded" | "down";
 
 interface InvocationRecord {

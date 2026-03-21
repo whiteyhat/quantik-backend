@@ -796,71 +796,74 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const decision = sigmaData["decision"];
   let executionResult: Record<string, unknown> | null = null;
 
-  if (decision === "BET_YES" || decision === "BET_NO") {
-    const tradeStepId = await beginStep("trade", "sigma");
-    const direction = decision === "BET_YES" ? "YES" : "NO";
-    const sizeUsd =
-      typeof sigmaData["size_usd"] === "number" ? sigmaData["size_usd"] : 10;
-    const entryPrice =
-      typeof sigmaData["entry_price"] === "number"
-        ? sigmaData["entry_price"]
-        : 0.5;
-    const resolvedTokenId = direction === "YES" ? token_id : token_id_no;
+  try {
+    if (decision === "BET_YES" || decision === "BET_NO") {
+      const tradeStepId = await beginStep("trade", "sigma");
+      const direction = decision === "BET_YES" ? "YES" : "NO";
+      const sizeUsd =
+        typeof sigmaData["size_usd"] === "number" ? sigmaData["size_usd"] : 10;
+      const entryPrice =
+        typeof sigmaData["entry_price"] === "number"
+          ? sigmaData["entry_price"]
+          : 0.5;
+      const resolvedTokenId = direction === "YES" ? token_id : token_id_no;
 
-    try {
-      const riskApproval = await approvePosition(
-        effectiveSlug,
-        sizeUsd,
-        marketInput.category
-      );
-      if (!riskApproval.approved) {
-        executionResult = {
-          status: "rejected",
-          reason: riskApproval.reason,
-          approved: false,
-        };
-        await finishStep(tradeStepId, "rejected", executionResult, String(riskApproval.reason));
-        sendEvent("trade:rejected", { reason: riskApproval.reason, slug: effectiveSlug });
-      } else {
-        const result = await execute(
-          {
+      try {
+        const riskApproval = await approvePosition(
+          effectiveSlug,
+          sizeUsd,
+          marketInput.category
+        );
+        if (!riskApproval.approved) {
+          executionResult = {
+            status: "rejected",
+            reason: riskApproval.reason,
+            approved: false,
+          };
+          await finishStep(tradeStepId, "rejected", executionResult, String(riskApproval.reason));
+          sendEvent("trade:rejected", { reason: riskApproval.reason, slug: effectiveSlug });
+        } else {
+          const result = await execute(
+            {
+              slug: effectiveSlug,
+              direction,
+              sizeUsdc: riskApproval.adjustedSize,
+              tokenId: resolvedTokenId,
+              price: entryPrice,
+            },
+            riskApproval
+          );
+          executionResult = result as unknown as Record<string, unknown>;
+          await finishStep(tradeStepId, "executed", executionResult, null);
+          sendEvent("trade:executed", {
             slug: effectiveSlug,
             direction,
-            sizeUsdc: riskApproval.adjustedSize,
-            tokenId: resolvedTokenId,
-            price: entryPrice,
-          },
-          riskApproval
-        );
-        executionResult = result as unknown as Record<string, unknown>;
-        await finishStep(tradeStepId, "executed", executionResult, null);
-        sendEvent("trade:executed", {
-          slug: effectiveSlug,
-          direction,
-          orderId: result.orderId,
-          status: result.status,
-          execution_mode: result.execution_mode,
-          filledPrice: result.filledPrice,
-          filledSize: result.filledSize,
-        });
-        console.log(
-          `[Pipeline] Auto-executed ${direction} on ${effectiveSlug} — orderId=${result.orderId} mode=${result.execution_mode}`
-        );
+            orderId: result.orderId,
+            status: result.status,
+            execution_mode: result.execution_mode,
+            filledPrice: result.filledPrice,
+            filledSize: result.filledSize,
+          });
+          console.log(
+            `[Pipeline] Auto-executed ${direction} on ${effectiveSlug} — orderId=${result.orderId} mode=${result.execution_mode}`
+          );
+        }
+      } catch (execErr) {
+        const error = String(execErr);
+        executionResult = { status: "error", error };
+        await finishStep(tradeStepId, "error", executionResult, error);
+        sendEvent("trade:error", { slug: effectiveSlug, error });
+        console.error("[Pipeline] Auto-execution failed:", execErr);
       }
-    } catch (execErr) {
-      const error = String(execErr);
-      executionResult = { status: "error", error };
-      await finishStep(tradeStepId, "error", executionResult, error);
-      sendEvent("trade:error", { slug: effectiveSlug, error });
-      console.error("[Pipeline] Auto-execution failed:", execErr);
+    } else {
+      const tradeStepId = await beginStep("trade", "sigma");
+      executionResult = { status: "skipped", reason: "Sigma returned PASS/skip." };
+      await finishStep(tradeStepId, "skipped", executionResult, null);
     }
-  } else {
-    const tradeStepId = await beginStep("trade", "sigma");
-    executionResult = { status: "skipped", reason: "Sigma returned PASS/skip." };
-    await finishStep(tradeStepId, "skipped", executionResult, null);
+  } finally {
+    await flushAgentOutputs();
   }
 
-  await flushAgentOutputs();
   await completeRun("complete", {
     decision: sigmaData["decision"],
     confidence: sigmaData["confidence"],
