@@ -3,6 +3,7 @@
 // Used by GET /api/agents/health to return real-time status.
 
 import { type AgentName, AGENT_NAMES } from "../agents/constants";
+export { AGENT_NAMES };
 export type AgentRuntimeStatus = "live" | "idle" | "degraded" | "down";
 
 interface InvocationRecord {

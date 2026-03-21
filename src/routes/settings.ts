@@ -5,17 +5,13 @@ import { isPgEnabled, pgQuery, pgExec } from "../db/postgres";
 
 const router = Router();
 
-// ── GET /api/v1/settings ──────────────────────────────────────
-router.get("/settings", async (_req: Request, res: Response) => {
+// ── GET /api/v1/settings (& /paper-mode alias) ───────────────
+async function getPaperModeHandler(_req: Request, res: Response) {
   const settings = await getSettings();
   res.json({ paperMode: settings.paper_mode });
-});
-
-// ── GET /api/v1/settings/paper-mode ──────────────────────────
-router.get("/settings/paper-mode", async (_req: Request, res: Response) => {
-  const settings = await getSettings();
-  res.json({ paperMode: settings.paper_mode });
-});
+}
+router.get("/settings", getPaperModeHandler);
+router.get("/settings/paper-mode", getPaperModeHandler);
 
 // ── POST /api/v1/settings/paper-mode ─────────────────────────
 router.post("/settings/paper-mode", async (req: Request, res: Response) => {

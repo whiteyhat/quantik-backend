@@ -15,13 +15,9 @@ import {
   getLatestScannerDirectionMap,
   normalizeExecutionDirection,
 } from "../utils/executionDirection";
+import { toFiniteNumber } from "../utils/numbers";
 
 type TradeDirection = "YES" | "NO";
-
-function toFiniteNumber(value: unknown): number | null {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
 
 function resolveRequestedDirection(body: Record<string, unknown>): TradeDirection | null {
   const explicitDirection = normalizeExecutionDirection(body["direction"]);
@@ -173,12 +169,12 @@ router.post("/execute", async (req: Request, res: Response) => {
             side: "buy",
             direction: requestedDirection,
             source: "manual",
-          amount: requestedSize,
-          executedAt: Date.now(),
-          status: "failed",
-          fillPrice: toFiniteNumber(body["price"]) ?? 0.5,
-          pipelineRunId: typeof body["pipelineRunId"] === "string" ? body["pipelineRunId"] : null,
-        });
+            amount: requestedSize,
+            executedAt: Date.now(),
+            status: "failed",
+            fillPrice: toFiniteNumber(body["price"]) ?? 0.5,
+            pipelineRunId: typeof body["pipelineRunId"] === "string" ? body["pipelineRunId"] : null,
+          });
       } catch {
         // Do not mask the original trade error.
       }

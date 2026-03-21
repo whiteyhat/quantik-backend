@@ -4,6 +4,7 @@ import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
 import { insertExecutionRecord } from "../utils/executions";
 import { fetchMarketBySlug } from "../utils/market-fetch";
 import { emitTradeExecuted } from "../infra/socket";
+import { toFiniteNumber } from "../utils/numbers";
 
 export type ManagedTradeDirection = "YES" | "NO";
 
@@ -36,11 +37,6 @@ export interface ManagedTradeResult {
   slug: string;
   rawData: unknown;
   error?: string;
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
 }
 
 function extractOrderId(data: Record<string, unknown>): string | null {
@@ -86,8 +82,10 @@ function resolveQuotedPrice(direction: ManagedTradeDirection, quotedPrice: numbe
 }
 
 export async function executeManagedTrade(input: ManagedTradeRequest): Promise<ManagedTradeResult> {
-  const settings = await getSettings();
-  const marketData = await fetchMarketBySlug(input.marketSlug).catch(() => null);
+  const [settings, marketData] = await Promise.all([
+    getSettings(),
+    fetchMarketBySlug(input.marketSlug).catch(() => null),
+  ]);
   const resolutionDate = marketData?.resolution_date ?? null;
 
   const derivedTokenId =
@@ -123,48 +121,48 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
   if (settings.paper_mode) {
     const paperId = `PAPER-${uuid()}`;
 
-    await insertPaperTrade({
-      id: paperId,
-      market_id: resolvedTokenId,
-      side: input.direction,
-      size: input.sizeUsdc,
-      price: quotedPrice,
-      status: "submitted",
-      created_at: now,
-      settled_at: null,
-      pnl: null,
-    });
-
-    await insertTrade({
-      id: uuid(),
-      order_id: paperId,
-      market_slug: input.marketSlug,
-      direction: input.direction,
-      source: input.source,
-      size: input.sizeUsdc,
-      price: quotedPrice,
-      net_ev: input.netEv ?? null,
-      ev_grade: input.evGrade ?? null,
-      status: "paper",
-      created_at: now,
-      pipeline_run_id: input.pipelineRunId ?? null,
-    });
-
-    await insertExecutionRecord({
-      userId: input.userId,
-      agentId: input.agentId,
-      slug: input.marketSlug,
-      side: "buy",
-      direction: input.direction,
-      source: input.source,
-      amount: input.sizeUsdc,
-      executedAt: now,
-      status: "paper",
-      orderId: paperId,
-      fillPrice: quotedPrice,
-      resolutionDate,
-      pipelineRunId: input.pipelineRunId ?? null,
-    });
+    await Promise.all([
+      insertPaperTrade({
+        id: paperId,
+        market_id: resolvedTokenId,
+        side: input.direction,
+        size: input.sizeUsdc,
+        price: quotedPrice,
+        status: "submitted",
+        created_at: now,
+        settled_at: null,
+        pnl: null,
+      }),
+      insertTrade({
+        id: uuid(),
+        order_id: paperId,
+        market_slug: input.marketSlug,
+        direction: input.direction,
+        source: input.source,
+        size: input.sizeUsdc,
+        price: quotedPrice,
+        net_ev: input.netEv ?? null,
+        ev_grade: input.evGrade ?? null,
+        status: "paper",
+        created_at: now,
+        pipeline_run_id: input.pipelineRunId ?? null,
+      }),
+      insertExecutionRecord({
+        userId: input.userId,
+        agentId: input.agentId,
+        slug: input.marketSlug,
+        side: "buy",
+        direction: input.direction,
+        source: input.source,
+        amount: input.sizeUsdc,
+        executedAt: now,
+        status: "paper",
+        orderId: paperId,
+        fillPrice: quotedPrice,
+        resolutionDate,
+        pipelineRunId: input.pipelineRunId ?? null,
+      }),
+    ]);
 
     emitTradeExecuted(socketUserId, {
       orderId: paperId,
@@ -177,16 +175,6 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       timestamp: now,
     });
 
-    const paperResult = {
-      orderId: paperId,
-      status: "paper",
-      paper: true,
-      tokenId: resolvedTokenId,
-      direction: input.direction,
-      price: quotedPrice,
-      size: input.sizeUsdc,
-    };
-
     return {
       ok: true,
       orderId: paperId,
@@ -197,7 +185,7 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       size: input.sizeUsdc,
       price: quotedPrice,
       slug: input.marketSlug,
-      rawData: paperResult,
+      rawData: { orderId: paperId, status: "paper", paper: true, tokenId: resolvedTokenId, direction: input.direction, price: quotedPrice, size: input.sizeUsdc },
     };
   }
 
@@ -268,36 +256,37 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
   const orderId = extractOrderId(data);
   const fillPrice = extractFillPrice(data) ?? quotedPrice;
 
-  await insertTrade({
-    id: uuid(),
-    order_id: orderId,
-    market_slug: input.marketSlug,
-    direction: input.direction,
-    source: input.source,
-    size: input.sizeUsdc,
-    price: fillPrice,
-    net_ev: input.netEv ?? null,
-    ev_grade: input.evGrade ?? null,
-    status: "submitted",
-    created_at: now,
-    pipeline_run_id: input.pipelineRunId ?? null,
-  });
-
-  await insertExecutionRecord({
-    userId: input.userId,
-    agentId: input.agentId,
-    slug: input.marketSlug,
-    side: "buy",
-    direction: input.direction,
-    source: input.source,
-    amount: input.sizeUsdc,
-    executedAt: now,
-    status: "placed",
-    orderId,
-    fillPrice,
-    resolutionDate,
-    pipelineRunId: input.pipelineRunId ?? null,
-  });
+  await Promise.all([
+    insertTrade({
+      id: uuid(),
+      order_id: orderId,
+      market_slug: input.marketSlug,
+      direction: input.direction,
+      source: input.source,
+      size: input.sizeUsdc,
+      price: fillPrice,
+      net_ev: input.netEv ?? null,
+      ev_grade: input.evGrade ?? null,
+      status: "submitted",
+      created_at: now,
+      pipeline_run_id: input.pipelineRunId ?? null,
+    }),
+    insertExecutionRecord({
+      userId: input.userId,
+      agentId: input.agentId,
+      slug: input.marketSlug,
+      side: "buy",
+      direction: input.direction,
+      source: input.source,
+      amount: input.sizeUsdc,
+      executedAt: now,
+      status: "placed",
+      orderId,
+      fillPrice,
+      resolutionDate,
+      pipelineRunId: input.pipelineRunId ?? null,
+    }),
+  ]);
 
   emitTradeExecuted(socketUserId, {
     orderId: orderId ?? "",

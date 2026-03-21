@@ -442,12 +442,12 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
   type OpenPositionRow = { id: string; slug: string; side: string; direction: string | null; amount: number; fill_price: number | null; order_id: string | null; status: string };
 
   if (isPgEnabled()) {
-    // 1. Trip circuit breaker + global kill switch immediately
-    await setPanicModeEnabled(true, now);
-    await tripCircuitBreaker(now);
-
-    // Explicitly disable autopilot on ALL active agents
-    await pgExec("UPDATE agents SET autopilot_enabled = 0, updated_at = $1 WHERE autopilot_enabled = 1", [now]);
+    // 1. Trip circuit breaker + global kill switch + disable autopilot (parallel)
+    await Promise.all([
+      setPanicModeEnabled(true, now),
+      tripCircuitBreaker(now),
+      pgExec("UPDATE agents SET autopilot_enabled = 0, updated_at = $1 WHERE autopilot_enabled = 1", [now]),
+    ]);
 
     // Broadcast panic to all connected clients immediately
     emitToAll("panic:activated", { timestamp: now, reason, cooldownEndsAt });
@@ -459,16 +459,17 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
       timestamp: now,
     });
 
-    // 2. Read open positions before we close them
-    const openPositions = await pgQuery<OpenPositionRow>(
-      "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
-    );
-
-    const priceRows = await pgQuery<{ slug: string; probability: number }>(
-      "SELECT DISTINCT ON (slug) slug, probability FROM scanner_results ORDER BY slug, scanned_at DESC"
-    );
+    // 2. Read open positions before we close them (parallel queries)
+    const [openPositions, priceRows, scannerDirections] = await Promise.all([
+      pgQuery<OpenPositionRow>(
+        "SELECT id, slug, side, direction, amount, fill_price, order_id, status FROM executions WHERE status IN ('placed', 'paper', 'submitted') AND pnl IS NULL"
+      ),
+      pgQuery<{ slug: string; probability: number }>(
+        "SELECT DISTINCT ON (slug) slug, probability FROM scanner_results ORDER BY slug, scanned_at DESC"
+      ),
+      getLatestScannerDirectionMap(),
+    ]);
     const currentPrices = new Map(priceRows.map((r) => [r.slug, r.probability]));
-    const scannerDirections = await getLatestScannerDirectionMap();
 
     const estimatedValue = openPositions.reduce((sum, p) => sum + p.amount, 0);
 
@@ -680,7 +681,7 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
       VALUES (?, ?, ?, 'processing', NULL, NULL, NULL, 'pending')
     `).run(reportId, reportCode, eventId);
 
-    // 6. Build line items + close positions
+    // 6. Build line items + close positions (wrapped in transaction for atomicity)
     const insertItem = db.prepare(`
       INSERT INTO liquidation_line_items
         (id, liquidation_report_id, asset_symbol, asset_label, execution_price, trigger_price, size, size_unit, pnl_impact)
@@ -693,47 +694,52 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
     let totalRealizedValue = 0;
     let totalPnl = 0;
 
-    for (const pos of openPositions) {
-      const scannerDirection = scannerDirections.get(pos.slug);
-      const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
-      const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
-      const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
+    const liquidateTransaction = db.transaction(() => {
+      for (const pos of openPositions) {
+        const scannerDirection = scannerDirections.get(pos.slug);
+        const currentYes = currentPrices.get(pos.slug) ?? getEntryYesPrice(pos, scannerDirection);
+        const metrics = calculateOpenExecutionMetrics(pos, currentYes, scannerDirection);
+        const realizedValue = metrics.currentTokenPrice * (pos.amount / Math.max(0.01, metrics.entryTokenPrice));
 
-      const direction = metrics.direction;
-      const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+        const direction = metrics.direction;
+        const label = pos.slug.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
-      insertItem.run(
-        uuidv4(),
-        reportId,
-        `${pos.slug.toUpperCase()}-${direction}`,
-        `${label} — ${direction}`,
-        metrics.currentTokenPrice,
-        metrics.entryTokenPrice,
-        pos.amount / Math.max(0.01, metrics.entryTokenPrice),
-        "shares",
-        parseFloat(metrics.pnl.toFixed(2))
-      );
+        insertItem.run(
+          uuidv4(),
+          reportId,
+          `${pos.slug.toUpperCase()}-${direction}`,
+          `${label} — ${direction}`,
+          metrics.currentTokenPrice,
+          metrics.entryTokenPrice,
+          pos.amount / Math.max(0.01, metrics.entryTokenPrice),
+          "shares",
+          parseFloat(metrics.pnl.toFixed(2))
+        );
 
-      // Mark position as liquidated with realized PnL
-      if (liquidatePositions) {
-        closeExecution.run(parseFloat(metrics.pnl.toFixed(2)), pos.id);
+        if (liquidatePositions) {
+          closeExecution.run(parseFloat(metrics.pnl.toFixed(2)), pos.id);
+        }
+
+        totalRealizedValue += realizedValue;
+        totalPnl += metrics.pnl;
       }
 
-      totalRealizedValue += realizedValue;
-      totalPnl += metrics.pnl;
-    }
+      // 7. Finalize report
+      const completedAt = Date.now();
+      const reportStatus = liquidatePositions ? "complete" : "partial";
 
-    // 7. Finalize report
-    const completedAt = Date.now();
-    const reportStatus = liquidatePositions ? "complete" : "partial";
+      db.prepare(
+        "UPDATE liquidation_reports SET status = ?, completion_timestamp = ?, total_realized_value = ?, slippage_pct = 0, gas_execution_cost = 0, recovery_status = ? WHERE id = ?"
+      ).run(reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId);
 
-    db.prepare(
-      "UPDATE liquidation_reports SET status = ?, completion_timestamp = ?, total_realized_value = ?, slippage_pct = 0, gas_execution_cost = 0, recovery_status = ? WHERE id = ?"
-    ).run(reportStatus, completedAt, parseFloat(totalRealizedValue.toFixed(2)), liquidatePositions ? "complete" : "pending", reportId);
+      db.prepare(
+        "UPDATE panic_mode_events SET status = ?, completed_at = ? WHERE id = ?"
+      ).run(reportStatus, completedAt, eventId);
 
-    db.prepare(
-      "UPDATE panic_mode_events SET status = ?, completed_at = ? WHERE id = ?"
-    ).run(reportStatus, completedAt, eventId);
+      return { completedAt, reportStatus };
+    });
+
+    const { completedAt, reportStatus } = liquidateTransaction();
 
     void sendStatusUpdate(
       [
