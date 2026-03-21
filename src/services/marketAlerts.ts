@@ -51,12 +51,6 @@ async function loadEnabledAlerts(slugs: string[]): Promise<MarketAlertRow[]> {
 
 async function updateAlertState(id: string, state: string, triggeredAt: number | null): Promise<void> {
   const now = Date.now();
-  const db = getDb();
-  db.prepare(
-    `UPDATE market_alerts
-        SET last_state = ?, last_triggered_at = ?, updated_at = ?
-      WHERE id = ?`
-  ).run(state, triggeredAt, now, id);
 
   if (isPgEnabled()) {
     await pgExec(
@@ -65,6 +59,13 @@ async function updateAlertState(id: string, state: string, triggeredAt: number |
         WHERE id = $4`,
       [state, triggeredAt, now, id]
     );
+  } else {
+    const db = getDb();
+    db.prepare(
+      `UPDATE market_alerts
+          SET last_state = ?, last_triggered_at = ?, updated_at = ?
+        WHERE id = ?`
+    ).run(state, triggeredAt, now, id);
   }
 }
 
@@ -74,6 +75,8 @@ export async function evaluateMarketAlerts(priceUpdates: PriceUpdateEventItem[])
   const updateMap = new Map(priceUpdates.map((item) => [item.slug, item]));
   const alerts = await loadEnabledAlerts(Array.from(updateMap.keys()));
   if (alerts.length === 0) return;
+
+  const stateUpdates: Promise<void>[] = [];
 
   for (const alert of alerts) {
     if (!normalizeEnabled(alert.enabled)) continue;
@@ -99,14 +102,16 @@ export async function evaluateMarketAlerts(priceUpdates: PriceUpdateEventItem[])
           href: `/market/${alert.slug}`,
         },
       });
-      await updateAlertState(alert.id, state, notificationTimestamp);
+      stateUpdates.push(updateAlertState(alert.id, state, notificationTimestamp));
       continue;
     }
 
     if (alert.last_state !== state) {
-      await updateAlertState(alert.id, state, alert.last_triggered_at ?? null);
+      stateUpdates.push(updateAlertState(alert.id, state, alert.last_triggered_at ?? null));
     }
   }
+
+  await Promise.all(stateUpdates);
 }
 
 export function newMarketAlertId(): string {

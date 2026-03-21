@@ -1,12 +1,19 @@
 import { v4 as uuid } from "uuid";
 import { runCliWithWallet } from "../cli";
 import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
+import { dualQueryOne, dualExec } from "../db/postgres";
 import { insertExecutionRecord } from "../utils/executions";
 import { fetchMarketBySlug } from "../utils/market-fetch";
-import { emitTradeExecuted } from "../infra/socket";
+import { emitTradeExecuted, emitNotification } from "../infra/socket";
+import {
+  calculateOpenExecutionMetrics,
+  getEntryYesPrice,
+  recommendationToDirection,
+} from "../utils/executionDirection";
 import { toFiniteNumber } from "../utils/numbers";
+import type { TradeDirection, ExecutionRecord } from "../types/execution";
 
-export type ManagedTradeDirection = "YES" | "NO";
+export type ManagedTradeDirection = TradeDirection;
 
 export interface ManagedTradeRequest {
   userId: string | null;
@@ -175,17 +182,13 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
       timestamp: now,
     });
 
+    // Build rawData (the shape sent to the client) once, then reference it
+    const paperData = { orderId: paperId, status: "paper" as const, paper: true, tokenId: resolvedTokenId, direction: input.direction, price: quotedPrice, size: input.sizeUsdc };
     return {
       ok: true,
-      orderId: paperId,
-      paper: true,
-      status: "paper",
-      tokenId: resolvedTokenId,
-      direction: input.direction,
-      size: input.sizeUsdc,
-      price: quotedPrice,
+      ...paperData,
       slug: input.marketSlug,
-      rawData: { orderId: paperId, status: "paper", paper: true, tokenId: resolvedTokenId, direction: input.direction, price: quotedPrice, size: input.sizeUsdc },
+      rawData: paperData,
     };
   }
 
@@ -310,5 +313,105 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
     price: fillPrice,
     slug: input.marketSlug,
     rawData,
+  };
+}
+
+// ── Close Position ──────────────────────────────────────────────
+
+export interface ClosePositionRequest {
+  executionId: number;
+  userId: string | null;
+  agentId: string | null;
+}
+
+export type ClosePositionErrorCode = "NOT_FOUND" | "FORBIDDEN";
+
+export interface ClosePositionResult {
+  ok: boolean;
+  executionId?: number;
+  slug?: string;
+  direction?: string;
+  size?: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  pnl?: number;
+  closedAt?: number;
+  status?: "closed";
+  error?: ClosePositionErrorCode | string;
+}
+
+export async function closePosition(req: ClosePositionRequest): Promise<ClosePositionResult> {
+  const { executionId, userId, agentId } = req;
+
+  // Fetch the open execution
+  const execution = await dualQueryOne<ExecutionRecord>(
+    `SELECT id, user_id, agent_id, slug, side, direction, source, amount, fill_price, status, resolution_date
+       FROM executions
+      WHERE id = $1
+        AND status IN ('placed', 'paper')
+        AND pnl IS NULL`,
+    [executionId]
+  ) ?? undefined;
+
+  if (!execution) {
+    return { ok: false, error: "NOT_FOUND" };
+  }
+
+  // Ownership check
+  const isOwner =
+    (userId && execution.user_id === userId) ||
+    (agentId && execution.agent_id === agentId);
+  if (!isOwner) {
+    return { ok: false, error: "FORBIDDEN" };
+  }
+
+  // Fetch latest scanner row for this slug (price + direction in one query)
+  const scannerRow = await dualQueryOne<{ probability: number; recommendation: string | null }>(
+    `SELECT probability, recommendation FROM scanner_results WHERE slug = $1 ORDER BY scanned_at DESC LIMIT 1`,
+    [execution.slug]
+  );
+
+  const scannerDirection = scannerRow ? recommendationToDirection(scannerRow.recommendation) ?? undefined : undefined;
+  const currentYes = scannerRow?.probability ?? getEntryYesPrice(execution, scannerDirection);
+  const metrics = calculateOpenExecutionMetrics(execution, currentYes, scannerDirection);
+  const realizedPnl = Math.round(metrics.pnl * 100) / 100;
+  const now = Date.now();
+
+  // Update execution to closed
+  await dualExec(
+    `UPDATE executions
+        SET status = 'closed',
+            pnl = $1,
+            closed_at = $2,
+            updated_at = $3
+      WHERE id = $4`,
+    [realizedPnl, now, now, execution.id]
+  );
+
+  // Emit notification
+  emitNotification(userId ?? execution.user_id ?? null, {
+    id: `position-close-${execution.id}-${now}`,
+    level: realizedPnl >= 0 ? "success" : "warning",
+    title: "Position closed",
+    message: `${execution.slug} closed at ${Math.round(metrics.currentTokenPrice * 100)}¢ for ${realizedPnl >= 0 ? "+" : ""}$${Math.abs(realizedPnl).toFixed(2)} P&L.`,
+    category: "position",
+    timestamp: now,
+    action: {
+      label: "Open market",
+      href: `/market/${execution.slug}`,
+    },
+  });
+
+  return {
+    ok: true,
+    executionId: execution.id,
+    slug: execution.slug,
+    direction: metrics.direction,
+    size: execution.amount,
+    entryPrice: metrics.entryTokenPrice,
+    exitPrice: metrics.currentTokenPrice,
+    pnl: realizedPnl,
+    closedAt: now,
+    status: "closed",
   };
 }

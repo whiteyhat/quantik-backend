@@ -1,6 +1,6 @@
 import { Router, Request } from "express";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
+import { isPgEnabled, pgQuery, pgQueryOne, dualQuery } from "../db/postgres";
 import { AttributionEngine } from "../monitoring/attribution";
 import { DriftDetection } from "../monitoring/drift";
 import { ModelCalibration } from "../monitoring/calibration";
@@ -8,10 +8,12 @@ import { getUserIdAsync } from "../middleware/auth";
 import { loadPortfolioSnapshot, loadToolExecutionContextByAgentId } from "../agents/snapshots";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
 import {
+  buildScannerMaps,
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
-  getLatestScannerDirectionMap,
+  getLatestScannerResults,
 } from "../utils/executionDirection";
+import type { ExecutionRecord } from "../types/execution";
 import { parseArenaWindow } from "../performance/arena";
 import { loadArenaLeaderboard, loadCachedArenaAgents } from "../performance/arenaService";
 import { loadAgentHistory, loadComparison } from "../performance/arenaSnapshots";
@@ -26,19 +28,7 @@ type ReportPeriod = "day" | "week" | "month" | "all";
 type ReportOutcome = "WIN" | "LOSS" | "OPEN" | "PENDING";
 type ReportSource = "autopilot" | "manual";
 
-interface ExecutionRow {
-  id: number;
-  slug: string;
-  direction: string | null;
-  source: string | null;
-  amount: number;
-  fill_price: number | null;
-  status: string;
-  executed_at: number;
-  pnl: number | null;
-  order_id: string | null;
-  pipeline_run_id: string | null;
-}
+type ExecutionRow = ExecutionRecord;
 
 interface ReportTrade {
   id: number;
@@ -146,43 +136,19 @@ async function loadReportTrades(req: Request): Promise<ReportTrade[]> {
   const linkedAgent = await loadLinkedAgentForUser(userId);
   if (!linkedAgent) return [];
 
-  let executions: ExecutionRow[];
-  let liveRows: Array<{ slug: string; probability: number }>;
-
-  if (isPgEnabled()) {
-    executions = await pgQuery(
+  const [executions, scannerRows] = await Promise.all([
+    dualQuery<ExecutionRow>(
       `SELECT id, slug, direction, source, amount, fill_price, status, executed_at, pnl, order_id, pipeline_run_id
          FROM executions
         WHERE agent_id = $1
         ORDER BY executed_at DESC
         LIMIT 500`,
       [linkedAgent.agentId]
-    );
+    ),
+    getLatestScannerResults(),
+  ]);
 
-    liveRows = await pgQuery(
-      `SELECT s.slug, s.probability FROM scanner_results s
-       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
-       ON s.slug = t.slug AND s.scanned_at = t.latest`
-    );
-  } else {
-    const db = getDb();
-    executions = db.prepare(
-      `SELECT id, slug, direction, source, amount, fill_price, status, executed_at, pnl, order_id, pipeline_run_id
-         FROM executions
-        WHERE agent_id = ?
-        ORDER BY executed_at DESC
-        LIMIT 500`
-    ).all(linkedAgent.agentId) as ExecutionRow[];
-
-    liveRows = db.prepare(
-      `SELECT s.slug, s.probability FROM scanner_results s
-       INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
-       ON s.slug = t.slug AND s.scanned_at = t.latest`
-    ).all() as Array<{ slug: string; probability: number }>;
-  }
-
-  const livePrice = new Map(liveRows.map((row) => [row.slug, row.probability]));
-  const scannerDirections = await getLatestScannerDirectionMap();
+  const { priceMap: livePrice, directionMap: scannerDirections } = buildScannerMaps(scannerRows);
 
   return executions.map((execution) => {
     const scannerDirection = scannerDirections.get(execution.slug);

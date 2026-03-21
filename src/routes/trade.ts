@@ -1,23 +1,21 @@
 import { Router, Request, Response } from "express";
 import { runCliWithWallet, CliError } from "../cli";
-import { getDb } from "../db/schema";
-import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
+import { dualQuery } from "../db/postgres";
 import { tradeRateLimit } from "../infra/rateLimit";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
-import { loadAgentWalletContext, loadAgentWalletContextWithDiag } from "../utils/agentKey";
+import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { insertExecutionRecord } from "../utils/executions";
-import { executeManagedTrade } from "../services/tradeExecution";
-import { emitNotification } from "../infra/socket";
+import { executeManagedTrade, closePosition } from "../services/tradeExecution";
 import {
+  buildScannerMaps,
   calculateOpenExecutionMetrics,
   getEntryYesPrice,
-  getLatestScannerDirectionMap,
+  getLatestScannerResults,
   normalizeExecutionDirection,
 } from "../utils/executionDirection";
 import { toFiniteNumber } from "../utils/numbers";
-
-type TradeDirection = "YES" | "NO";
+import type { TradeDirection, ExecutionRecord } from "../types/execution";
 
 function resolveRequestedDirection(body: Record<string, unknown>): TradeDirection | null {
   const explicitDirection = normalizeExecutionDirection(body["direction"]);
@@ -37,37 +35,17 @@ router.use(tradeRateLimit);
 // ── GET /api/trade ────────────────────────────────────────────
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const userId = await getUserIdAsync(req);
-    const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
-
-    let executions: any[];
-    let priceRows: any[];
-
-    if (isPgEnabled()) {
-      executions = linkedAgent
-        ? await pgQuery("SELECT * FROM executions WHERE agent_id = $1 ORDER BY executed_at DESC LIMIT 500", [linkedAgent.agentId])
-        : await pgQuery("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500");
-
-      priceRows = await pgQuery(
-        `SELECT s.slug, s.probability FROM scanner_results s
-         INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
-         ON s.slug = t.slug AND s.scanned_at = t.latest`
-      );
-    } else {
-      const db = getDb();
-      executions = linkedAgent
-        ? db.prepare("SELECT * FROM executions WHERE agent_id = ? ORDER BY executed_at DESC LIMIT 500").all(linkedAgent.agentId)
-        : db.prepare("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500").all() as any[];
-
-      priceRows = db.prepare(
-        `SELECT s.slug, s.probability FROM scanner_results s
-         INNER JOIN (SELECT slug, MAX(scanned_at) AS latest FROM scanner_results GROUP BY slug) t
-         ON s.slug = t.slug AND s.scanned_at = t.latest`
-      ).all() as any[];
-    }
-
-    const livePrice = new Map(priceRows.map(r => [r.slug, r.probability]));
-    const scannerDirections = await getLatestScannerDirectionMap();
+    const [executions, scannerRows] = await Promise.all([
+      (async () => {
+        const userId = await getUserIdAsync(req);
+        const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+        return linkedAgent
+          ? dualQuery<ExecutionRecord>("SELECT * FROM executions WHERE agent_id = $1 ORDER BY executed_at DESC LIMIT 500", [linkedAgent.agentId])
+          : dualQuery<ExecutionRecord>("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500");
+      })(),
+      getLatestScannerResults(),
+    ]);
+    const { priceMap: livePrice, directionMap: scannerDirections } = buildScannerMaps(scannerRows);
 
     const tradeList = executions.map((execution) => {
       const scannerDirection = scannerDirections.get(execution.slug);
@@ -237,122 +215,24 @@ router.post("/close-position", async (req: Request, res: Response) => {
     const userId = await getUserIdAsync(req);
     const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
 
-    type ExecutionRecord = {
-      id: number;
-      user_id: string | null;
-      agent_id: string | null;
-      slug: string;
-      side: string;
-      direction: string | null;
-      source: string | null;
-      amount: number;
-      fill_price: number | null;
-      status: string;
-      resolution_date: string | null;
-    };
+    const result = await closePosition({
+      executionId,
+      userId,
+      agentId: linkedAgent?.agentId ?? null,
+    });
 
-    let execution: ExecutionRecord | undefined;
-
-    if (isPgEnabled()) {
-      execution = await pgQueryOne<ExecutionRecord>(
-        `SELECT id, user_id, agent_id, slug, side, direction, source, amount, fill_price, status, resolution_date
-           FROM executions
-          WHERE id = $1
-            AND status IN ('placed', 'paper')
-            AND pnl IS NULL`,
-        [executionId]
-      ) ?? undefined;
-    } else {
-      const db = getDb();
-      execution = db.prepare(
-        `SELECT id, user_id, agent_id, slug, side, direction, source, amount, fill_price, status, resolution_date
-           FROM executions
-          WHERE id = ?
-            AND status IN ('placed', 'paper')
-            AND pnl IS NULL`
-      ).get(executionId) as ExecutionRecord | undefined;
-    }
-
-    if (!execution) {
-      res.status(404).json({ error: "Open execution not found" });
+    if (!result.ok) {
+      if (result.error === "NOT_FOUND") {
+        res.status(404).json({ error: "Open execution not found" });
+      } else if (result.error === "FORBIDDEN") {
+        res.status(403).json({ error: "You can only close your own positions" });
+      } else {
+        res.status(400).json({ error: result.error ?? "Close position failed" });
+      }
       return;
     }
 
-    const isOwner =
-      (userId && execution.user_id === userId) ||
-      (linkedAgent?.agentId && execution.agent_id === linkedAgent.agentId);
-    if (!isOwner) {
-      res.status(403).json({ error: "You can only close your own positions" });
-      return;
-    }
-
-    let priceRow: { probability: number } | null | undefined;
-
-    if (isPgEnabled()) {
-      priceRow = await pgQueryOne<{ probability: number }>(
-        `SELECT probability FROM scanner_results WHERE slug = $1 ORDER BY scanned_at DESC LIMIT 1`,
-        [execution.slug]
-      );
-    } else {
-      const db = getDb();
-      priceRow = db.prepare(
-        `SELECT probability FROM scanner_results WHERE slug = ? ORDER BY scanned_at DESC LIMIT 1`
-      ).get(execution.slug) as { probability: number } | undefined;
-    }
-
-    const scannerDirection = (await getLatestScannerDirectionMap()).get(execution.slug);
-    const currentYes = priceRow?.probability ?? getEntryYesPrice(execution, scannerDirection);
-    const metrics = calculateOpenExecutionMetrics(execution, currentYes, scannerDirection);
-    const realizedPnl = Math.round(metrics.pnl * 100) / 100;
-    const now = Date.now();
-
-    if (isPgEnabled()) {
-      await pgExec(
-        `UPDATE executions
-            SET status = 'closed',
-                pnl = $1,
-                closed_at = $2,
-                updated_at = $3
-          WHERE id = $4`,
-        [realizedPnl, now, now, execution.id]
-      );
-    } else {
-      const db = getDb();
-      db.prepare(
-        `UPDATE executions
-            SET status = 'closed',
-                pnl = ?,
-                closed_at = ?,
-                updated_at = ?
-          WHERE id = ?`
-      ).run(realizedPnl, now, now, execution.id);
-    }
-
-    emitNotification(userId ?? execution.user_id ?? null, {
-      id: `position-close-${execution.id}-${now}`,
-      level: realizedPnl >= 0 ? "success" : "warning",
-      title: "Position closed",
-      message: `${execution.slug} closed at ${Math.round(metrics.currentTokenPrice * 100)}¢ for ${realizedPnl >= 0 ? "+" : ""}$${Math.abs(realizedPnl).toFixed(2)} P&L.`,
-      category: "position",
-      timestamp: now,
-      action: {
-        label: "Open market",
-        href: `/market/${execution.slug}`,
-      },
-    });
-
-    res.json({
-      ok: true,
-      executionId: execution.id,
-      slug: execution.slug,
-      direction: metrics.direction,
-      size: execution.amount,
-      entryPrice: metrics.entryTokenPrice,
-      exitPrice: metrics.currentTokenPrice,
-      pnl: realizedPnl,
-      closedAt: now,
-      status: "closed",
-    });
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

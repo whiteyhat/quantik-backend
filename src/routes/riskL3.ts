@@ -6,9 +6,7 @@ import {
   getCircuitBreaker,
 } from "../risk";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
-import { requireClerkAuth } from "../middleware/auth";
-import { resetRiskState } from "../risk/state";
+import { isPgEnabled, pgQueryOne } from "../db/postgres";
 
 const router = Router();
 
@@ -129,49 +127,6 @@ router.post("/circuit-breaker/reset", async (_req: Request, res: Response) => {
     res.json({ message: "Circuit breaker reset to ARMED.", circuitBreaker: await cb.getStatus() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
-  }
-});
-
-// ── EMERGENCY RESET ───────────────────────────────────────────
-router.get("/emergency/reset-panic", requireClerkAuth, async (_req: Request, res: Response) => {
-  try {
-    if (isPgEnabled()) {
-      const latestEvent = await pgQueryOne<{ id: string; cooldown_until: number | null }>(
-        "SELECT id, cooldown_until FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
-      );
-      if (latestEvent?.cooldown_until && latestEvent.cooldown_until > Date.now()) {
-        res.status(409).json({
-          success: false,
-          error: "Panic cooldown is still active. Use /api/v1/panic-mode/rearm after the cooldown expires.",
-          cooldownEndsAt: latestEvent.cooldown_until,
-        });
-        return;
-      }
-      await resetRiskState(Date.now());
-      if (latestEvent?.id) {
-        await pgQuery("UPDATE panic_mode_events SET rearmed_at = $1 WHERE id = $2", [Date.now(), latestEvent.id]);
-      }
-    } else {
-      const db = getDb();
-      const latestEvent = db.prepare(
-        "SELECT id, cooldown_until FROM panic_mode_events ORDER BY initiated_at DESC LIMIT 1"
-      ).get() as { id: string; cooldown_until: number | null } | undefined;
-      if (latestEvent?.cooldown_until && latestEvent.cooldown_until > Date.now()) {
-        res.status(409).json({
-          success: false,
-          error: "Panic cooldown is still active. Use /api/v1/panic-mode/rearm after the cooldown expires.",
-          cooldownEndsAt: latestEvent.cooldown_until,
-        });
-        return;
-      }
-      await resetRiskState(Date.now());
-      if (latestEvent?.id) {
-        db.prepare("UPDATE panic_mode_events SET rearmed_at = ? WHERE id = ?").run(Date.now(), latestEvent.id);
-      }
-    }
-    res.json({ success: true, message: "Panic mode and circuit breaker reset successfully." });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
   }
 });
 

@@ -31,6 +31,9 @@ let sharedArenaSnapshotPromise: Promise<SharedArenaSnapshot> | null = null;
 /** Cached leaderboard results keyed by window (only for no-viewer, no-pagination calls). */
 let leaderboardCache = new Map<string, { result: ArenaLeaderboardResponse; loadedAt: number }>();
 
+/** Cached slug→question map (shared across all leaderboard calls). */
+let questionCache: { map: Map<string, string>; loadedAt: number } | null = null;
+
 async function loadActiveArenaAgents(): Promise<ArenaAgentRecord[]> {
   if (isPgEnabled()) {
     return pgQuery<ArenaAgentRecord>(
@@ -268,7 +271,20 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
     for (const m of result.viewer.entry.marketBreakdown) allSlugs.add(m.slug);
   }
   if (allSlugs.size > 0) {
-    const questionMap = await loadMarketQuestions([...allSlugs]);
+    // Reuse cached question map if fresh; only query DB for unknown slugs
+    const now = Date.now();
+    let questionMap: Map<string, string>;
+    if (questionCache && now - questionCache.loadedAt < ARENA_CACHE_TTL_MS) {
+      const missingSlugs = [...allSlugs].filter((s) => !questionCache!.map.has(s));
+      if (missingSlugs.length > 0) {
+        const fresh = await loadMarketQuestions(missingSlugs);
+        for (const [k, v] of fresh) questionCache.map.set(k, v);
+      }
+      questionMap = questionCache.map;
+    } else {
+      questionMap = await loadMarketQuestions([...allSlugs]);
+      questionCache = { map: questionMap, loadedAt: now };
+    }
     for (const leader of result.leaders) {
       enrichMarketBreakdownQuestions(leader.marketBreakdown, questionMap);
     }
@@ -288,6 +304,7 @@ export function resetArenaLeaderboardCache(): void {
   sharedArenaSnapshot = null;
   sharedArenaSnapshotPromise = null;
   leaderboardCache.clear();
+  questionCache = null;
 }
 
 /** Return the cached active agents (includes user_id for notification routing). */

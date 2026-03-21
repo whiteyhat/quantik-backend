@@ -217,6 +217,25 @@ function buildMissingItems(
   return items;
 }
 
+// ── Shared Helpers ───────────────────────────────────────────────────────────
+
+async function fetchBalances(address: string) {
+  const [polSnap, usdcSnap] = await Promise.all([
+    getPolBalanceSnapshot(address),
+    getUsdcBalanceSnapshot(address),
+  ]);
+  return {
+    pol: polSnap.balance,
+    usdc: usdcSnap.balance,
+    polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
+    usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
+  };
+}
+
+function buildReadyResult(address: string, balances: Awaited<ReturnType<typeof fetchBalances>>): PolymarketPrepResult {
+  return { status: "ready", polymarketReady: true, address, balances };
+}
+
 // ── Core Functions ────────────────────────────────────────────────────────────
 
 // ── checkPolymarketBalance ──────────────────────────────────────────────────
@@ -236,39 +255,19 @@ export async function checkPolymarketBalance(
   const address = agent.wallet_address;
 
   if (agent.polymarket_ready === 1) {
-    const [polSnap, usdcSnap] = await Promise.all([
-      getPolBalanceSnapshot(address),
-      getUsdcBalanceSnapshot(address),
-    ]);
-    return {
-      status: "ready",
-      polymarketReady: true,
-      address,
-      balances: {
-        pol: polSnap.balance,
-        usdc: usdcSnap.balance,
-        polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
-        usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
-      },
-    };
+    return buildReadyResult(address, await fetchBalances(address));
   }
 
-  const [polSnap, usdcSnap] = await Promise.all([
-    getPolBalanceSnapshot(address),
-    getUsdcBalanceSnapshot(address),
-  ]);
-  const polSufficient = polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE;
-  const usdcSufficient = usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE;
-  const balances = { pol: polSnap.balance, usdc: usdcSnap.balance, polSufficient, usdcSufficient };
+  const balances = await fetchBalances(address);
 
-  if (!polSufficient || !usdcSufficient) {
+  if (!balances.polSufficient || !balances.usdcSufficient) {
     await updatePolymarketStatus(agentId, "pending_funding", false);
     return {
       status: "pending_funding",
       polymarketReady: false,
       address,
       balances,
-      missingItems: buildMissingItems(polSnap.balance, usdcSnap.balance),
+      missingItems: buildMissingItems(balances.pol, balances.usdc),
     };
   }
 
@@ -294,33 +293,10 @@ export async function runPolymarketApprovals(
   const address = agent.wallet_address;
 
   if (agent.polymarket_ready === 1) {
-    const [polSnap, usdcSnap] = await Promise.all([
-      getPolBalanceSnapshot(address),
-      getUsdcBalanceSnapshot(address),
-    ]);
-    return {
-      status: "ready",
-      polymarketReady: true,
-      address,
-      balances: {
-        pol: polSnap.balance,
-        usdc: usdcSnap.balance,
-        polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
-        usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
-      },
-    };
+    return buildReadyResult(address, await fetchBalances(address));
   }
 
-  const [polSnap, usdcSnap] = await Promise.all([
-    getPolBalanceSnapshot(address),
-    getUsdcBalanceSnapshot(address),
-  ]);
-  const balances = {
-    pol: polSnap.balance,
-    usdc: usdcSnap.balance,
-    polSufficient: polSnap.balance >= AUTOPILOT_MIN_POL_BALANCE,
-    usdcSufficient: usdcSnap.balance >= AUTOPILOT_MIN_USDC_BALANCE,
-  };
+  const balances = await fetchBalances(address);
 
   await updatePolymarketStatus(agentId, "approving", false);
 

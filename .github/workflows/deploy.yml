@@ -27,7 +27,7 @@ jobs:
         run: npm test
         env:
           NODE_ENV: test
-          API_URL: https://quantik-backend-production.up.railway.app
+          API_URL: https://api.quantik.fun
 
       - name: Build backend
         run: npm run build

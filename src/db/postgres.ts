@@ -936,6 +936,44 @@ export function isPgEnabled(): boolean {
   return !!process.env.DATABASE_URL;
 }
 
+// ── Dual-database helpers ─────────────────────────────────────────────────────
+// Accept PG-style SQL ($1, $2, …) and auto-convert to SQLite positional params.
+// This eliminates the need to write every query twice.
+
+import { getDb } from "./schema";
+
+/** Convert PG-style `$1, $2` placeholders to SQLite `?` placeholders.
+ *  Note: does not handle `$N` inside SQL string literals (e.g. `'costs $10'`).
+ *  Current callers never embed dollar-sign literals, so this is safe. */
+function pgToSqlite(sql: string): string {
+  return sql.replace(/\$\d+/g, "?");
+}
+
+/** Query rows from the active database (PG if enabled, else SQLite). */
+export async function dualQuery<T = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  if (isPgEnabled()) return pgQuery<T>(sql, params);
+  return getDb().prepare(pgToSqlite(sql)).all(...params) as T[];
+}
+
+/** Query a single row from the active database, or null. */
+export async function dualQueryOne<T = Record<string, unknown>>(
+  sql: string,
+  params: unknown[] = [],
+): Promise<T | null> {
+  if (isPgEnabled()) return pgQueryOne<T>(sql, params);
+  return (getDb().prepare(pgToSqlite(sql)).get(...params) as T) ?? null;
+}
+
+/** Execute a write statement on the active database. Returns affected row count. */
+export async function dualExec(sql: string, params: unknown[] = []): Promise<number> {
+  if (isPgEnabled()) return pgExec(sql, params);
+  const info = getDb().prepare(pgToSqlite(sql)).run(...params);
+  return info.changes;
+}
+
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 
 export async function closePgPool(): Promise<void> {

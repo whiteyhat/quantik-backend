@@ -1,6 +1,6 @@
 import { Request } from "express";
 
-const PRODUCTION_URL = "https://quantik-backend-production.up.railway.app";
+const PRODUCTION_URL = "https://api.quantik.fun";
 
 export function getBaseUrl(req: Request): string {
   if (process.env.BACKEND_URL) return process.env.BACKEND_URL;

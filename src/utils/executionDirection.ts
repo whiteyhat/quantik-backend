@@ -1,7 +1,9 @@
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQuery } from "../db/postgres";
+import { isPgEnabled, pgQuery, dualQuery } from "../db/postgres";
 
-export type ExecutionDirection = "YES" | "NO";
+import type { TradeDirection } from "../types/execution";
+
+export type ExecutionDirection = TradeDirection;
 
 export interface ExecutionDirectionRecord {
   slug: string;
@@ -42,29 +44,41 @@ export function recommendationToDirection(value: unknown): ExecutionDirection | 
   return null;
 }
 
-export async function getLatestScannerDirectionMap(): Promise<Map<string, ExecutionDirection>> {
-  const query = `SELECT s.slug, s.recommendation
-     FROM scanner_results s
-     INNER JOIN (
-       SELECT slug, MAX(scanned_at) AS latest
-       FROM scanner_results
-       GROUP BY slug
-     ) latest
-       ON latest.slug = s.slug AND latest.latest = s.scanned_at`;
+export interface LatestScannerRow {
+  slug: string;
+  probability: number | null;
+  recommendation: string | null;
+}
 
-  let rows: Array<{ slug: string; recommendation: string | null }>;
-  if (isPgEnabled()) {
-    rows = await pgQuery<{ slug: string; recommendation: string | null }>(query);
-  } else {
-    const db = getDb();
-    rows = db.prepare(query).all() as Array<{ slug: string; recommendation: string | null }>;
-  }
-
-  return new Map(
-    rows
-      .map((row) => [row.slug, recommendationToDirection(row.recommendation)] as const)
-      .filter((entry): entry is [string, ExecutionDirection] => entry[1] !== null)
+/** Fetch the latest scanner result per slug (single query, shared across callers). */
+export async function getLatestScannerResults(): Promise<LatestScannerRow[]> {
+  return dualQuery<LatestScannerRow>(
+    `SELECT s.slug, s.probability, s.recommendation
+       FROM scanner_results s
+       INNER JOIN (
+         SELECT slug, MAX(scanned_at) AS latest
+         FROM scanner_results
+         GROUP BY slug
+       ) latest
+         ON latest.slug = s.slug AND latest.latest = s.scanned_at`
   );
+}
+
+/** Build price and direction maps from scanner rows. */
+export function buildScannerMaps(rows: LatestScannerRow[]) {
+  return {
+    priceMap: new Map(rows.map(r => [r.slug, r.probability])),
+    directionMap: new Map(
+      rows
+        .map((r) => [r.slug, recommendationToDirection(r.recommendation)] as const)
+        .filter((e): e is [string, ExecutionDirection] => e[1] !== null)
+    ),
+  };
+}
+
+export async function getLatestScannerDirectionMap(): Promise<Map<string, ExecutionDirection>> {
+  const rows = await getLatestScannerResults();
+  return buildScannerMaps(rows).directionMap;
 }
 
 export function resolveExecutionDirection(

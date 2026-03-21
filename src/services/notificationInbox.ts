@@ -48,12 +48,7 @@ function toNotification(row: NotificationRow): InboxNotification {
 
 export async function persistNotification(notification: InboxNotification): Promise<void> {
   const now = Date.now();
-  const db = getDb();
-  db.prepare(
-    `INSERT OR IGNORE INTO notifications (
-       id, user_id, level, title, message, category, timestamp, read_at, action_label, action_href, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+  const params = [
     notification.id,
     notification.userId,
     notification.level,
@@ -64,8 +59,8 @@ export async function persistNotification(notification: InboxNotification): Prom
     notification.readAt ?? null,
     notification.action?.label ?? null,
     notification.action?.href ?? null,
-    now
-  );
+    now,
+  ];
 
   if (isPgEnabled()) {
     await pgExec(
@@ -73,20 +68,15 @@ export async function persistNotification(notification: InboxNotification): Prom
          id, user_id, level, title, message, category, timestamp, read_at, action_label, action_href, created_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO NOTHING`,
-      [
-        notification.id,
-        notification.userId,
-        notification.level,
-        notification.title,
-        notification.message,
-        notification.category ?? null,
-        notification.timestamp,
-        notification.readAt ?? null,
-        notification.action?.label ?? null,
-        notification.action?.href ?? null,
-        now,
-      ]
+      params
     );
+  } else {
+    const db = getDb();
+    db.prepare(
+      `INSERT OR IGNORE INTO notifications (
+         id, user_id, level, title, message, category, timestamp, read_at, action_label, action_href, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(...params);
   }
 }
 
@@ -118,13 +108,6 @@ export async function listNotifications(userId: string, limit = 100): Promise<In
 
 export async function markNotificationRead(userId: string, notificationId: string): Promise<boolean> {
   const now = Date.now();
-  const db = getDb();
-  const sqliteResult = db.prepare(
-    `UPDATE notifications
-        SET read_at = COALESCE(read_at, ?)
-      WHERE id = ?
-        AND (user_id = ? OR user_id IS NULL)`
-  ).run(now, notificationId, userId);
 
   if (isPgEnabled()) {
     const count = await pgExec(
@@ -137,18 +120,18 @@ export async function markNotificationRead(userId: string, notificationId: strin
     return count > 0;
   }
 
-  return sqliteResult.changes > 0;
+  const db = getDb();
+  const result = db.prepare(
+    `UPDATE notifications
+        SET read_at = COALESCE(read_at, ?)
+      WHERE id = ?
+        AND (user_id = ? OR user_id IS NULL)`
+  ).run(now, notificationId, userId);
+  return result.changes > 0;
 }
 
 export async function markAllNotificationsRead(userId: string): Promise<number> {
   const now = Date.now();
-  const db = getDb();
-  const sqliteResult = db.prepare(
-    `UPDATE notifications
-        SET read_at = COALESCE(read_at, ?)
-      WHERE read_at IS NULL
-        AND (user_id = ? OR user_id IS NULL)`
-  ).run(now, userId);
 
   if (isPgEnabled()) {
     return pgExec(
@@ -160,5 +143,12 @@ export async function markAllNotificationsRead(userId: string): Promise<number> 
     );
   }
 
-  return sqliteResult.changes;
+  const db = getDb();
+  const result = db.prepare(
+    `UPDATE notifications
+        SET read_at = COALESCE(read_at, ?)
+      WHERE read_at IS NULL
+        AND (user_id = ? OR user_id IS NULL)`
+  ).run(now, userId);
+  return result.changes;
 }

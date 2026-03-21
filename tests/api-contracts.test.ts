@@ -3,7 +3,7 @@
  * These must all pass before Railway deploy is allowed.
  */
 
-const API = process.env.API_URL ?? "https://quantik-backend-production.up.railway.app";
+const API = process.env.API_URL ?? "https://api.quantik.fun";
 const TEST_SLUG = "khamenei-out-as-supreme-leader-of-iran-by-february-28";
 const TIMEOUT = 60000;
 

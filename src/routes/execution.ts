@@ -7,9 +7,9 @@ import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import { getUserIdAsync } from "../middleware/auth";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
 
-const router = Router();
+import type { ExecutionSource } from "../types/execution";
 
-type ExecutionSource = "autopilot" | "manual";
+const router = Router();
 
 interface OwnedAgentRow {
   id: string;

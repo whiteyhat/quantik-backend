@@ -1,16 +1,17 @@
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgExec } from "../db/postgres";
+import type { TradeDirection, ExecutionSource, ExecutionStatus } from "../types/execution";
 
 export interface ExecutionRecordInput {
   userId: string | null;
   agentId: string | null;
   slug: string;
   side: string;
-  direction: "YES" | "NO";
-  source: "autopilot" | "manual";
+  direction: TradeDirection;
+  source: ExecutionSource;
   amount: number;
   executedAt: number;
-  status: string;
+  status: ExecutionStatus;
   orderId?: string | null;
   fillPrice?: number | null;
   pnl?: number | null;

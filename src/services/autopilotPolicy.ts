@@ -348,27 +348,6 @@ export async function upsertAutopilotPolicyOverrides(
     normalized.updatedAt,
   ];
 
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO autopilot_policies (
-       agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
-       min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
-       daily_loss_limit_pct, use_aura_sentiment, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(agent_id) DO UPDATE SET
-       cadence_minutes = excluded.cadence_minutes,
-       cooldown_minutes = excluded.cooldown_minutes,
-       max_trades_per_day = excluded.max_trades_per_day,
-       max_bet_usdc = excluded.max_bet_usdc,
-       min_sigma = excluded.min_sigma,
-       min_kelly = excluded.min_kelly,
-       kelly_multiplier = excluded.kelly_multiplier,
-       max_position_fraction = excluded.max_position_fraction,
-       daily_loss_limit_pct = excluded.daily_loss_limit_pct,
-       use_aura_sentiment = excluded.use_aura_sentiment,
-       updated_at = excluded.updated_at`
-  ).run(...params);
-
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO autopilot_policies (
@@ -390,6 +369,27 @@ export async function upsertAutopilotPolicyOverrides(
          updated_at = EXCLUDED.updated_at`,
       params
     );
+  } else {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO autopilot_policies (
+         agent_id, cadence_minutes, cooldown_minutes, max_trades_per_day, max_bet_usdc,
+         min_sigma, min_kelly, kelly_multiplier, max_position_fraction,
+         daily_loss_limit_pct, use_aura_sentiment, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         cadence_minutes = excluded.cadence_minutes,
+         cooldown_minutes = excluded.cooldown_minutes,
+         max_trades_per_day = excluded.max_trades_per_day,
+         max_bet_usdc = excluded.max_bet_usdc,
+         min_sigma = excluded.min_sigma,
+         min_kelly = excluded.min_kelly,
+         kelly_multiplier = excluded.kelly_multiplier,
+         max_position_fraction = excluded.max_position_fraction,
+         daily_loss_limit_pct = excluded.daily_loss_limit_pct,
+         use_aura_sentiment = excluded.use_aura_sentiment,
+         updated_at = excluded.updated_at`
+    ).run(...params);
   }
 
   return normalized;
@@ -403,7 +403,7 @@ export async function persistFullDerivedPolicy(
   const derived = deriveAutopilotPolicy(attrs);
   const validated = validatePolicyBounds(derived);
 
-  await upsertAutopilotPolicyOverrides(agentId, {
+  const overrides = await upsertAutopilotPolicyOverrides(agentId, {
     cadenceMinutes: validated.cadenceMinutes,
     cooldownMinutes: validated.cooldownMinutes,
     maxTradesPerDay: validated.maxTradesPerDay,
@@ -416,7 +416,8 @@ export async function persistFullDerivedPolicy(
     useAuraSentiment: validated.useAuraSentiment,
   });
 
-  return getAutopilotPolicyEnvelope(attrs);
+  // Build envelope in-memory instead of re-reading from DB
+  return buildAutopilotPolicyEnvelope(attrs, overrides);
 }
 
 /** Reset policy to the recommended baseline derived from agent traits */
@@ -432,12 +433,7 @@ export async function insertAutopilotDecision(input: AutopilotDecisionInput): Pr
   const policySnapshot = JSON.stringify(input.policySnapshot);
   const signalSnapshot = JSON.stringify(input.signalSnapshot ?? null);
 
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO autopilot_decisions (
-       id, agent_id, user_id, slug, direction, decision, reason_code, size_usdc, scanned_at, policy_snapshot, signal_snapshot, error
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+  const params = [
     id,
     input.agentId,
     input.userId,
@@ -449,29 +445,23 @@ export async function insertAutopilotDecision(input: AutopilotDecisionInput): Pr
     input.scannedAt,
     policySnapshot,
     signalSnapshot,
-    input.error ?? null
-  );
+    input.error ?? null,
+  ];
 
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO autopilot_decisions (
          id, agent_id, user_id, slug, direction, decision, reason_code, size_usdc, scanned_at, policy_snapshot, signal_snapshot, error
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [
-        id,
-        input.agentId,
-        input.userId,
-        input.slug,
-        input.direction,
-        input.decision,
-        input.reasonCode,
-        input.sizeUsdc,
-        input.scannedAt,
-        policySnapshot,
-        signalSnapshot,
-        input.error ?? null,
-      ]
+      params
     );
+  } else {
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO autopilot_decisions (
+         id, agent_id, user_id, slug, direction, decision, reason_code, size_usdc, scanned_at, policy_snapshot, signal_snapshot, error
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(...params);
   }
 }
 
