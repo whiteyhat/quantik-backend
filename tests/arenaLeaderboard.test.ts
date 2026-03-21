@@ -123,8 +123,8 @@ describe("arena leaderboard builder", () => {
 
     expect(result.leaders).toHaveLength(1);
     expect(result.leaders[0].selectedRealizedPnl).toBe(30);
-    expect(result.leaders[0].selectedUnrealizedPnl).toBe(50);
-    expect(result.leaders[0].selectedPnl).toBe(80);
+    expect(result.leaders[0].selectedUnrealizedPnl).toBe(90);
+    expect(result.leaders[0].selectedPnl).toBe(120);
     expect(result.leaders[0].allTimePnl).toBe(120);
   });
 

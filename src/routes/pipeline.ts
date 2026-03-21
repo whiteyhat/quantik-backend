@@ -25,6 +25,7 @@ import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
 import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
 
 const router = Router();
 
@@ -58,24 +59,7 @@ interface AuraAgentData {
   narrative?: string;
 }
 
-type AgentOutputKey =
-  | "aura_output"
-  | "flux_output"
-  | "oracle_output"
-  | "edge_output"
-  | "clause_output"
-  | "lucifer_output"
-  | "sigma_output";
-
-const OUTPUT_KEY_MAP: Record<string, AgentOutputKey> = {
-  aura: "aura_output",
-  flux: "flux_output",
-  oracle: "oracle_output",
-  edge: "edge_output",
-  clause: "clause_output",
-  lucifer: "lucifer_output",
-  sigma: "sigma_output",
-};
+// AgentOutputKey and AGENT_OUTPUT_KEYS imported from ../agents/constants
 
 interface SerializedPipelineRun extends Omit<
   PipelineRun,
@@ -176,7 +160,7 @@ async function serializePipelineRun(
 
   return {
     ...serialized,
-    available_agents: HISTORY_AGENTS.filter((agent) => serialized[OUTPUT_KEY_MAP[agent]] != null),
+    available_agents: AGENT_NAMES.filter((agent) => serialized[AGENT_OUTPUT_KEYS[agent]] != null),
   };
 }
 
@@ -258,10 +242,10 @@ function buildSyntheticReplayFrames(run: SerializedPipelineRun): ReplayFrame[] {
     completedAt: pipelineEnd,
   });
 
-  HISTORY_AGENTS.filter((agent) => run[OUTPUT_KEY_MAP[agent]] != null).forEach((agent, index) => {
+  AGENT_NAMES.filter((agent) => run[AGENT_OUTPUT_KEYS[agent]] != null).forEach((agent, index) => {
     const startedAt = pipelineStart + index * 250;
     const completedAt = startedAt + 180;
-    const data = run[OUTPUT_KEY_MAP[agent]];
+    const data = run[AGENT_OUTPUT_KEYS[agent]];
     frames.push({
       index: frames.length,
       type: "agent:start",
@@ -311,7 +295,7 @@ interface OracleAgentData {
 
 type ScannerPipelinePayload = Record<string, unknown>;
 
-const HISTORY_AGENTS = ["aura", "flux", "oracle", "edge", "clause", "lucifer", "sigma"] as const;
+// AGENT_NAMES imported from ../agents/constants (replaces AGENT_NAMES)
 
 function toRecord(raw: unknown): Record<string, unknown> | null {
   if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
@@ -645,7 +629,6 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     category: String(marketRaw.category ?? "default"),
     token_id,
   };
-  await updatePipelineRun(runId, { market_question: marketInput.question });
 
   const completeRun = async (
     status: "complete" | "error" | "skipped",
@@ -669,13 +652,16 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     res.end();
   };
 
-  const storeAgentResult = async (name: string, data: unknown) => {
-    const outputKey = OUTPUT_KEY_MAP[name];
-    if (outputKey) {
-      await updatePipelineRun(
-        runId,
-        { [outputKey]: JSON.stringify(data) } as Partial<PipelineRun>
-      );
+  const pendingOutputs: Record<string, string> = {};
+  const storeAgentResult = (name: string, data: unknown) => {
+    const outputKey = AGENT_OUTPUT_KEYS[name as AgentName];
+    if (outputKey && data != null) {
+      pendingOutputs[outputKey] = JSON.stringify(data);
+    }
+  };
+  const flushAgentOutputs = async () => {
+    if (Object.keys(pendingOutputs).length > 0) {
+      await updatePipelineRun(runId, pendingOutputs as unknown as Partial<PipelineRun>);
     }
   };
 
@@ -689,7 +675,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     const stepId = agentStepIds.get(agent);
     if (stepId) await finishStep(stepId, "complete", data, null);
     sendEvent("agent:complete", { agent, status: "complete", data });
-    await storeAgentResult(agent, data);
+    storeAgentResult(agent, data);
   };
   const errorAgent = async (agent: string, error: string) => {
     const stepId = agentStepIds.get(agent);
@@ -759,6 +745,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     const error = "Oracle failed or timed out";
     sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "oracle_failed", runId });
     await errorAgent("oracle", error);
+    await flushAgentOutputs();
     await completeRun("error", { decision: "SKIP", confidence: null, error });
     return;
   }
@@ -778,6 +765,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     const error = "Edge failed or timed out";
     sendEvent("pipeline:skip", { slug: effectiveSlug, reason: "edge_failed", runId });
     await errorAgent("edge", error);
+    await flushAgentOutputs();
     await completeRun("error", { decision: "SKIP", confidence: null, error });
     return;
   }
@@ -803,12 +791,6 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   await completeAgent("sigma", sigma.data);
 
   const sigmaData = sigma.data as Record<string, unknown>;
-  await updatePipelineRun(runId, {
-    sigma_output: JSON.stringify(sigma.data),
-    decision: typeof sigmaData["decision"] === "string" ? sigmaData["decision"] : null,
-    confidence: typeof sigmaData["confidence"] === "number" ? sigmaData["confidence"] : null,
-    market_question: marketInput.question,
-  });
 
   // ── Auto-execute if SIGMA says BET_YES or BET_NO ───────────────
   const decision = sigmaData["decision"];
@@ -878,6 +860,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     await finishStep(tradeStepId, "skipped", executionResult, null);
   }
 
+  await flushAgentOutputs();
   await completeRun("complete", {
     decision: sigmaData["decision"],
     confidence: sigmaData["confidence"],

@@ -28,6 +28,9 @@ interface SharedArenaSnapshot {
 let sharedArenaSnapshot: SharedArenaSnapshot | null = null;
 let sharedArenaSnapshotPromise: Promise<SharedArenaSnapshot> | null = null;
 
+/** Cached leaderboard results keyed by window (only for no-viewer, no-pagination calls). */
+let leaderboardCache = new Map<string, { result: ArenaLeaderboardResponse; loadedAt: number }>();
+
 async function loadActiveArenaAgents(): Promise<ArenaAgentRecord[]> {
   if (isPgEnabled()) {
     return pgQuery<ArenaAgentRecord>(
@@ -216,6 +219,15 @@ function enrichMarketBreakdownQuestions(
 }
 
 export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: string | null, limit?: number, offset?: number): Promise<ArenaLeaderboardResponse> {
+  // Return cached result for common case (no viewer, no pagination)
+  const cacheable = !viewerAgentId && limit == null;
+  if (cacheable) {
+    const cached = leaderboardCache.get(window);
+    if (cached && Date.now() - cached.loadedAt < ARENA_CACHE_TTL_MS) {
+      return cached.result;
+    }
+  }
+
   const [snapshot, previousRanks] = await Promise.all([
     loadSharedArenaSnapshot(),
     loadPreviousRanks(window),
@@ -265,12 +277,17 @@ export async function loadArenaLeaderboard(window: ArenaWindow, viewerAgentId?: 
     }
   }
 
+  if (cacheable) {
+    leaderboardCache.set(window, { result, loadedAt: Date.now() });
+  }
+
   return result;
 }
 
 export function resetArenaLeaderboardCache(): void {
   sharedArenaSnapshot = null;
   sharedArenaSnapshotPromise = null;
+  leaderboardCache.clear();
 }
 
 /** Return the cached active agents (includes user_id for notification routing). */
