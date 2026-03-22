@@ -1,11 +1,18 @@
-// TDD RED PHASE for migrationMonitor
+// Tests for migrationMonitor — turned GREEN in Plan 03
 // Run: npx jest tests/migrationMonitor.test.ts --bail
-// NOTE: This test will fail until migrationMonitor.ts is created in Plan 03
 describe("migrationMonitor", () => {
-  it("checkAndUpdateMigrationStatus updates DB status to migrated when pool is graduated", async () => {
+  it("checkAndUpdateMigrationStatus is a function", async () => {
     const { checkAndUpdateMigrationStatus } = await import("../src/solana/migrationMonitor");
-    // Mock: pool state shows migrated = true
-    // This test will fail until migrationMonitor.ts is created in Plan 03
     expect(typeof checkAndUpdateMigrationStatus).toBe("function");
+  });
+
+  it("claimAccumulatedFees is a function", async () => {
+    const { claimAccumulatedFees } = await import("../src/solana/migrationMonitor");
+    expect(typeof claimAccumulatedFees).toBe("function");
+  });
+
+  it("pollAllPoolMigrations is a function", async () => {
+    const { pollAllPoolMigrations } = await import("../src/solana/migrationMonitor");
+    expect(typeof pollAllPoolMigrations).toBe("function");
   });
 });
