@@ -78,7 +78,12 @@ function migrate(db: Database.Database): void {
       ev_grade TEXT,
       status TEXT,
       created_at INTEGER,
-      pipeline_run_id TEXT
+      pipeline_run_id TEXT,
+      chain_mode TEXT,
+      protocol TEXT,
+      action TEXT,
+      asset_pair TEXT,
+      tx_hash TEXT
     );
 
     -- ── Risk Configuration ─────────────────────────────────────────
@@ -504,7 +509,12 @@ function migrate(db: Database.Database): void {
       resolution_date TEXT,
       closed_at INTEGER,
       updated_at INTEGER,
-      pipeline_run_id TEXT
+      pipeline_run_id TEXT,
+      chain_mode TEXT,
+      protocol TEXT,
+      action TEXT,
+      asset_pair TEXT,
+      tx_hash TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
@@ -518,7 +528,17 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE executions ADD COLUMN closed_at INTEGER");
   addColumn(db, "ALTER TABLE executions ADD COLUMN updated_at INTEGER");
   addColumn(db, "ALTER TABLE executions ADD COLUMN pipeline_run_id TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN chain_mode TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN protocol TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN action TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN asset_pair TEXT");
+  addColumn(db, "ALTER TABLE executions ADD COLUMN tx_hash TEXT");
   addColumn(db, "ALTER TABLE trades ADD COLUMN source TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN chain_mode TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN protocol TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN action TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN asset_pair TEXT");
+  addColumn(db, "ALTER TABLE trades ADD COLUMN tx_hash TEXT");
   addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN reason TEXT");
   addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN cooldown_until INTEGER");
   addColumn(db, "ALTER TABLE panic_mode_events ADD COLUMN rearmed_at INTEGER");
@@ -691,6 +711,9 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_users_clerk_id ON users(clerk_id);
   `);
 
+  // ── Solana wallet linking (Phase 1) ────────────────────────────────
+  addColumn(db, "ALTER TABLE users ADD COLUMN solana_wallet_address TEXT");
+
   // ── Trading Agents (Agent Factory) ──────────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS agents (
@@ -743,6 +766,16 @@ function migrate(db: Database.Database): void {
   addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_seed_phrase TEXT");
   addColumn(db, "ALTER TABLE agents ADD COLUMN polymarket_ready INTEGER DEFAULT 0");
   addColumn(db, "ALTER TABLE agents ADD COLUMN polymarket_status TEXT DEFAULT 'pending_funding'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN wallet_network TEXT DEFAULT 'polymarket'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN stellar_ready INTEGER DEFAULT 0");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN stellar_status TEXT DEFAULT 'pending_funding'");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN trustline_established INTEGER DEFAULT 0");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN stellar_address TEXT");
+
+  // Migration: Dual wallet — separate EVM and Stellar key storage
+  addColumn(db, "ALTER TABLE agents ADD COLUMN evm_address TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_evm_private_key TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN encrypted_stellar_private_key TEXT");
 
   // ── API Keys (BYO agent authentication) ──────────────────────────
   db.exec(`
@@ -877,6 +910,33 @@ function migrate(db: Database.Database): void {
       ON arena_snapshots(agent_id, "window", snapshot_at DESC);
     CREATE INDEX IF NOT EXISTS idx_arena_snapshots_time
       ON arena_snapshots(snapshot_at DESC);
+
+    -- ── Allbridge Cross-Chain Bridge ───────────────────────────────
+    CREATE TABLE IF NOT EXISTS bridge_transfers (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'stellar_to_polygon',
+      source_chain TEXT NOT NULL DEFAULT 'stellar',
+      dest_chain TEXT NOT NULL DEFAULT 'polygon',
+      source_tx_hash TEXT,
+      dest_tx_hash TEXT,
+      amount REAL NOT NULL,
+      fee REAL,
+      amount_received REAL,
+      source_token TEXT DEFAULT 'USDC',
+      dest_token TEXT DEFAULT 'USDC',
+      messenger TEXT DEFAULT 'ALLBRIDGE',
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_bridge_transfers_user
+      ON bridge_transfers(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_bridge_transfers_status
+      ON bridge_transfers(status);
   `);
 
   // Ensure locale columns exist (safe no-op on fresh dbs after CREATE TABLE above)
