@@ -1037,6 +1037,52 @@ function migrate(db: Database.Database): void {
     }
   }
 
+  // ── Solana Token Bonding Curves (Phase 2) ─────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_tokens (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL UNIQUE,
+      token_mint TEXT NOT NULL UNIQUE,
+      dbc_pool_address TEXT NOT NULL,
+      dbc_config_address TEXT NOT NULL,
+      damm_pool_address TEXT,
+      status TEXT NOT NULL DEFAULT 'bonding',
+      token_name TEXT NOT NULL,
+      token_symbol TEXT NOT NULL,
+      metadata_uri TEXT NOT NULL,
+      treasury_wallet_pubkey TEXT NOT NULL,
+      total_supply INTEGER NOT NULL DEFAULT 1000000,
+      initial_reserve_usdc REAL NOT NULL DEFAULT 0.1,
+      migration_threshold_usdc REAL NOT NULL DEFAULT 50000,
+      fee_bps INTEGER NOT NULL DEFAULT 200,
+      created_at INTEGER NOT NULL,
+      migrated_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_solana_tokens_mint ON solana_tokens(token_mint);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_solana_tokens_agent ON solana_tokens(agent_id);
+
+    CREATE TABLE IF NOT EXISTS solana_transactions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      token_mint TEXT,
+      tx_signature TEXT NOT NULL UNIQUE,
+      tx_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      amount_usdc REAL,
+      amount_tokens REAL,
+      wallet_address TEXT,
+      error_message TEXT,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_solana_tx_agent ON solana_transactions(agent_id, tx_type);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 
