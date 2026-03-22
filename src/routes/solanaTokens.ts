@@ -3,6 +3,8 @@ import { getDb } from "../db/schema";
 import { getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { createToken } from "../solana/tokenService";
+import { getSwapQuote, buildSwapTransaction } from "../solana/swapService";
+import { checkAndUpdateMigrationStatus } from "../solana/migrationMonitor";
 import { getIO } from "../infra/socket";
 import { Server as SocketIOServer } from "socket.io";
 
@@ -136,40 +138,136 @@ router.get("/:agentId/status", async (req: Request, res: Response) => {
 });
 
 // ── GET /api/solana/tokens/:poolAddress/quote ──────────────────────────────
-// Returns a swap quote for a given DBC pool (buy or sell direction).
-// Query params: amount (USDC), side (buy|sell)
-// Auth required — returns 401 without auth.
+// Returns swap quote for buy or sell side. Called by frontend TradingPanel.
+// Query params: amount (number, USDC for buy / tokens for sell), side ("buy"|"sell")
 router.get("/:poolAddress/quote", async (req: Request, res: Response) => {
   try {
     const userId = await getRequiredUserId(req, res);
     if (!userId) return;
 
     const poolAddress = String(req.params.poolAddress);
-    const { amount, side } = req.query as { amount?: string; side?: string };
+    const amount = parseFloat(req.query.amount as string);
+    const side = String(req.query.side ?? "");
 
-    if (!amount || !side) {
-      res.status(400).json({ error: "amount and side (buy|sell) query params are required" });
+    if (!amount || amount <= 0) {
+      res.status(400).json({ error: "amount must be a positive number" });
       return;
     }
-
     if (side !== "buy" && side !== "sell") {
       res.status(400).json({ error: "side must be 'buy' or 'sell'" });
       return;
     }
 
-    // Stub: real-time quote calculation will use DBC SDK in a later plan
-    // For now, return a placeholder to keep the route active
-    res.json({
-      poolAddress,
-      amount: parseFloat(amount),
-      side,
-      estimatedOutput: null,
-      priceImpactPct: null,
-      message: "Quote calculation not yet implemented — coming in Phase 3",
-    });
+    const quote = await getSwapQuote(poolAddress, amount, side as "buy" | "sell");
+    res.json(quote);
   } catch (err) {
     console.error("[solanaTokens:quote] error:", err instanceof Error ? err.message : err);
-    res.status(500).json({ error: "Failed to get quote" });
+    res.status(500).json({ error: "Failed to get swap quote" });
+  }
+});
+
+// ── POST /api/solana/tokens/:poolAddress/swap-tx ───────────────────────────
+// Returns base64-serialized swap transaction for user wallet to sign.
+// Body: { amountIn, minimumAmountOut, side, ownerPublicKey }
+// Per D-10: User wallet signs. Non-custodial.
+router.post("/:poolAddress/swap-tx", async (req: Request, res: Response) => {
+  try {
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
+
+    const poolAddress = String(req.params.poolAddress);
+    const { amountIn, minimumAmountOut, side, ownerPublicKey } = req.body as {
+      amountIn?: string;
+      minimumAmountOut?: string;
+      side?: string;
+      ownerPublicKey?: string;
+    };
+
+    if (!amountIn || !minimumAmountOut || !side || !ownerPublicKey) {
+      res.status(400).json({
+        error: "amountIn, minimumAmountOut, side, and ownerPublicKey are required",
+      });
+      return;
+    }
+    if (side !== "buy" && side !== "sell") {
+      res.status(400).json({ error: "side must be 'buy' or 'sell'" });
+      return;
+    }
+
+    const transactionBase64 = await buildSwapTransaction({
+      poolAddress,
+      amountIn,
+      minimumAmountOut,
+      side: side as "buy" | "sell",
+      ownerPublicKey,
+    });
+
+    res.json({ transaction: transactionBase64 });
+  } catch (err) {
+    console.error("[solanaTokens:swap-tx] error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to build swap transaction" });
+  }
+});
+
+// ── GET /api/solana/tokens/by-mint/:mint ───────────────────────────────────
+// Returns token status by mint address (used by /token/[mint] detail page).
+// Auth required — returns 401 without auth.
+router.get("/by-mint/:mint", async (req: Request, res: Response) => {
+  try {
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
+
+    const { mint } = req.params;
+
+    let token: {
+      token_mint: string;
+      dbc_pool_address: string;
+      dbc_config_address: string;
+      damm_pool_address: string | null;
+      status: string;
+      token_name: string;
+      token_symbol: string;
+      metadata_uri: string;
+      created_at: number;
+      migrated_at: number | null;
+    } | null = null;
+
+    if (isPgEnabled()) {
+      token = await pgQueryOne(
+        `SELECT token_mint, dbc_pool_address, dbc_config_address, damm_pool_address, status,
+                token_name, token_symbol, metadata_uri, created_at, migrated_at
+         FROM solana_tokens WHERE token_mint = $1`,
+        [mint]
+      );
+    } else {
+      const db = getDb();
+      token = db.prepare(
+        `SELECT token_mint, dbc_pool_address, dbc_config_address, damm_pool_address, status,
+                token_name, token_symbol, metadata_uri, created_at, migrated_at
+         FROM solana_tokens WHERE token_mint = ?`
+      ).get(mint) as typeof token;
+    }
+
+    res.json({ tokenized: !!token, token: token ?? null });
+  } catch (err) {
+    console.error("[solanaTokens:by-mint] error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to get token" });
+  }
+});
+
+// ── POST /api/solana/tokens/:poolAddress/check-migration ───────────────────
+// Checks if a pool has migrated to DAMM and updates DB. Called post-trade or on-demand.
+router.post("/:poolAddress/check-migration", async (req: Request, res: Response) => {
+  try {
+    const userId = await getRequiredUserId(req, res);
+    if (!userId) return;
+
+    const poolAddress = String(req.params.poolAddress);
+    const result = await checkAndUpdateMigrationStatus(poolAddress);
+    res.json(result);
+  } catch (err) {
+    console.error("[solanaTokens:check-migration] error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to check migration status" });
   }
 });
 
