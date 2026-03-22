@@ -56,6 +56,7 @@ import alertsRouter from "./routes/alerts";
 import notificationsRouter from "./routes/notifications";
 import discoveryRouter from "./routes/discovery";
 import solanaWalletRouter from "./routes/solanaWallet";
+import solanaTokensRouter from "./routes/solanaTokens";
 import bridgeRouter from "./routes/bridge";
 import { initScheduler } from "./infra/scheduler";
 import { apiRateLimit } from "./infra/rateLimit";
@@ -121,6 +122,7 @@ app.get("/", (_req, res) => {
 app.use("/api/health", healthRouter);
 app.use("/api/markets", marketsRouter);
 app.use("/api/wallet", walletRouter);
+app.use("/api/solana/tokens", solanaTokensRouter);
 app.use("/api/solana", solanaWalletRouter);
 app.use("/api/stellar", stellarRouter);
 app.use("/api/bridge", bridgeRouter);
@@ -237,7 +239,13 @@ async function ensureClobAllowances(): Promise<void> {
     console.error("[startup] CLOB allowance setup failed:", err);
   }
 }
-bootstrap().catch((err) => {
-  console.error("[startup] Initialization failed:", err);
-  process.exit(1);
-});
+// Only start server when running directly, not when imported in tests
+if (process.env.NODE_ENV !== "test") {
+  bootstrap().catch((err) => {
+    console.error("[startup] Initialization failed:", err);
+    process.exit(1);
+  });
+}
+
+// Export app for testing (supertest integration tests)
+export default app;

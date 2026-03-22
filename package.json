@@ -70,8 +70,12 @@
             "module": "commonjs"
           }
         }
-      ]
+      ],
+      "^.+\\.js$": ["ts-jest", { "tsconfig": { "module": "commonjs", "allowJs": true } }]
     },
+    "transformIgnorePatterns": [
+      "node_modules/(?!(@scure|@noble|@solana/spl-token|@solana/spl-token-metadata|@solana/buffer-layout-utils|@solana/spl-token-group|@meteora-ag/dynamic-bonding-curve-sdk|@tetherto|@electric-sql/pglite|formidable|zod|superstruct|valibot|uncrypto|axios)/)"
+    ],
     "testTimeout": 60000
   }
 }
