@@ -1083,6 +1083,37 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_solana_tx_agent ON solana_transactions(agent_id, tx_type);
   `);
 
+  // ── Profit Distribution System (Phase 3) ──────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS treasury_distributions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      token_mint TEXT NOT NULL,
+      week_start INTEGER NOT NULL,
+      week_end INTEGER NOT NULL,
+      weekly_pnl REAL NOT NULL,
+      buyback_amount_usdc REAL NOT NULL,
+      buyback_tx_signature TEXT,
+      tokens_bought REAL,
+      holder_distribution_tx_signature TEXT,
+      quantik_wallet_tokens REAL,
+      holder_tokens REAL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      audit_status TEXT NOT NULL DEFAULT 'pending',
+      audit_discrepancy_pct REAL,
+      failure_reason TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_treasury_distributions_agent
+      ON treasury_distributions(agent_id, week_start DESC);
+    CREATE INDEX IF NOT EXISTS idx_treasury_distributions_status
+      ON treasury_distributions(status, created_at DESC);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 
