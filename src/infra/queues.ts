@@ -16,6 +16,7 @@ export const QUEUE_NAMES = {
   POSITION_UPDATE: "position-update", // Live position P&L emitter (30s cycle)
   BYO_HEALTH: "byo-health",           // BYO agent heartbeat monitor (60s cycle)
   ARENA_SNAPSHOTS: "arena-snapshots",  // Arena rank snapshots (60min cycle)
+  WEEKLY_BUYBACK: "solana:weekly-buyback", // Weekly buyback + distribution (Friday midnight UTC)
 } as const;
 
 type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

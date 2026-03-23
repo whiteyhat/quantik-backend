@@ -163,6 +163,17 @@ export async function startBullMQScheduler(): Promise<void> {
     processor: processArenaSnapshots,
     immediate: true,
   });
+
+  // Weekly buyback + distribution (every Friday midnight UTC)
+  // BullMQ's scheduleRepeatable uses intervalMs — 7-day interval.
+  // Friday alignment is handled by computing the current week window inside runWeeklyBuyback.
+  const { runWeeklyBuyback } = await import("../solana/airdropService");
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.WEEKLY_BUYBACK,
+    intervalMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+    processor: runWeeklyBuyback,
+    immediate: false,
+  });
 }
 
 // ── Legacy Fallback (setInterval) ─────────────────────────────────────────────
@@ -211,6 +222,12 @@ export function startLegacyScheduler(): void {
   setInterval(() => {
     processArenaSnapshots().catch(console.error);
   }, 60 * 60 * 1000);
+
+  // Weekly buyback (legacy mode — setInterval every 7 days)
+  const { runWeeklyBuyback } = require("../solana/airdropService");
+  setInterval(() => {
+    runWeeklyBuyback().catch(console.error);
+  }, 7 * 24 * 60 * 60 * 1000);
 }
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────
