@@ -181,11 +181,16 @@ export function emitToAll(event: string, data: unknown): void {
 
 /** Emit a trade execution event */
 export function emitTradeExecuted(userId: string | null, trade: TradeEvent): void {
+  const isSwap = trade.direction.toUpperCase() === "SWAP";
   emitNotification(userId, {
     id: `trade-${trade.orderId}-${trade.timestamp}`,
     level: "success",
-    title: trade.paper ? "Paper trade executed" : "Trade executed",
-    message: `${trade.direction} on ${trade.slug} for $${trade.size.toFixed(2)} at ${Math.round(trade.price * 100)}¢.`,
+    title: trade.paper
+      ? isSwap ? "Paper swap recorded" : "Paper trade executed"
+      : isSwap ? "Swap submitted" : "Trade executed",
+    message: isSwap
+      ? `Swap submitted on ${trade.slug} for $${trade.size.toFixed(2)}.`
+      : `${trade.direction} on ${trade.slug} for $${trade.size.toFixed(2)} at ${Math.round(trade.price * 100)}¢.`,
     category: "trade",
     timestamp: trade.timestamp,
     action: {
@@ -285,4 +290,76 @@ export function emitPanicCooldown(status: PanicCooldownEvent): void {
       : undefined,
   });
   emitToAll("panic:cooldown", status);
+}
+
+// ── Distribution Event Emitters ───────────────────────────────────────────────
+
+export interface DistributionStartEvent {
+  agentId: string;
+  tokenSymbol: string;
+  tokenMint: string;
+  buybackAmountUsdc: number;
+  timestamp: number;
+}
+
+export interface DistributionCompleteEvent {
+  agentId: string;
+  tokenSymbol: string;
+  tokenMint: string;
+  tokensBought: number;
+  holderCount: number;
+  txSignature: string;
+  timestamp: number;
+}
+
+export interface DistributionFailedEvent {
+  agentId: string;
+  tokenSymbol: string;
+  tokenMint: string;
+  reason: string;
+  stage: "audit" | "buyback" | "airdrop";
+  timestamp: number;
+}
+
+/** Emit distribution start — buyback about to execute */
+export function emitDistributionStart(event: DistributionStartEvent): void {
+  emitNotification(null, {
+    id: `distribution-start-${event.agentId}-${event.timestamp}`,
+    level: "info",
+    title: `Buyback started for $${event.tokenSymbol}`,
+    message: `${event.buybackAmountUsdc.toFixed(2)} USDC buyback initiated`,
+    category: "distribution",
+    timestamp: event.timestamp,
+  });
+  emitToAll("distribution:start", event);
+}
+
+/** Emit distribution complete — tokens bought and distributed to holders */
+export function emitDistributionComplete(event: DistributionCompleteEvent): void {
+  emitNotification(null, {
+    id: `distribution-complete-${event.agentId}-${event.timestamp}`,
+    level: "success",
+    title: `Distribution sent to top ${event.holderCount} holders`,
+    message: `${event.tokensBought.toLocaleString()} $${event.tokenSymbol} tokens distributed`,
+    category: "distribution",
+    timestamp: event.timestamp,
+    action: {
+      label: "View token",
+      href: `/token/${event.tokenMint}`,
+    },
+  });
+  emitToAll("distribution:complete", event);
+}
+
+/** Emit distribution failed — buyback or airdrop failed after retries */
+export function emitDistributionFailed(event: DistributionFailedEvent): void {
+  emitNotification(null, {
+    id: `distribution-failed-${event.agentId}-${event.timestamp}`,
+    level: "error",
+    title: `Distribution failed for $${event.tokenSymbol}`,
+    message: `${event.stage} stage failed: ${event.reason}`,
+    category: "distribution",
+    timestamp: event.timestamp,
+  });
+  emitToAll("distribution:failed", event);
 }
