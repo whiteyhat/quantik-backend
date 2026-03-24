@@ -363,3 +363,25 @@ export function emitDistributionFailed(event: DistributionFailedEvent): void {
   });
   emitToAll("distribution:failed", event);
 }
+
+// ── Holder Leaderboard Event Emitter ─────────────────────────────────────────
+
+export interface HolderSnapshot {
+  rank: number;
+  wallet: string;
+  balance: number;
+  percentage: number;
+}
+
+export interface HoldersUpdatedEvent {
+  mint: string;
+  holders: HolderSnapshot[];
+  updatedAt: number;
+}
+
+/** Emit holders:updated to mint-specific room after hourly sync */
+export function emitHolderUpdate(event: HoldersUpdatedEvent): void {
+  const io = getIO();
+  if (!io) return;
+  io.to(`mint:${event.mint}`).emit("holders:updated", event);
+}

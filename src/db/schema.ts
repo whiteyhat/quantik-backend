@@ -1114,6 +1114,24 @@ function migrate(db: Database.Database): void {
       ON treasury_distributions(status, created_at DESC);
   `);
 
+  // ── Holder Leaderboard Cache (Phase 4) ─────────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_token_holders (
+      id TEXT PRIMARY KEY,
+      mint TEXT NOT NULL,
+      wallet TEXT NOT NULL,
+      balance REAL NOT NULL,
+      percentage REAL NOT NULL,
+      rank INTEGER NOT NULL,
+      last_sync_time INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(mint, wallet)
+    );
+    CREATE INDEX IF NOT EXISTS idx_solana_token_holders_mint_rank
+      ON solana_token_holders(mint, rank ASC);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 
