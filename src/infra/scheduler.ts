@@ -183,6 +183,15 @@ export async function startBullMQScheduler(): Promise<void> {
     processor: runHolderSync,
     immediate: true,
   });
+
+  // Token price poller (30s) — 30s snapshots for price chart history
+  const { runTokenPricePoll } = await import("../solana/tokenPricePoller");
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.TOKEN_PRICE_POLL,
+    intervalMs: 30 * 1000,
+    processor: runTokenPricePoll,
+    immediate: false,
+  });
 }
 
 // ── Legacy Fallback (setInterval) ─────────────────────────────────────────────
@@ -244,6 +253,12 @@ export function startLegacyScheduler(): void {
   setInterval(() => {
     runHolderSync().catch(console.error);
   }, 60 * 60 * 1000);
+
+  // Token price poller (30s) — legacy setInterval fallback
+  const { runTokenPricePoll } = require("../solana/tokenPricePoller");
+  setInterval(() => {
+    runTokenPricePoll().catch(console.error);
+  }, 30 * 1000);
 }
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────

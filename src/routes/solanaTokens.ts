@@ -502,4 +502,74 @@ router.get("/:mint/holders", async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/solana-tokens/:mint/prices ────────────────────────────────────
+// Returns price history for interval-based chart display.
+// interval: "1h" | "1d" | "7d" | "30d"
+// No auth required — public read endpoint.
+router.get("/:mint/prices", async (req: Request, res: Response) => {
+  try {
+    const mint = String(req.params.mint);
+    const interval = String(req.query.interval ?? "1d");
+    const limit = Math.min(Number(req.query.limit ?? 1000), 5000);
+
+    // Compute cutoff timestamp from interval
+    const now = Date.now();
+    const cutoffMap: Record<string, number> = {
+      "1h":  now - 60 * 60 * 1000,
+      "1d":  now - 24 * 60 * 60 * 1000,
+      "7d":  now - 7 * 24 * 60 * 60 * 1000,
+      "30d": now - 30 * 24 * 60 * 60 * 1000,
+    };
+    const cutoff = cutoffMap[interval] ?? cutoffMap["1d"];
+
+    interface PriceRow { timestamp: number; price_usdc: number; source: string }
+    let rows: PriceRow[] = [];
+
+    if (isPgEnabled()) {
+      rows = await pgQuery<PriceRow>(
+        `SELECT timestamp, price_usdc, source FROM solana_token_prices
+         WHERE mint = $1 AND timestamp >= $2
+         ORDER BY timestamp ASC LIMIT $3`,
+        [mint, cutoff, limit]
+      );
+    } else {
+      const db = getDb();
+      rows = db.prepare(
+        `SELECT timestamp, price_usdc, source FROM solana_token_prices
+         WHERE mint = ? AND timestamp >= ?
+         ORDER BY timestamp ASC LIMIT ?`
+      ).all(mint, cutoff, limit) as PriceRow[];
+    }
+
+    // Fetch migration timestamp for chart annotation (DBC → DAMM handoff line)
+    let migrationTimestamp: number | null = null;
+    if (isPgEnabled()) {
+      const tokenRow = await pgQueryOne<{ migrated_at: number | null }>(
+        "SELECT migrated_at FROM solana_tokens WHERE token_mint = $1",
+        [mint]
+      );
+      migrationTimestamp = tokenRow?.migrated_at ?? null;
+    } else {
+      const db = getDb();
+      const tokenRow = db.prepare(
+        "SELECT migrated_at FROM solana_tokens WHERE token_mint = ?"
+      ).get(mint) as { migrated_at: number | null } | undefined;
+      migrationTimestamp = tokenRow?.migrated_at ?? null;
+    }
+
+    res.json({
+      mint,
+      prices: rows.map(r => ({
+        timestamp: r.timestamp,
+        price_usdc: r.price_usdc,
+        source: r.source,
+      })),
+      migrationTimestamp,
+    });
+  } catch (err) {
+    console.error("[solanaTokens] GET /:mint/prices error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 export default router;
