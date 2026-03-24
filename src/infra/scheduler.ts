@@ -174,6 +174,15 @@ export async function startBullMQScheduler(): Promise<void> {
     processor: runWeeklyBuyback,
     immediate: false,
   });
+
+  // Holder sync (60min) — cache top-10 holders per migrated token from Solana RPC
+  const { runHolderSync } = await import("../solana/holderSyncService");
+  await scheduleRepeatable({
+    name: QUEUE_NAMES.HOLDER_SYNC,
+    intervalMs: 60 * 60 * 1000, // 1 hour
+    processor: runHolderSync,
+    immediate: true,
+  });
 }
 
 // ── Legacy Fallback (setInterval) ─────────────────────────────────────────────
@@ -228,6 +237,13 @@ export function startLegacyScheduler(): void {
   setInterval(() => {
     runWeeklyBuyback().catch(console.error);
   }, 7 * 24 * 60 * 60 * 1000);
+
+  // Holder sync (60min) — legacy setInterval fallback
+  const { runHolderSync } = require("../solana/holderSyncService");
+  runHolderSync().catch(console.error);
+  setInterval(() => {
+    runHolderSync().catch(console.error);
+  }, 60 * 60 * 1000);
 }
 
 // ── Main Entry Point ──────────────────────────────────────────────────────────

@@ -448,4 +448,58 @@ router.get("/:mint/distributions", async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/solana/tokens/:mint/holders ──────────────────────────────────────
+// Returns top 10 cached holders for a token. Reads from DB cache (not live RPC).
+// Per D-06: cache updated hourly by solana:sync-holders cron job.
+// Public endpoint — no auth required (leaderboard is public information).
+router.get("/:mint/holders", async (req: Request, res: Response) => {
+  try {
+    const mint = String(req.params.mint);
+
+    interface HolderRow {
+      wallet: string;
+      balance: number;
+      percentage: number;
+      rank: number;
+      last_sync_time: number;
+    }
+
+    let holders: HolderRow[] = [];
+    let lastSyncTime: number | null = null;
+
+    if (isPgEnabled()) {
+      holders = await pgQuery<HolderRow>(
+        `SELECT wallet, balance, percentage, rank, last_sync_time
+         FROM solana_token_holders
+         WHERE mint = $1
+         ORDER BY rank ASC
+         LIMIT 10`,
+        [mint]
+      );
+    } else {
+      const db = getDb();
+      holders = db.prepare(
+        `SELECT wallet, balance, percentage, rank, last_sync_time
+         FROM solana_token_holders
+         WHERE mint = ?
+         ORDER BY rank ASC
+         LIMIT 10`
+      ).all(mint) as HolderRow[];
+    }
+
+    if (holders.length > 0) {
+      lastSyncTime = holders[0].last_sync_time;
+    }
+
+    res.json({
+      holders,
+      mint,
+      lastSyncTime,
+    });
+  } catch (err) {
+    console.error("[solanaTokens:holders] error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to get holder leaderboard" });
+  }
+});
+
 export default router;
