@@ -385,3 +385,19 @@ export function emitHolderUpdate(event: HoldersUpdatedEvent): void {
   if (!io) return;
   io.to(`mint:${event.mint}`).emit("holders:updated", event);
 }
+
+// ── Token Price Update Event Emitter ─────────────────────────────────────────
+
+export interface TokenPriceUpdateEvent {
+  mint: string;
+  price: number;         // USDC decimal, e.g. 0.001234
+  source: "dbc" | "damm_v2";
+  timestamp: number;     // ms epoch
+}
+
+/** Emit price:token-update to mint-specific room after each 30s poll cycle */
+export function emitTokenPriceUpdate(event: TokenPriceUpdateEvent): void {
+  const io = getIO();
+  if (!io) return;
+  io.to(`mint:${event.mint}`).emit("price:token-update", event);
+}

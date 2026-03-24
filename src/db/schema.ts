@@ -1132,6 +1132,19 @@ function migrate(db: Database.Database): void {
       ON solana_token_holders(mint, rank ASC);
   `);
 
+  // ── Token Price History (Phase 5) ──────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_token_prices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mint TEXT NOT NULL,
+      price_usdc REAL NOT NULL,
+      source TEXT NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_solana_token_prices_mint_time
+      ON solana_token_prices(mint, timestamp DESC);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 

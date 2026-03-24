@@ -18,6 +18,7 @@ export const QUEUE_NAMES = {
   ARENA_SNAPSHOTS: "arena-snapshots",  // Arena rank snapshots (60min cycle)
   WEEKLY_BUYBACK: "solana:weekly-buyback", // Weekly buyback + distribution (Friday midnight UTC)
   HOLDER_SYNC: "solana:sync-holders",      // Hourly holder leaderboard cache sync
+  TOKEN_PRICE_POLL: "solana:token-price-poll", // 30s token price snapshots for price chart history
 } as const;
 
 type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
