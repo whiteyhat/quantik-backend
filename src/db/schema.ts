@@ -977,6 +977,137 @@ function migrate(db: Database.Database): void {
     }
   }
 
+  // ── Solana Token Bonding Curves (Phase 2) ─────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_tokens (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL UNIQUE,
+      token_mint TEXT NOT NULL UNIQUE,
+      dbc_pool_address TEXT NOT NULL,
+      dbc_config_address TEXT NOT NULL,
+      damm_pool_address TEXT,
+      status TEXT NOT NULL DEFAULT 'bonding',
+      token_name TEXT NOT NULL,
+      token_symbol TEXT NOT NULL,
+      metadata_uri TEXT NOT NULL,
+      treasury_wallet_pubkey TEXT NOT NULL,
+      total_supply INTEGER NOT NULL DEFAULT 1000000,
+      initial_reserve_usdc REAL NOT NULL DEFAULT 0.1,
+      migration_threshold_usdc REAL NOT NULL DEFAULT 50000,
+      fee_bps INTEGER NOT NULL DEFAULT 200,
+      created_at INTEGER NOT NULL,
+      migrated_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_solana_tokens_mint ON solana_tokens(token_mint);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_solana_tokens_agent ON solana_tokens(agent_id);
+
+    CREATE TABLE IF NOT EXISTS solana_transactions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      token_mint TEXT,
+      tx_signature TEXT NOT NULL UNIQUE,
+      tx_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      amount_usdc REAL,
+      amount_tokens REAL,
+      wallet_address TEXT,
+      error_message TEXT,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_solana_tx_agent ON solana_transactions(agent_id, tx_type);
+  `);
+
+  // ── Profit Distribution System (Phase 3) ──────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS treasury_distributions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      token_mint TEXT NOT NULL,
+      week_start INTEGER NOT NULL,
+      week_end INTEGER NOT NULL,
+      weekly_pnl REAL NOT NULL,
+      buyback_amount_usdc REAL NOT NULL,
+      buyback_tx_signature TEXT,
+      tokens_bought REAL,
+      holder_distribution_tx_signature TEXT,
+      quantik_wallet_tokens REAL,
+      holder_tokens REAL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      audit_status TEXT NOT NULL DEFAULT 'pending',
+      audit_discrepancy_pct REAL,
+      failure_reason TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_treasury_distributions_agent
+      ON treasury_distributions(agent_id, week_start DESC);
+    CREATE INDEX IF NOT EXISTS idx_treasury_distributions_status
+      ON treasury_distributions(status, created_at DESC);
+  `);
+
+  // ── Holder Leaderboard Cache (Phase 4) ─────────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_token_holders (
+      id TEXT PRIMARY KEY,
+      mint TEXT NOT NULL,
+      wallet TEXT NOT NULL,
+      balance REAL NOT NULL,
+      percentage REAL NOT NULL,
+      rank INTEGER NOT NULL,
+      last_sync_time INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(mint, wallet)
+    );
+    CREATE INDEX IF NOT EXISTS idx_solana_token_holders_mint_rank
+      ON solana_token_holders(mint, rank ASC);
+  `);
+
+  // ── Token Price History (Phase 5) ──────────────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS solana_token_prices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mint TEXT NOT NULL,
+      price_usdc REAL NOT NULL,
+      source TEXT NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_solana_token_prices_mint_time
+      ON solana_token_prices(mint, timestamp DESC);
+  `);
+
+  // ── ERC-8004 On-Chain Identity (Hackathon) ────────────────────────────
+
+  // Migration: ERC-8004 on-chain identity columns on agents table
+  addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_token_id TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_registered_at INTEGER");
+
+  // ERC-8004 validation artifacts table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS erc8004_validations (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('request', 'response')),
+      tx_hash TEXT,
+      request_hash TEXT,
+      pipeline_run_id TEXT,
+      data JSON,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_agent ON erc8004_validations(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_hash ON erc8004_validations(request_hash);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 

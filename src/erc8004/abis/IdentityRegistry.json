@@ -1,0 +1,8 @@
+[
+  "function register(string agentURI) returns (uint256)",
+  "function setAgentURI(uint256 agentId, string newURI)",
+  "function getAgentWallet(uint256 agentId) view returns (address)",
+  "function setMetadata(uint256 agentId, string metadataKey, bytes metadataValue)",
+  "function getMetadata(uint256 agentId, string metadataKey) view returns (bytes)",
+  "event Registered(uint256 indexed agentId, address indexed owner, string agentURI)"
+]
