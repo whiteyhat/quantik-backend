@@ -289,3 +289,91 @@ describe("Kraken CLI wrapper", () => {
     });
   });
 });
+
+// ── Kraken execution engine tests ───────────────────────────────
+describe("Kraken execution engine", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.KRAKEN_CLI;
+  });
+
+  const loadExecutionModule = () => {
+    jest.resetModules();
+    // Mock the CLI module so we don't need actual binary
+    jest.mock("../src/kraken/cli", () => ({
+      krakenPaperBuy: jest.fn().mockResolvedValue({ orderId: "buy-123", price: 50000 }),
+      krakenPaperSell: jest.fn().mockResolvedValue({ orderId: "sell-456", price: 3000 }),
+    }));
+    return require("../src/kraken/execution");
+  };
+
+  describe("mapPipelineSignalToKraken", () => {
+    it("should map YES direction to BUY", () => {
+      const { mapPipelineSignalToKraken } = loadExecutionModule();
+      const signal = { slug: "test-market", direction: "YES", sizeUsdc: 100 };
+      const result = mapPipelineSignalToKraken(signal, "BTCUSD");
+
+      expect(result.pair).toBe("BTCUSD");
+      expect(result.direction).toBe("BUY");
+      expect(result.amount).toBe(100);
+    });
+
+    it("should map NO direction to SELL", () => {
+      const { mapPipelineSignalToKraken } = loadExecutionModule();
+      const signal = { slug: "test-market", direction: "NO", sizeUsdc: 50 };
+      const result = mapPipelineSignalToKraken(signal, "ETHUSD");
+
+      expect(result.pair).toBe("ETHUSD");
+      expect(result.direction).toBe("SELL");
+      expect(result.amount).toBe(50);
+    });
+  });
+
+  describe("executeKrakenTrade", () => {
+    it("should call krakenPaperBuy for BUY direction", async () => {
+      const mod = loadExecutionModule();
+      const cli = require("../src/kraken/cli");
+
+      const signal = { pair: "BTCUSD", direction: "BUY" as const, amount: 0.1 };
+      const result = await mod.executeKrakenTrade(signal);
+
+      expect(cli.krakenPaperBuy).toHaveBeenCalledWith("BTCUSD", 0.1);
+      expect(result.success).toBe(true);
+      expect(result.pair).toBe("BTCUSD");
+      expect(result.direction).toBe("BUY");
+      expect(result.amount).toBe(0.1);
+      expect(result.timestamp).toBeGreaterThan(0);
+      expect(result.raw).toEqual({ orderId: "buy-123", price: 50000 });
+    });
+
+    it("should call krakenPaperSell for SELL direction", async () => {
+      const mod = loadExecutionModule();
+      const cli = require("../src/kraken/cli");
+
+      const signal = { pair: "ETHUSD", direction: "SELL" as const, amount: 0.5 };
+      const result = await mod.executeKrakenTrade(signal);
+
+      expect(cli.krakenPaperSell).toHaveBeenCalledWith("ETHUSD", 0.5);
+      expect(result.success).toBe(true);
+      expect(result.pair).toBe("ETHUSD");
+      expect(result.direction).toBe("SELL");
+    });
+
+    it("should return success=false on cli error", async () => {
+      jest.resetModules();
+      jest.mock("../src/kraken/cli", () => ({
+        krakenPaperBuy: jest.fn().mockRejectedValue(new Error("CLI failed")),
+        krakenPaperSell: jest.fn().mockRejectedValue(new Error("CLI failed")),
+      }));
+      const mod = require("../src/kraken/execution");
+
+      const signal = { pair: "BTCUSD", direction: "BUY" as const, amount: 0.1 };
+      const result = await mod.executeKrakenTrade(signal);
+
+      expect(result.success).toBe(false);
+      expect(result.pair).toBe("BTCUSD");
+      expect(result.direction).toBe("BUY");
+      expect(result.amount).toBe(0.1);
+    });
+  });
+});

@@ -9,3 +9,6 @@ export {
   krakenPaperBalance,
   krakenTicker,
 } from "./cli";
+
+export { executeKrakenTrade, mapPipelineSignalToKraken } from "./execution";
+export type { KrakenTradeSignal, KrakenExecutionResult } from "./execution";
