@@ -1145,6 +1145,29 @@ function migrate(db: Database.Database): void {
       ON solana_token_prices(mint, timestamp DESC);
   `);
 
+  // ── ERC-8004 On-Chain Identity (Hackathon) ────────────────────────────
+
+  // Migration: ERC-8004 on-chain identity columns on agents table
+  addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_token_id TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_registered_at INTEGER");
+
+  // ERC-8004 validation artifacts table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS erc8004_validations (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('request', 'response')),
+      tx_hash TEXT,
+      request_hash TEXT,
+      pipeline_run_id TEXT,
+      data JSON,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_agent ON erc8004_validations(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_hash ON erc8004_validations(request_hash);
+  `);
+
   // Clean up stale version entries that were renumbered in the v1.x migration
   db.exec(`DELETE FROM versions WHERE version IN ('v0.9.0','v0.10.0','v0.11.0')`);
 
