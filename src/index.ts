@@ -49,6 +49,7 @@ import agentChatRouter from "./routes/agentChat";
 import apiKeysRouter from "./routes/apiKeys";
 import skillRouter from "./routes/skill";
 import toolApiRouter from "./routes/toolApi";
+import erc8004Router from "./routes/erc8004";
 import { apiKeyAuth } from "./middleware/apiKeyAuth";
 import { ensureCircuitBreakerTable } from "./risk";
 import alertsRouter from "./routes/alerts";
@@ -114,6 +115,43 @@ app.get("/", (_req, res) => {
   res.json({ status: "ok", service: "quantik-backend", message: "Quantik Backend Online" });
 });
 
+// ERC-8004 well-known agent discovery (domain-level)
+app.get("/.well-known/agent-registration.json", async (_req, res) => {
+  try {
+    const { buildAgentRegistrationJSON, ERC8004_CONFIG } = await import("./erc8004");
+    const { getDb } = await import("./db/schema");
+    // Return first registered agent as domain default
+    const agent = getDb()
+      .prepare(
+        "SELECT id, name, description, erc8004_token_id FROM agents WHERE erc8004_token_id IS NOT NULL LIMIT 1"
+      )
+      .get() as
+      | {
+          id: string;
+          name: string;
+          description: string | null;
+          erc8004_token_id: string;
+        }
+      | undefined;
+    if (!agent) {
+      res.status(404).json({ error: "No registered agents" });
+      return;
+    }
+    const json = buildAgentRegistrationJSON(agent) as Record<string, unknown>;
+    json.registrations = [
+      {
+        agentId: agent.erc8004_token_id,
+        agentRegistry: `eip155:11155111:${ERC8004_CONFIG.identityRegistry}`,
+      },
+    ];
+    res.json(json);
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // Routes
 app.use("/api/health", healthRouter);
 app.use("/api/markets", marketsRouter);
@@ -152,6 +190,7 @@ app.use("/api/v1", agentChatRouter);
 app.use("/api/v1", apiKeysRouter);
 app.use("/api/v1/tools", toolApiRouter);
 app.use("/api", skillRouter);
+app.use("/api/erc8004", erc8004Router);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
 app.get("/api/clob/balance", async (_req, res) => {
