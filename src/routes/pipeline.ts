@@ -26,6 +26,13 @@ import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
 import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
+import {
+  submitValidationRequest,
+  submitValidationResponse,
+  submitFeedback,
+  isErc8004Configured,
+  getAgentIdentity,
+} from "../erc8004";
 
 const router = Router();
 
@@ -505,6 +512,19 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const runId = uuid();
   const now = Date.now();
 
+  // ── Derive agentId for ERC-8004 hooks (first active agent for user) ────
+  let pipelineAgentId: string | null = null;
+  try {
+    const agentRow = isPgEnabled()
+      ? null // Postgres path not needed for MVP
+      : (getDb()
+          .prepare("SELECT id FROM agents WHERE status != 'terminated' LIMIT 1")
+          .get() as { id: string } | undefined);
+    pipelineAgentId = agentRow?.id ?? null;
+  } catch {
+    // Non-blocking — pipeline continues without ERC-8004
+  }
+
   const newRun: PipelineRun = {
     id: runId,
     market_slug: effectiveSlug,
@@ -823,6 +843,34 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
           await finishStep(tradeStepId, "rejected", executionResult, String(riskApproval.reason));
           sendEvent("trade:rejected", { reason: riskApproval.reason, slug: effectiveSlug });
         } else {
+          // ── ERC-8004: Submit validation request before trade ────────
+          let erc8004RequestHash: string | null = null;
+          if (pipelineAgentId && isErc8004Configured()) {
+            try {
+              const agentIdentity = await getAgentIdentity(pipelineAgentId);
+              if (agentIdentity?.tokenId) {
+                const validationResult = await submitValidationRequest(
+                  agentIdentity.tokenId,
+                  pipelineAgentId,
+                  runId,
+                  {
+                    slug: effectiveSlug,
+                    direction,
+                    sizeUsdc: riskApproval.adjustedSize,
+                    price: entryPrice,
+                    riskApproved: true,
+                    timestamp: Date.now(),
+                  }
+                );
+                erc8004RequestHash = validationResult.requestHash;
+                console.log(`[Pipeline][ERC-8004] Validation request submitted: ${validationResult.txHash}`);
+              }
+            } catch (erc8004Err) {
+              // Non-blocking — trade proceeds even if ERC-8004 fails
+              console.warn("[Pipeline][ERC-8004] Validation request failed:", erc8004Err instanceof Error ? erc8004Err.message : String(erc8004Err));
+            }
+          }
+
           const result = await execute(
             {
               slug: effectiveSlug,
@@ -847,6 +895,49 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
           console.log(
             `[Pipeline] Auto-executed ${direction} on ${effectiveSlug} — orderId=${result.orderId} mode=${result.execution_mode}`
           );
+
+          // ── ERC-8004: Submit validation response after trade ────────
+          if (pipelineAgentId && isErc8004Configured() && erc8004RequestHash) {
+            try {
+              const agentIdentity = await getAgentIdentity(pipelineAgentId);
+              if (agentIdentity?.tokenId) {
+                const responseResult = await submitValidationResponse(
+                  erc8004RequestHash,
+                  pipelineAgentId,
+                  runId,
+                  result.status === "submitted" || result.status === "filled",
+                  {
+                    orderId: result.orderId,
+                    status: result.status,
+                    filledPrice: result.filledPrice,
+                    filledSize: result.filledSize,
+                    execution_mode: result.execution_mode,
+                    timestamp: Date.now(),
+                  }
+                );
+                console.log(`[Pipeline][ERC-8004] Validation response submitted: ${responseResult.txHash}`);
+
+                // ── ERC-8004: Submit reputation feedback (ERC-02) ────────
+                // Derive PnL basis points from filled price vs entry price
+                const pnlBps =
+                  result.filledPrice && entryPrice
+                    ? Math.round(
+                        ((result.filledPrice - entryPrice) / entryPrice) * 10000
+                      )
+                    : 0;
+                const feedbackResult = await submitFeedback(
+                  agentIdentity.tokenId,
+                  pnlBps
+                );
+                console.log(
+                  `[Pipeline][ERC-8004] Reputation feedback submitted: ${feedbackResult.txHash} (${pnlBps} bps)`
+                );
+              }
+            } catch (erc8004Err) {
+              // Non-blocking — don't fail the pipeline for ERC-8004 issues
+              console.warn("[Pipeline][ERC-8004] Validation/reputation failed:", erc8004Err instanceof Error ? erc8004Err.message : String(erc8004Err));
+            }
+          }
         }
       } catch (execErr) {
         const error = String(execErr);
