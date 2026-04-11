@@ -15,7 +15,7 @@ import {
   ERC8004_CONFIG,
 } from "../erc8004";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { isPgEnabled, pgQueryOne, pgQuery } from "../db/postgres";
 
 const router = Router();
 
@@ -115,7 +115,10 @@ router.get("/validations/:agentId", async (req, res) => {
     const { agentId } = req.params;
     // Query from local DB (not on-chain — faster for listing)
     const rows = isPgEnabled()
-      ? [] // pgQuery not needed for MVP — SQLite is primary
+      ? await pgQuery<{ id: string; type: string; tx_hash: string | null; request_hash: string | null; pipeline_run_id: string | null; data: string | null; created_at: number }>(
+            "SELECT id, type, tx_hash, request_hash, pipeline_run_id, data, created_at FROM erc8004_validations WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 50",
+            [agentId]
+          )
       : getDb()
           .prepare(
             "SELECT id, type, tx_hash, request_hash, pipeline_run_id, data, created_at FROM erc8004_validations WHERE agent_id = ? ORDER BY created_at DESC LIMIT 50"

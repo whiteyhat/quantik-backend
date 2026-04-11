@@ -24,7 +24,9 @@ import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
-import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+import { isStellarTestnetMode, isKrakenMode } from "../config/chain";
+import { mapPipelineSignalToKraken, executeKrakenTrade } from "../kraken/execution";
+import { GAMMA_API_BASE, fetchMarketBySlug, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
 import {
   submitValidationRequest,
@@ -426,12 +428,49 @@ function runSigma(results: Record<string, unknown>): AgentResult {
   const lucifer = toAgentData<LuciferAgentData>(results["lucifer"]);
   const aura = toAgentData<AuraAgentData>(results["aura"]);
   const oracle = toAgentData<OracleAgentData>(results["oracle"]);
+  const market = toRecord(results["market"]);
 
   const baseConf = oracle?.calibrated_prob ?? oracle?.raw_prob ?? edge?.estimated_true_prob ?? 0.65;
   const sentimentBoost = aura?.sentimentDelta ?? aura?.sentiment_score ?? 0;
   const kellyPct = edge?.fractional_kelly ?? edge?.kelly_fraction ?? 0;
   const adjustment = lucifer?.adjusted_confidence ?? 0;
   const finalConf = Math.max(0, Math.min(1, baseConf + adjustment));
+
+  if (market?.["chainMode"] === "stellar_testnet") {
+    const clause = toRecord(results["clause"]);
+    const executionPlan = toRecord(market["executionPlan"]);
+    const currentApy = Number(market["currentApy"] ?? 0);
+    const protocol = typeof market["protocol"] === "string" ? market["protocol"] : "soroswap";
+    const assetPair = typeof market["assetPair"] === "string" ? market["assetPair"] : "XLM/USDC";
+    const riskScore = Number(market["riskScore"] ?? 0);
+    const veto = Boolean(clause?.["veto"] ?? false);
+
+    let decision: "TRADE" | "WATCH" | "SKIP" = "WATCH";
+    if (veto || finalConf < 0.42) {
+      decision = "SKIP";
+    } else if (finalConf >= 0.58 && currentApy > 0) {
+      decision = "TRADE";
+    }
+
+    return {
+      agent: "sigma",
+      status: "complete",
+      data: {
+        decision,
+        recommendation: decision,
+        confidence: parseFloat((finalConf * 100).toFixed(1)),
+        thesis: `${protocol} ${assetPair} opportunity scored ${(finalConf * 100).toFixed(1)}% with APY ${currentApy.toFixed(2)}% and risk ${riskScore.toFixed(2)}.`,
+        size_pct: kellyPct ? parseFloat((kellyPct * 100).toFixed(1)) : 2,
+        size_usd: executionPlan && typeof executionPlan["amountUsdc"] === "number"
+          ? Number(executionPlan["amountUsdc"])
+          : 25,
+        entry_price: edge?.market_price ?? Number(market["yesPrice"] ?? market["yes_price"] ?? 0.5),
+        net_ev: edge?.net_ev ?? 0,
+        ev_grade: edge?.ev_grade ?? "B",
+        executionPlan,
+      },
+    };
+  }
 
   const decision =
     finalConf > 0.6 ? "BET_YES" : finalConf < 0.4 ? "BET_NO" : "PASS";
@@ -442,6 +481,7 @@ function runSigma(results: Record<string, unknown>): AgentResult {
     data: {
       decision,
       confidence: parseFloat((finalConf * 100).toFixed(1)),
+      recommendation: decision,
       thesis: `Edge=${edge?.edge ?? "?"}, Sentiment=${sentimentBoost ?? "?"}. Lucifer adjusted ${((adjustment ?? 0) * 100).toFixed(0)}pp. Final: ${decision} @ ${(finalConf * 100).toFixed(1)}%`,
       size_pct: kellyPct ? parseFloat((kellyPct * 100).toFixed(1)) : 2,
       size_usd: kellyPct ? parseFloat((kellyPct * 100 * 10).toFixed(0)) : 20,
@@ -487,7 +527,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const resolvedSlug = slug ?? tokenId ?? "";
 
   let effectiveSlug = resolvedSlug;
-  if (!slug && tokenId) {
+  if (!isStellarTestnetMode() && !slug && tokenId) {
     try {
       const clobMarket = await runCli(["clob", "market", tokenId]);
       if (clobMarket !== null && typeof clobMarket === "object") {
@@ -516,7 +556,10 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   let pipelineAgentId: string | null = null;
   try {
     const agentRow = isPgEnabled()
-      ? null // Postgres path not needed for MVP
+      ? await pgQueryOne<{ id: string }>(
+          "SELECT id FROM agents WHERE status != 'terminated' LIMIT 1",
+          []
+        )
       : (getDb()
           .prepare("SELECT id FROM agents WHERE status != 'terminated' LIMIT 1")
           .get() as { id: string } | undefined);
@@ -589,30 +632,42 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   // ── Pre-fetch full market data once — shared across all agents ──
   let marketRaw: Record<string, unknown> = {};
   try {
-    marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
+    if (isStellarTestnetMode()) {
+      marketRaw = await fetchMarketBySlug(effectiveSlug) as unknown as Record<string, unknown>;
+    } else {
+      marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
+    }
   } catch {
-    // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
-    try {
-      const gammaRes = await fetchWithRetry(
-        `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(effectiveSlug)}`,
-        { signal: AbortSignal.timeout(8000) }
-      );
-      if (gammaRes.ok) {
-        const gammaData = await gammaRes.json() as unknown[];
-        const m = (Array.isArray(gammaData) ? gammaData[0] : gammaData) as Record<string, unknown> | undefined;
-        if (m) marketRaw = m;
+    if (!isStellarTestnetMode()) {
+      // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
+      try {
+        const gammaRes = await fetchWithRetry(
+          `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(effectiveSlug)}`,
+          { signal: AbortSignal.timeout(8000) }
+        );
+        if (gammaRes.ok) {
+          const gammaData = await gammaRes.json() as unknown[];
+          const m = (Array.isArray(gammaData) ? gammaData[0] : gammaData) as Record<string, unknown> | undefined;
+          if (m) marketRaw = m;
+        }
+      } catch {
+        sendEvent("pipeline:warning", { message: "Market data unavailable, running with defaults" });
       }
-    } catch {
-      sendEvent("pipeline:warning", { message: "Market data unavailable, running with defaults" });
+    } else {
+      sendEvent("pipeline:warning", { message: "Stellar opportunity lookup failed, running with defaults" });
     }
   }
 
-  const rawPrices = typeof marketRaw.outcomePrices === "string"
-    ? JSON.parse(marketRaw.outcomePrices as string)
-    : (marketRaw.outcomePrices ?? ["0.5", "0.5"]);
-  const yes_price = parseFloat(String(rawPrices[0] ?? "0.5")) || 0.5;
+  const rawPrices = isStellarTestnetMode()
+    ? [marketRaw.yes_price ?? 0.5, marketRaw.no_price ?? 0.5]
+    : typeof marketRaw.outcomePrices === "string"
+      ? JSON.parse(marketRaw.outcomePrices as string)
+      : (marketRaw.outcomePrices ?? ["0.5", "0.5"]);
+  const yes_price = parseFloat(String(rawPrices[0] ?? marketRaw.yes_price ?? "0.5")) || 0.5;
+  const no_price = parseFloat(String(rawPrices[1] ?? marketRaw.no_price ?? (1 - yes_price))) || Math.max(0.05, 1 - yes_price);
   const resolution_date = String(
-    marketRaw.endDateIso ??
+    marketRaw.resolution_date ??
+      marketRaw.endDateIso ??
       marketRaw.endDate ??
       new Date(Date.now() + 30 * 86400000).toISOString()
   );
@@ -644,10 +699,23 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     question: String(marketRaw.question ?? effectiveSlug),
     description: String(marketRaw.description ?? ""),
     yes_price,
+    yesPrice: yes_price,
+    no_price,
     resolution_date,
     days_to_resolution,
     category: String(marketRaw.category ?? "default"),
     token_id,
+    chainMode: isStellarTestnetMode() ? "stellar_testnet" : "polymarket",
+    protocol: typeof marketRaw.protocol === "string" ? marketRaw.protocol : undefined,
+    opportunityType: typeof marketRaw.opportunityType === "string" ? marketRaw.opportunityType : undefined,
+    assetPair: typeof marketRaw.assetPair === "string" ? marketRaw.assetPair : undefined,
+    currentApy: typeof marketRaw.currentApy === "number" ? marketRaw.currentApy : undefined,
+    riskScore: typeof marketRaw.riskScore === "number" ? marketRaw.riskScore : undefined,
+    liquidity: typeof marketRaw.liquidity === "number" ? marketRaw.liquidity : undefined,
+    volume: typeof marketRaw.volume === "number" ? marketRaw.volume : undefined,
+    liquidityGrade: typeof marketRaw.liquidityGrade === "string" ? marketRaw.liquidityGrade : undefined,
+    executionPlan: marketRaw.executionPlan,
+    poolReserves: marketRaw.poolReserves,
   };
 
   const completeRun = async (
@@ -794,6 +862,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   // ── Phase 4: Lucifer (reads from collected results) ──
   await startAgent("lucifer");
   const combinedResults: Record<string, unknown> = {
+    market: marketInput,
     aura: auraResult,
     flux: fluxResult,
     clause: clauseResult,
@@ -817,7 +886,59 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   let executionResult: Record<string, unknown> | null = null;
 
   try {
-    if (decision === "BET_YES" || decision === "BET_NO") {
+    if (isStellarTestnetMode()) {
+      const tradeStepId = await beginStep("trade", "sigma");
+      executionResult = decision === "TRADE"
+        ? {
+            status: "manual_required",
+            paper: false,
+            reason: "Stellar execution is available only through the manual /api/stellar/execute flow in v1.",
+            executionPlan: sigmaData["executionPlan"] ?? marketInput.executionPlan ?? null,
+          }
+        : {
+            status: "skipped",
+            reason: "Sigma did not recommend a live Stellar swap.",
+            executionPlan: sigmaData["executionPlan"] ?? marketInput.executionPlan ?? null,
+          };
+      await finishStep(tradeStepId, "skipped", executionResult, null);
+    } else if (isKrakenMode()) {
+      // ── Kraken paper trading via CLI ─────────────────────────
+      const tradeStepId = await beginStep("trade", "sigma");
+      if (decision === "BET_YES" || decision === "BET_NO") {
+        const direction = decision === "BET_YES" ? "YES" : "NO";
+        const sizeUsd = typeof sigmaData["size_usd"] === "number" ? sigmaData["size_usd"] : 10;
+        const pipelineSignal: import("../execution").TradeSignal = {
+          slug: effectiveSlug,
+          direction: direction as "YES" | "NO",
+          sizeUsdc: sizeUsd,
+        };
+        const krakenSignal = mapPipelineSignalToKraken(pipelineSignal, "BTCUSD");
+        try {
+          const krakenResult = await executeKrakenTrade(krakenSignal);
+          executionResult = {
+            status: krakenResult.success ? "executed" : "failed",
+            paper: true,
+            engine: "kraken",
+            pair: krakenResult.pair,
+            direction: krakenResult.direction,
+            amount: krakenResult.amount,
+            orderId: krakenResult.orderId ?? null,
+            timestamp: krakenResult.timestamp,
+          };
+          await finishStep(tradeStepId, krakenResult.success ? "complete" : "error", executionResult, krakenResult.success ? null : "Kraken paper trade failed");
+          sendEvent(krakenResult.success ? "trade:executed" : "trade:error", { slug: effectiveSlug, engine: "kraken", ...executionResult });
+        } catch (krakenErr) {
+          const error = krakenErr instanceof Error ? krakenErr.message : String(krakenErr);
+          executionResult = { status: "error", paper: true, engine: "kraken", error };
+          await finishStep(tradeStepId, "error", executionResult, error);
+          sendEvent("trade:error", { slug: effectiveSlug, engine: "kraken", error });
+          console.error("[Pipeline] Kraken paper execution failed:", krakenErr);
+        }
+      } else {
+        executionResult = { status: "skipped", engine: "kraken", reason: "Sigma returned PASS/skip." };
+        await finishStep(tradeStepId, "skipped", executionResult, null);
+      }
+    } else if (decision === "BET_YES" || decision === "BET_NO") {
       const tradeStepId = await beginStep("trade", "sigma");
       const direction = decision === "BET_YES" ? "YES" : "NO";
       const sizeUsd =
@@ -959,6 +1080,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     decision: sigmaData["decision"],
     confidence: sigmaData["confidence"],
     execution: executionResult,
+    executionPlan: sigmaData["executionPlan"] ?? marketInput.executionPlan ?? null,
   });
 });
 
