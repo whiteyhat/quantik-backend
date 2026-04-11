@@ -5,10 +5,11 @@ import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { isPgEnabled, pgQueryOne, pgQuery, pgExec } from "../db/postgres";
 import { requireEitherAuth } from "../middleware/apiKeyAuth";
+import { isStellarTestnetMode, isStellarActive } from "../config/chain";
 import { getWalletFundingSnapshot } from "../utils/balances";
 import { getSettings } from "../db/queries";
 import { computeHealthScore } from "../monitoring/healthScore";
-import { generateWalletCredentials } from "../wallet/generate";
+import { generateDualWalletCredentials } from "../wallet/generate";
 import { encrypt } from "../infra/encryption";
 import { rateLimit } from "../infra/rateLimit";
 import { checkPolymarketBalance, runPolymarketApprovals } from "../services/polymarket-prep.service";
@@ -23,8 +24,15 @@ import {
 } from "../services/autopilotPolicy";
 import { loadAgentWalletContext, loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import {
+  ensureUsdcTrustline,
+  fundTestnetAccount,
+  isValidStellarPublicKey,
+  isValidStellarSecret,
+} from "../stellar/wallet";
+import {
   AUTOPILOT_POL_REQUIREMENT,
   AUTOPILOT_USDC_REQUIREMENT,
+  AUTOPILOT_XLM_REQUIREMENT,
   buildAutopilotFundingMissingItems,
 } from "../utils/autopilotFunding";
 
@@ -141,6 +149,11 @@ interface AgentCreateBody {
   wallet_address?: string;
   private_key?: string;
   seed_phrase?: string;
+  // Dual wallet fields (new)
+  evm_address?: string;
+  evm_private_key?: string;
+  stellar_address?: string;
+  stellar_private_key?: string;
   personality: string;
   decisionStyle: string;
   tradingInstinct: string;
@@ -171,12 +184,16 @@ interface OwnedAgentRecord {
 interface OwnedAgentContext extends OwnedAgentRecord {
   name: string;
   wallet_address: string | null;
+  wallet_network: string | null;
   endpoint_url: string | null;
   webhook_secret: string | null;
   autopilot_enabled: number | boolean | null;
   autopilot_updated_at: number | null;
   polymarket_ready: number | boolean | null;
   polymarket_status: string | null;
+  stellar_ready: number | boolean | null;
+  stellar_status: string | null;
+  trustline_established: number | boolean | null;
   personality: string | null;
   decision_style: string | null;
   trading_instinct: string | null;
@@ -269,8 +286,8 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   if (isPgEnabled()) {
     return await pgQueryOne<OwnedAgentContext>(
       `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
-              name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
-              polymarket_ready, polymarket_status,
+              name, wallet_address, wallet_network, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+              polymarket_ready, polymarket_status, stellar_ready, stellar_status, trustline_established,
               personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
        FROM agents WHERE id = $1 AND user_id = $2`,
       [agentId, userId]
@@ -280,8 +297,8 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   const db = getDb();
   const agent = db.prepare(
     `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
-            name, wallet_address, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
-            polymarket_ready, polymarket_status,
+            name, wallet_address, wallet_network, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
+            polymarket_ready, polymarket_status, stellar_ready, stellar_status, trustline_established,
             personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
      FROM agents WHERE id = ? AND user_id = ?`
   ).get(agentId, userId) as OwnedAgentContext | undefined;
@@ -305,9 +322,23 @@ function normalizeAutopilotEnabled(value: number | boolean | null | undefined): 
   return value === true || value === 1;
 }
 
+function isValidWalletAddressForActiveChain(walletAddress: string): boolean {
+  return isStellarTestnetMode()
+    ? isValidStellarPublicKey(walletAddress)
+    : EVM_ADDRESS_RE.test(walletAddress);
+}
+
 async function decorateAgentResponse(agent: Record<string, unknown>, agentId: string): Promise<void> {
   agent.autopilot_enabled = normalizeAutopilotEnabled(agent.autopilot_enabled as number | boolean | null | undefined);
   agent.polymarket_ready = normalizeAutopilotEnabled(agent.polymarket_ready as number | boolean | null | undefined);
+  agent.stellar_ready = normalizeAutopilotEnabled(agent.stellar_ready as number | boolean | null | undefined);
+  agent.trustline_established = normalizeAutopilotEnabled(agent.trustline_established as number | boolean | null | undefined);
+  agent.wallet_network = typeof agent.wallet_network === "string"
+    ? agent.wallet_network
+    : (isStellarTestnetMode() ? "stellar_testnet" : "polymarket");
+  if (typeof agent.stellar_status !== "string" && isStellarTestnetMode()) {
+    agent.stellar_status = "pending_funding";
+  }
 
   const [autopilotPolicy, walletDiag] = await Promise.all([
     buildAutopilotPolicy(agent as unknown as AgentPolicySource),
@@ -349,9 +380,10 @@ interface AgentExecutionSummaryRow {
 
 function buildPolymarketPrepMissingItems(agent: OwnedAgentContext, funding: Awaited<ReturnType<typeof getWalletFundingSnapshot>>): string[] {
   if (!agent.wallet_address) {
+    const requiredNetwork = isStellarTestnetMode() ? AUTOPILOT_XLM_REQUIREMENT : AUTOPILOT_POL_REQUIREMENT;
     return [
       "Assign a wallet address to this agent.",
-      `Fund the wallet with ${AUTOPILOT_POL_REQUIREMENT} and ${AUTOPILOT_USDC_REQUIREMENT}.`,
+      `Fund the wallet with ${requiredNetwork} and ${AUTOPILOT_USDC_REQUIREMENT}.`,
     ];
   }
 
@@ -361,6 +393,16 @@ function buildPolymarketPrepMissingItems(agent: OwnedAgentContext, funding: Awai
 
   const fundingItems = buildAutopilotFundingMissingItems(funding.pol, funding.onChainUsdc);
   if (fundingItems.length > 0) return fundingItems;
+
+  if (isStellarTestnetMode()) {
+    if (!normalizeAutopilotEnabled(agent.trustline_established)) {
+      return ["Establish the Stellar USDC trustline before enabling live automation."];
+    }
+    if (!normalizeAutopilotEnabled(agent.stellar_ready)) {
+      return ["Complete Stellar wallet setup before enabling live automation."];
+    }
+    return [];
+  }
 
   if (normalizeAutopilotEnabled(agent.polymarket_ready)) {
     return [];
@@ -374,6 +416,13 @@ function buildPolymarketPrepMissingItems(agent: OwnedAgentContext, funding: Awai
 }
 
 function buildPolymarketPrepMessage(agent: OwnedAgentContext): string {
+  if (isStellarTestnetMode()) {
+    if (agent.stellar_status === "trustline_failed") {
+      return "Stellar trustline setup failed. Retry the trustline flow before enabling automation.";
+    }
+    return "Stellar wallet setup is incomplete. Fund the account and establish the USDC trustline before enabling automation.";
+  }
+
   if (agent.polymarket_status === "approval_failed") {
     return "Polymarket approvals failed. Retry the approval flow before enabling autopilot.";
   }
@@ -781,31 +830,67 @@ router.post("/agents", async (req: Request, res: Response) => {
     return;
   }
 
-  // Wallet handling: frontend generates wallet via /api/wallet/generate,
-  // user downloads the private key, then passes address + key here.
-  // Backend encrypts the key for server-side Polymarket approvals.
-  // Fallback: if no wallet_address provided, generate server-side.
-  let walletAddress: string;
-  let encryptedPrivateKey: string;
+  // Dual wallet handling: frontend generates both EVM + Stellar wallets via
+  // /api/wallet/generate, user downloads both private keys, then passes
+  // addresses + keys here. Backend encrypts keys for server-side operations.
+  let walletAddress: string; // Primary address (EVM for Polymarket compatibility)
+  let evmAddress: string;
+  let stellarAddress: string;
+  let encryptedPrivateKey: string; // Legacy: EVM key (backward compat)
   let encryptedSeedPhrase: string;
+  let encryptedEvmPrivateKey: string;
+  let encryptedStellarPrivateKey: string;
+  let setupStellarPrivateKey: string | null = null;
 
-  if (body.wallet_address && EVM_ADDRESS_RE.test(body.wallet_address)) {
+  if (body.evm_address && EVM_ADDRESS_RE.test(body.evm_address) && body.stellar_address) {
+    // New dual-wallet path
+    evmAddress = body.evm_address;
+    stellarAddress = body.stellar_address;
+    walletAddress = evmAddress; // Primary address = EVM for Polymarket
+
+    if (body.stellar_private_key && !isValidStellarSecret(body.stellar_private_key)) {
+      res.status(400).json({ error: "stellar_private_key must be a valid Stellar secret key (S...)" });
+      return;
+    }
+
+    setupStellarPrivateKey = body.stellar_private_key ?? null;
+    encryptedEvmPrivateKey = body.evm_private_key ? encrypt(body.evm_private_key) : "";
+    encryptedStellarPrivateKey = body.stellar_private_key ? encrypt(body.stellar_private_key) : "";
+    // Legacy fields for backward compat
+    encryptedPrivateKey = encryptedEvmPrivateKey;
+    encryptedSeedPhrase = "";
+
+    // Clear sensitive data from request body immediately
+    body.evm_private_key = undefined;
+    body.stellar_private_key = undefined;
+  } else if (body.wallet_address && isValidWalletAddressForActiveChain(body.wallet_address)) {
+    // Legacy single-wallet path
     walletAddress = body.wallet_address;
-    // If frontend also sent the private key, encrypt+store it for automated approvals
+    evmAddress = "";
+    stellarAddress = "";
+    if (isStellarTestnetMode() && body.private_key && !isValidStellarSecret(body.private_key)) {
+      res.status(400).json({ error: "private_key must be a valid Stellar secret key (S...)" });
+      return;
+    }
+    setupStellarPrivateKey = isStellarTestnetMode() ? (body.private_key ?? null) : null;
     encryptedPrivateKey = body.private_key ? encrypt(body.private_key) : "";
     encryptedSeedPhrase = body.seed_phrase ? encrypt(body.seed_phrase) : "";
-    // Clear from request body immediately
+    encryptedEvmPrivateKey = "";
+    encryptedStellarPrivateKey = "";
     body.private_key = undefined;
     body.seed_phrase = undefined;
   } else {
-    // Fallback: generate wallet server-side (no key returned to user)
+    // Fallback: generate dual wallet server-side (no keys returned to user)
     try {
-      const wallet = await generateWalletCredentials();
-      walletAddress = wallet.address;
-      encryptedPrivateKey = encrypt(wallet.privateKey);
-      encryptedSeedPhrase = encrypt(wallet.seedPhrase);
-      wallet.privateKey = "";
-      wallet.seedPhrase = "";
+      const dual = await generateDualWalletCredentials();
+      evmAddress = dual.evm.address;
+      stellarAddress = dual.stellar.address;
+      walletAddress = evmAddress;
+      setupStellarPrivateKey = dual.stellar.privateKey;
+      encryptedEvmPrivateKey = encrypt(dual.evm.privateKey);
+      encryptedStellarPrivateKey = encrypt(dual.stellar.privateKey);
+      encryptedPrivateKey = encryptedEvmPrivateKey;
+      encryptedSeedPhrase = "";
     } catch (walletErr) {
       console.error("[agents] wallet generation error:", walletErr instanceof Error ? walletErr.message : walletErr);
       res.status(500).json({ error: "Failed to generate wallet" });
@@ -817,29 +902,34 @@ router.post("/agents", async (req: Request, res: Response) => {
   const agentCode = generateAgentCode();
   const now = Date.now();
   const systemPrompt = buildSystemPrompt(body, agentCode);
+  const walletNetwork = isStellarTestnetMode() ? "stellar_testnet" : "polymarket";
+  let stellarReady = 0;
+  let stellarStatus: string | null = "pending_funding";
+  let trustlineEstablished = 0;
 
-  const agentParams = [
-    id, agentCode,
-    body.name.trim(),
-    body.avatar ?? "🦊",
-    body.animalType ?? null,
-    body.generatedImage ?? null,
-    body.personality ?? "balanced",
-    body.decisionStyle ?? "analyst",
-    body.tradingInstinct ?? "reversal_spotter",
-    body.timePatience ?? "swing",
-    body.profitDream ?? "wealth_builder",
-    body.moneyApproach ?? "smart_scaling",
-    body.protectionMindset ?? "flexible",
-    "none",
-    body.marketSense ?? "fixed_rules",
-    body.assetLove ?? "crypto",
-    systemPrompt,
-    walletAddress,
-    encryptedPrivateKey || null,
-    encryptedSeedPhrase || null,
-    now, now,
-  ];
+  // Fund and set up Stellar wallet (only when Stellar chain is active and we have a valid Stellar address)
+  if (stellarAddress && isStellarActive()) {
+    let funded = false;
+    try {
+      await fundTestnetAccount(stellarAddress);
+      funded = true;
+      stellarStatus = "funded";
+    } catch (err) {
+      console.warn("[agents] Stellar friendbot funding skipped:", err instanceof Error ? err.message : err);
+    }
+
+    if (setupStellarPrivateKey) {
+      try {
+        const trustlineOk = await ensureUsdcTrustline(setupStellarPrivateKey);
+        trustlineEstablished = trustlineOk ? 1 : 0;
+        stellarReady = funded && trustlineOk ? 1 : 0;
+        stellarStatus = trustlineOk ? (funded ? "ready" : "trustline_established") : (funded ? "funded" : "pending_funding");
+      } catch (err) {
+        console.warn("[agents] Stellar trustline setup failed:", err instanceof Error ? err.message : err);
+        stellarStatus = funded ? "trustline_failed" : "pending_funding";
+      }
+    }
+  }
 
   try {
     // Always write to SQLite (local fallback)
@@ -850,9 +940,44 @@ router.post("/agents", async (req: Request, res: Response) => {
         personality, decision_style, trading_instinct, time_patience, profit_dream,
         money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
         system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
-        polymarket_ready, polymarket_status, user_id, created_at, updated_at
-      ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending_funding', ?, ?, ?)
-    `).run(...agentParams.slice(0, 20), userId, ...agentParams.slice(20));
+        wallet_network, stellar_ready, stellar_status, trustline_established,
+        polymarket_ready, polymarket_status, user_id, created_at, updated_at,
+        evm_address, stellar_address, encrypted_evm_private_key, encrypted_stellar_private_key
+      ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, agentCode,
+      body.name.trim(),
+      body.avatar ?? "🦊",
+      body.animalType ?? null,
+      body.generatedImage ?? null,
+      body.personality ?? "balanced",
+      body.decisionStyle ?? "analyst",
+      body.tradingInstinct ?? "reversal_spotter",
+      body.timePatience ?? "swing",
+      body.profitDream ?? "wealth_builder",
+      body.moneyApproach ?? "smart_scaling",
+      body.protectionMindset ?? "flexible",
+      "none",
+      body.marketSense ?? "fixed_rules",
+      body.assetLove ?? "crypto",
+      systemPrompt,
+      walletAddress,
+      encryptedPrivateKey || null,
+      encryptedSeedPhrase || null,
+      walletNetwork,
+      stellarReady,
+      stellarStatus,
+      trustlineEstablished,
+      0,
+      "pending_funding",
+      userId,
+      now,
+      now,
+      evmAddress || null,
+      stellarAddress || null,
+      encryptedEvmPrivateKey || null,
+      encryptedStellarPrivateKey || null,
+    );
 
     if (userId) {
       db.prepare("UPDATE users SET agent_id = ? WHERE id = ?").run(id, userId);
@@ -866,9 +991,42 @@ router.post("/agents", async (req: Request, res: Response) => {
           personality, decision_style, trading_instinct, time_patience, profit_dream,
           money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
           system_prompt, wallet_address, encrypted_private_key, encrypted_seed_phrase,
-          polymarket_ready, polymarket_status, user_id, created_at, updated_at
-        ) VALUES ($1, $2, 'inactive', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 0, 'pending_funding', $21, $22, $23)
-      `, [...agentParams.slice(0, 20), userId, ...agentParams.slice(20)]);
+          wallet_network, stellar_ready, stellar_status, trustline_established,
+          polymarket_ready, polymarket_status, user_id, created_at, updated_at,
+          evm_address, stellar_address, encrypted_evm_private_key, encrypted_stellar_private_key
+        ) VALUES ($1, $2, 'inactive', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, 0, 'pending_funding', $25, $26, $27, $28, $29, $30, $31)
+      `, [
+        id, agentCode,
+        body.name.trim(),
+        body.avatar ?? "🦊",
+        body.animalType ?? null,
+        body.generatedImage ?? null,
+        body.personality ?? "balanced",
+        body.decisionStyle ?? "analyst",
+        body.tradingInstinct ?? "reversal_spotter",
+        body.timePatience ?? "swing",
+        body.profitDream ?? "wealth_builder",
+        body.moneyApproach ?? "smart_scaling",
+        body.protectionMindset ?? "flexible",
+        "none",
+        body.marketSense ?? "fixed_rules",
+        body.assetLove ?? "crypto",
+        systemPrompt,
+        walletAddress,
+        encryptedPrivateKey || null,
+        encryptedSeedPhrase || null,
+        walletNetwork,
+        stellarReady,
+        stellarStatus,
+        trustlineEstablished,
+        userId,
+        now,
+        now,
+        evmAddress || null,
+        stellarAddress || null,
+        encryptedEvmPrivateKey || null,
+        encryptedStellarPrivateKey || null,
+      ]);
 
       if (userId) {
         await pgExec("UPDATE users SET agent_id = $1 WHERE id = $2", [id, userId]);
@@ -907,17 +1065,36 @@ router.post("/agents", async (req: Request, res: Response) => {
       market_sense: body.marketSense ?? "fixed_rules",
       asset_love: body.assetLove ?? "crypto",
       wallet_address: walletAddress,
+      evm_address: evmAddress || null,
+      stellar_address: stellarAddress || null,
+      wallet_network: walletNetwork,
+      stellar_ready: !!stellarReady,
+      stellar_status: stellarStatus,
+      trustline_established: !!trustlineEstablished,
       polymarket_ready: false,
       polymarket_status: "pending_funding",
       funding_instructions: {
-        address: walletAddress,
-        network: "Polygon (Mainnet)",
-        required: {
-          pol: `${AUTOPILOT_POL_REQUIREMENT} (gas fees)`,
-          usdc: `${AUTOPILOT_USDC_REQUIREMENT} (trading)`,
+        evm_address: evmAddress || walletAddress,
+        stellar_address: stellarAddress || null,
+        networks: {
+          polygon: {
+            address: evmAddress || walletAddress,
+            required: {
+              pol: `${AUTOPILOT_POL_REQUIREMENT} (gas fees)`,
+              usdc: `${AUTOPILOT_USDC_REQUIREMENT} (trading)`,
+            },
+            usdc_contract: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            note: "Fund this address with POL and USDC on Polygon.",
+          },
+          stellar: stellarAddress ? {
+            address: stellarAddress,
+            required: {
+              xlm: `${AUTOPILOT_XLM_REQUIREMENT} (fees + reserves)`,
+              usdc: "Optional for swaps, but useful for wallet verification.",
+            },
+            note: "Friendbot funding is attempted automatically. If trustline setup did not complete, retry wallet setup.",
+          } : null,
         },
-        usdc_contract: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-        note: "Fund this address, then click Verify Readiness.",
       },
       created_at: now,
       updated_at: now,
@@ -946,8 +1123,17 @@ router.post("/agents/:id/wallet", async (req: Request, res: Response) => {
     seed_phrase?: string;
   };
 
-  if (!body.wallet_address || !EVM_ADDRESS_RE.test(body.wallet_address)) {
-    res.status(400).json({ error: "Valid wallet_address (0x EVM address) is required" });
+  if (!body.wallet_address || !isValidWalletAddressForActiveChain(body.wallet_address)) {
+    res.status(400).json({
+      error: isStellarTestnetMode()
+        ? "Valid wallet_address (Stellar G... public key) is required"
+        : "Valid wallet_address (0x EVM address) is required",
+    });
+    return;
+  }
+
+  if (isStellarTestnetMode() && body.private_key && !isValidStellarSecret(body.private_key)) {
+    res.status(400).json({ error: "private_key must be a valid Stellar secret key (S...)" });
     return;
   }
 
@@ -959,9 +1145,39 @@ router.post("/agents/:id/wallet", async (req: Request, res: Response) => {
 
   const walletAddress = body.wallet_address;
   const now = Date.now();
+  let stellarReady = 0;
+  let stellarStatus = isStellarTestnetMode() ? "pending_funding" : null;
+  let trustlineEstablished = 0;
+
+  if (isStellarTestnetMode()) {
+    let funded = false;
+    try {
+      await fundTestnetAccount(walletAddress);
+      funded = true;
+      stellarStatus = "funded";
+    } catch (err) {
+      console.warn("[agents] Stellar friendbot funding skipped:", err instanceof Error ? err.message : err);
+    }
+
+    if (body.private_key) {
+      try {
+        const trustlineOk = await ensureUsdcTrustline(body.private_key);
+        trustlineEstablished = trustlineOk ? 1 : 0;
+        stellarReady = funded && trustlineOk ? 1 : 0;
+        stellarStatus = trustlineOk ? (funded ? "ready" : "trustline_established") : (funded ? "funded" : "pending_funding");
+      } catch (err) {
+        console.warn("[agents] Stellar trustline setup failed:", err instanceof Error ? err.message : err);
+        stellarStatus = funded ? "trustline_failed" : "pending_funding";
+      }
+    }
+  }
 
   const fields: Record<string, unknown> = {
     wallet_address: walletAddress,
+    wallet_network: isStellarTestnetMode() ? "stellar_testnet" : "polymarket",
+    stellar_ready: stellarReady,
+    stellar_status: stellarStatus,
+    trustline_established: trustlineEstablished,
     polymarket_ready: 0,
     polymarket_status: "pending_funding",
     updated_at: now,
@@ -976,7 +1192,14 @@ router.post("/agents/:id/wallet", async (req: Request, res: Response) => {
 
   await syncAgentFields(agentId, fields);
 
-  res.json({ ok: true, wallet_address: walletAddress });
+  res.json({
+    ok: true,
+    wallet_address: walletAddress,
+    wallet_network: fields.wallet_network,
+    stellar_ready: !!stellarReady,
+    stellar_status: stellarStatus,
+    trustline_established: !!trustlineEstablished,
+  });
 });
 
 // ── POST /api/v1/agents/:id/check-balance — Fast balance check (step 1) ──────
@@ -1086,7 +1309,8 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     wallet_address, created_at, updated_at, deployed_at,
     agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events,
     autopilot_enabled, autopilot_updated_at,
-    polymarket_ready, polymarket_status`;
+    polymarket_ready, polymarket_status, wallet_network, stellar_ready, stellar_status, trustline_established,
+    erc8004_token_id, erc8004_registered_at, erc8004_reputation_score, erc8004_validation_count`;
 
   if (isPgEnabled()) {
     const userId = await getUserIdAsync(req);
