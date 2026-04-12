@@ -1006,21 +1006,27 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
             try {
               const correlations = correlateQuestionToAsset(effectiveSlug);
               if (correlations.length > 0) {
-                const krakenSignals = correlations.map((c) =>
-                  mapPipelineSignalToKrakenThesisAware(
+                // Build thesis-aware signals for each correlated instrument
+                const krakenSignals = correlations.map((corr) => {
+                  const signal = mapPipelineSignalToKrakenThesisAware(
                     { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
-                    c.pair,
-                    c.polarity,
-                    c.assetClass
-                  )
-                );
+                    corr.pair,
+                    corr.polarity,
+                    corr.assetClass
+                  );
+                  // Confidence-weighted sizing: high-confidence legs get full size, low get partial
+                  return { ...signal, amount: signal.amount * corr.confidence };
+                });
+
+                // Execute all legs sequentially (rate limit safety)
                 const krakenResults = await executeMultiLegKrakenTrades(krakenSignals);
-                // Attach all Kraken legs to execution result
-                (executionResult as Record<string, unknown>)["krakenLegs"] = krakenResults.map((kr, i) => ({
-                  status: kr.success ? "executed" : "failed",
-                  pair: kr.pair,
-                  direction: kr.direction,
-                  amount: kr.amount,
+
+                // Stream each leg to frontend via SSE
+                const krakenLegs = krakenResults.map((res, i) => ({
+                  status: res.success ? "executed" : "failed",
+                  pair: res.pair,
+                  direction: res.direction,
+                  amount: res.amount,
                   asset: correlations[i].asset,
                   polarity: correlations[i].polarity,
                   confidence: correlations[i].confidence,
@@ -1028,11 +1034,17 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
                   paper: true,
                   engine: "kraken",
                 }));
-                for (let i = 0; i < krakenResults.length; i++) {
-                  const kr = krakenResults[i];
-                  const c = correlations[i];
-                  console.log(`[Pipeline][Dual-Market] Kraken ${kr.direction} ${kr.pair} (${c.asset}, ${c.assetClass}, ${c.polarity}) — ${kr.success ? "OK" : "FAILED"}`);
-                }
+
+                // SSE event: stream all legs at once for the frontend "wow" moment
+                sendEvent("trade:kraken-leg", { legs: krakenLegs, slug: effectiveSlug });
+
+                // Attach multi-leg results to execution result
+                (executionResult as Record<string, unknown>)["krakenLegs"] = krakenLegs;
+
+                const successCount = krakenResults.filter((r) => r.success).length;
+                console.log(
+                  `[Pipeline][Dual-Market] ${successCount}/${krakenResults.length} Kraken legs executed across ${[...new Set(correlations.map((c) => c.assetClass))].join(", ")}`
+                );
               } else {
                 console.log(`[Pipeline][Dual-Market] No correlation found for "${effectiveSlug}" — Polymarket only`);
               }
