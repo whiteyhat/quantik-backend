@@ -1,5 +1,6 @@
 // ── Kraken paper trade execution engine ──────────────────────────
 import { krakenPaperBuy, krakenPaperSell } from "./cli";
+import { resolveKrakenDirection } from "./correlation";
 import type { TradeSignal } from "../execution";
 
 export interface KrakenTradeSignal {
@@ -64,4 +65,17 @@ export function mapPipelineSignalToKraken(
     direction,
     amount: signal.sizeUsdc,
   };
+}
+
+// ── Thesis-aware mapping for dual-market mode ──────────────────
+// Uses correlation polarity instead of blind YES->BUY mapping.
+export function mapPipelineSignalToKrakenThesisAware(
+  signal: TradeSignal,
+  pair: string,
+  polarity: "bullish" | "bearish"
+): KrakenTradeSignal {
+  const decision: "BET_YES" | "BET_NO" =
+    signal.direction === "YES" ? "BET_YES" : "BET_NO";
+  const direction = resolveKrakenDirection(decision, polarity);
+  return { pair, direction, amount: signal.sizeUsdc };
 }
