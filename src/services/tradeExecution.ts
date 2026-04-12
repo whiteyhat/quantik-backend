@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { runCliWithWallet } from "../cli";
+import { runCliWithWallet, CliError } from "../cli";
 import { insertTrade, insertPaperTrade, getSettings } from "../db/queries";
 import { dualQueryOne, dualExec } from "../db/postgres";
 import { insertExecutionRecord } from "../utils/executions";
@@ -219,7 +219,58 @@ export async function executeManagedTrade(input: ManagedTradeRequest): Promise<M
     "--signature-type", process.env.POLYMARKET_SIGNATURE_TYPE ?? "eoa",
   ];
 
-  const rawData = await runCliWithWallet(cliArgs, input.walletPrivateKey);
+  let rawData: unknown;
+  try {
+    rawData = await runCliWithWallet(cliArgs, input.walletPrivateKey);
+  } catch (cliErr) {
+    // The Polymarket CLI exits non-zero on API errors (e.g. insufficient balance).
+    // Try to extract the JSON error from the CliError message before giving up.
+    let errorMsg = cliErr instanceof Error ? cliErr.message : String(cliErr);
+    if (cliErr instanceof CliError) {
+      const jsonMatch = errorMsg.match(/\{[^}]*"error"\s*:\s*"([^"]+)"/);
+      if (jsonMatch?.[1]) {
+        // Extract the human-readable part after the HTTP status prefix
+        const inner = jsonMatch[1];
+        const readable = inner.replace(/^Status:\s*error\([^)]*\)\s*making\s+\w+\s+call\s+to\s+\S+\s+with\s+/, "");
+        try {
+          const parsed = JSON.parse(readable);
+          errorMsg = typeof parsed.error === "string" ? parsed.error : readable;
+        } catch {
+          errorMsg = readable;
+        }
+      }
+    }
+
+    await insertExecutionRecord({
+      userId: input.userId,
+      agentId: input.agentId,
+      slug: input.marketSlug,
+      side: "buy",
+      direction: input.direction,
+      source: input.source,
+      amount: input.sizeUsdc,
+      executedAt: now,
+      status: "failed",
+      fillPrice: quotedPrice,
+      resolutionDate,
+      pipelineRunId: input.pipelineRunId ?? null,
+    });
+
+    return {
+      ok: false,
+      orderId: null,
+      paper: false,
+      status: "failed",
+      tokenId: resolvedTokenId,
+      direction: input.direction,
+      size: input.sizeUsdc,
+      price: quotedPrice,
+      slug: input.marketSlug,
+      rawData: { error: errorMsg },
+      error: errorMsg,
+    };
+  }
+
   const data =
     rawData !== null && typeof rawData === "object"
       ? (rawData as Record<string, unknown>)

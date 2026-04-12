@@ -99,10 +99,3 @@ export const apiRateLimit = rateLimit({
   max: 120,
   keyPrefix: "api",
 });
-
-/** 3 bridge operations per minute */
-export const bridgeRateLimit = rateLimit({
-  windowMs: 60_000,
-  max: 3,
-  keyPrefix: "bridge",
-});

@@ -40,6 +40,19 @@ export async function fetchWithRetry(
   throw lastError;
 }
 
+/** Extract the parent event slug from a Gamma API market response.
+ *  Checks top-level groupSlug/eventSlug first, then falls back to events[0].slug. */
+export function extractEventSlug(market: Record<string, unknown>): string | undefined {
+  if (typeof market.groupSlug === "string" && market.groupSlug) return market.groupSlug;
+  if (typeof market.eventSlug === "string" && market.eventSlug) return market.eventSlug;
+  const events = market.events;
+  if (Array.isArray(events) && events.length > 0) {
+    const slug = (events[0] as Record<string, unknown>).slug;
+    if (typeof slug === "string" && slug) return slug;
+  }
+  return undefined;
+}
+
 export interface MarketData {
   slug: string;
   question: string;
@@ -128,7 +141,7 @@ export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
     yes_token_id: tokens.yesTokenId ?? undefined,
     no_token_id: tokens.noTokenId ?? undefined,
     category: m.category,
-    event_slug: m.groupSlug || m.eventSlug || undefined,
+    event_slug: extractEventSlug(m),
     condition_id: m.conditionId || undefined,
   };
 }
@@ -145,7 +158,7 @@ export async function resolvePolymarketUrl(marketSlug: string): Promise<string> 
     if (res.ok) {
       const raw: unknown = await res.json();
       const m: any = Array.isArray(raw) && raw.length > 0 ? raw[0] : raw;
-      const eventSlug = m?.groupSlug || m?.eventSlug || m?.slug || marketSlug;
+      const eventSlug = extractEventSlug(m) || m?.slug || marketSlug;
       return `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`;
     }
   } catch {

@@ -16,12 +16,13 @@ import {
 } from "../erc8004";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne, pgQuery } from "../db/postgres";
+import { requireClerkAuth } from "../middleware/auth";
 
 const router = Router();
 
 // ── POST /register — Register agent on ERC-8004 Identity Registry ──────────
 
-router.post("/register", async (req, res) => {
+router.post("/register", requireClerkAuth, async (req, res) => {
   try {
     const { agentId } = req.body;
     if (!agentId || typeof agentId !== "string") {
@@ -38,6 +39,8 @@ router.post("/register", async (req, res) => {
       txHash: result.txHash,
       tokenId: result.tokenId,
       etherscanUrl: result.etherscanUrl,
+      reputationScore: 0,
+      validationCount: 0,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -24,9 +24,10 @@ import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
-import { isKrakenMode, isDualMarketEnabled } from "../config/chain";
-import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade, executeMultiLegKrakenTrades } from "../kraken/execution";
+import { isKrakenMode, isDualMarketEnabled, isKrakenLiveMode } from "../config/chain";
+import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade, executeMultiLegKrakenTrades, convertUsdcToBaseAmount } from "../kraken/execution";
 import { correlateQuestionToAsset } from "../kraken/correlation";
+import { loadKrakenCredentials } from "./settings";
 import { GAMMA_API_BASE, fetchMarketBySlug, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
 import {
@@ -1001,25 +1002,44 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
             }
           }
 
-          // ── Dual-market: fire correlated Kraken paper trades (multi-leg) ────────
+          // ── Dual-market: fire correlated Kraken trades (paper or live) ────────
           if (isDualMarketEnabled()) {
             try {
               const correlations = correlateQuestionToAsset(effectiveSlug);
               if (correlations.length > 0) {
+                // Determine trading mode and load credentials if live
+                const krakenLive = isKrakenLiveMode();
+                const krakenCreds = krakenLive ? await loadKrakenCredentials() : null;
+                if (krakenLive && !krakenCreds) {
+                  console.warn("[Pipeline][Dual-Market] Live mode enabled but no Kraken credentials found — falling back to paper");
+                }
+                const tradingMode = (krakenLive && krakenCreds) ? "live" : "paper";
+
                 // Build thesis-aware signals for each correlated instrument
-                const krakenSignals = correlations.map((corr) => {
-                  const signal = mapPipelineSignalToKrakenThesisAware(
-                    { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
-                    corr.pair,
-                    corr.polarity,
-                    corr.assetClass
-                  );
-                  // Confidence-weighted sizing: high-confidence legs get full size, low get partial
-                  return { ...signal, amount: signal.amount * corr.confidence };
-                });
+                // Convert USDC notional to base currency amounts via live ticker prices
+                const krakenSignals = await Promise.all(
+                  correlations.map(async (corr) => {
+                    const signal = mapPipelineSignalToKrakenThesisAware(
+                      { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
+                      corr.pair,
+                      corr.polarity,
+                      corr.assetClass
+                    );
+                    // Confidence-weighted sizing: high-confidence legs get full size, low get partial
+                    const usdcAmount = signal.amount * corr.confidence;
+                    // Convert USDC to base currency (e.g. 10 USDC → 0.00014 BTC)
+                    const baseAmount = await convertUsdcToBaseAmount(corr.pair, usdcAmount);
+                    console.log(`[Pipeline][Dual-Market][${tradingMode}] ${corr.pair}: $${usdcAmount.toFixed(2)} USDC → ${baseAmount} ${corr.asset}`);
+                    return { ...signal, amount: baseAmount };
+                  })
+                );
 
                 // Execute all legs sequentially (rate limit safety)
-                const krakenResults = await executeMultiLegKrakenTrades(krakenSignals);
+                // Pass credentials for live mode, undefined for paper
+                const krakenResults = await executeMultiLegKrakenTrades(
+                  krakenSignals,
+                  tradingMode === "live" ? krakenCreds! : undefined
+                );
 
                 // Stream each leg to frontend via SSE
                 const krakenLegs = krakenResults.map((res, i) => ({
@@ -1031,7 +1051,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
                   polarity: correlations[i].polarity,
                   confidence: correlations[i].confidence,
                   assetClass: correlations[i].assetClass,
-                  paper: true,
+                  paper: tradingMode === "paper",
                   engine: "kraken",
                 }));
 

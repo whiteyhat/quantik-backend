@@ -7,7 +7,10 @@ export interface GeneratedWallet {
   seedPhrase: string;
 }
 
-async function generateEvmWallet(): Promise<GeneratedWallet> {
+/**
+ * Generate an EVM/Polygon wallet via WDK.
+ */
+export async function generateWalletCredentials(): Promise<GeneratedWallet> {
   const seedPhrase = WDK.getRandomSeedPhrase();
   const wdk = new WDK(seedPhrase);
   wdk.registerWallet("ethereum", WalletManagerEvm, {});
@@ -28,11 +31,4 @@ async function generateEvmWallet(): Promise<GeneratedWallet> {
   } finally {
     account.dispose();
   }
-}
-
-/**
- * Generate an EVM/Polygon wallet via WDK.
- */
-export async function generateWalletCredentials(): Promise<GeneratedWallet> {
-  return generateEvmWallet();
 }

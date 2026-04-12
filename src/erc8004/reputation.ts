@@ -7,6 +7,7 @@
 
 import { ethers } from "ethers";
 import { getReputationContract, isErc8004Configured } from "./config";
+import { dualExec } from "../db/postgres";
 
 // ── Feedback Submission ─────────────────────────────────────────────────────
 
@@ -17,7 +18,8 @@ import { getReputationContract, isErc8004Configured } from "./config";
  */
 export async function submitFeedback(
   agentTokenId: string,
-  pnlBasisPoints: number
+  pnlBasisPoints: number,
+  agentId: string
 ): Promise<{ txHash: string }> {
   if (!isErc8004Configured()) {
     throw new Error("ERC-8004 not configured");
@@ -51,6 +53,17 @@ export async function submitFeedback(
     feedbackHash
   );
   await tx.wait();
+
+  // Sync reputation score back to agents table
+  try {
+    const summary = await getReputationSummary(agentTokenId);
+    await dualExec(
+      "UPDATE agents SET erc8004_reputation_score = $1 WHERE id = $2",
+      [summary.summaryValue, agentId]
+    );
+  } catch {
+    // Non-critical — card will show stale score until next feedback
+  }
 
   return { txHash: tx.hash };
 }

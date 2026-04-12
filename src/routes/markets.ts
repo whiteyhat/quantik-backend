@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { runCli, CliError } from "../cli";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
-import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+import { GAMMA_API_BASE, fetchWithRetry, extractEventSlug } from "../utils/market-fetch";
 
 const router = Router();
 
@@ -292,6 +292,7 @@ function transformTrendingMarket(raw: GammaMarketRaw): unknown {
     probability: outcomePrices[1] ?? 0,
     category: inferCategory(raw),
     tags,
+    eventSlug: extractEventSlug(raw as Record<string, unknown>),
   };
 }
 

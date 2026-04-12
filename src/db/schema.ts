@@ -1149,6 +1149,7 @@ function migrate(db: Database.Database): void {
 
   // Migration: ERC-8004 on-chain identity columns on agents table
   addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_token_id TEXT");
+  addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_tx_hash TEXT");
   addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_registered_at INTEGER");
   addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_reputation_score INTEGER");
   addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_validation_count INTEGER NOT NULL DEFAULT 0");

@@ -5,9 +5,11 @@
 // Each agent receives a unique tokenId (ERC-721 NFT) linked to its agentURI.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { ethers } from "ethers";
 import { getIdentityContract, isErc8004Configured, ERC8004_CONFIG } from "./config";
+import { getReputationSummary } from "./reputation";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgQueryOne, pgExec } from "../db/postgres";
+import { isPgEnabled, pgQueryOne, pgExec, dualExec } from "../db/postgres";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +19,7 @@ interface AgentRow {
   description: string | null;
   avatar_emoji: string;
   erc8004_token_id: string | null;
+  erc8004_tx_hash: string | null;
   erc8004_registered_at: number | null;
 }
 
@@ -38,12 +41,12 @@ export async function registerAgentIdentity(
   // Load agent from DB (dual-mode)
   const agent = isPgEnabled()
     ? await pgQueryOne<AgentRow>(
-        "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_registered_at FROM agents WHERE id = $1",
+        "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_tx_hash, erc8004_registered_at FROM agents WHERE id = $1",
         [agentId]
       )
     : (getDb()
         .prepare(
-          "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_registered_at FROM agents WHERE id = ?"
+          "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_tx_hash, erc8004_registered_at FROM agents WHERE id = ?"
         )
         .get(agentId) as AgentRow | undefined) ?? null;
 
@@ -61,42 +64,59 @@ export async function registerAgentIdentity(
   const tx = await contract.register(agentURI);
   const receipt = await tx.wait();
 
-  // Extract tokenId from Registered event
-  const event = receipt?.logs?.find((log: { topics: string[]; data: string }) => {
-    try {
-      return (
-        contract.interface.parseLog({
-          topics: [...log.topics],
-          data: log.data,
-        })?.name === "Registered"
-      );
-    } catch {
-      return false;
+  // Extract tokenId from the ERC-721 Transfer event (mint: from=0x0).
+  // The on-chain contract's registration event uses a non-standard signature,
+  // but the standard ERC-721 Transfer(address,address,uint256) is always emitted
+  // on mint and reliably carries the tokenId in topics[3].
+  const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+  let tokenId: string | null = null;
+
+  for (const log of receipt?.logs ?? []) {
+    if (
+      log.topics[0] === TRANSFER_TOPIC &&
+      log.topics[1] === ethers.zeroPadValue("0x00", 32) && // from = zero address (mint)
+      log.topics.length >= 4
+    ) {
+      tokenId = BigInt(log.topics[3]).toString();
+      break;
     }
-  });
+  }
 
-  const parsed = event
-    ? contract.interface.parseLog({
-        topics: [...event.topics],
-        data: event.data,
-      })
-    : null;
-
-  const tokenId = parsed?.args?.agentId?.toString() || "0";
+  if (!tokenId) {
+    throw new Error(
+      "Registration tx succeeded but no Transfer (mint) event found in receipt"
+    );
+  }
 
   // Update agent in DB (dual-mode)
   const now = Date.now();
   if (isPgEnabled()) {
     await pgExec(
-      "UPDATE agents SET erc8004_token_id = $1, erc8004_registered_at = $2 WHERE id = $3",
-      [tokenId, now, agentId]
+      "UPDATE agents SET erc8004_token_id = $1, erc8004_tx_hash = $2, erc8004_registered_at = $3 WHERE id = $4",
+      [tokenId, tx.hash, now, agentId]
     );
   } else {
     getDb()
       .prepare(
-        "UPDATE agents SET erc8004_token_id = ?, erc8004_registered_at = ? WHERE id = ?"
+        "UPDATE agents SET erc8004_token_id = ?, erc8004_tx_hash = ?, erc8004_registered_at = ? WHERE id = ?"
       )
-      .run(tokenId, now, agentId);
+      .run(tokenId, tx.hash, now, agentId);
+  }
+
+  // Sync initial reputation score (will be 0 for a fresh agent — but shows "0 pts" instead of "—")
+  try {
+    const summary = await getReputationSummary(tokenId);
+    await dualExec(
+      "UPDATE agents SET erc8004_reputation_score = $1 WHERE id = $2",
+      [summary.summaryValue, agentId]
+    );
+  } catch {
+    // Non-critical — fresh agents may have no reputation data yet
+    // Set to 0 so the card shows "0 pts" instead of "—"
+    await dualExec(
+      "UPDATE agents SET erc8004_reputation_score = 0 WHERE id = $1",
+      [agentId]
+    ).catch(() => {});
   }
 
   return {
@@ -120,12 +140,12 @@ export async function getAgentIdentity(
 } | null> {
   const agent = isPgEnabled()
     ? await pgQueryOne<AgentRow>(
-        "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_registered_at FROM agents WHERE id = $1",
+        "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_tx_hash, erc8004_registered_at FROM agents WHERE id = $1",
         [agentId]
       )
     : (getDb()
         .prepare(
-          "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_registered_at FROM agents WHERE id = ?"
+          "SELECT id, name, description, avatar_emoji, erc8004_token_id, erc8004_tx_hash, erc8004_registered_at FROM agents WHERE id = ?"
         )
         .get(agentId) as AgentRow | undefined) ?? null;
 
@@ -134,9 +154,11 @@ export async function getAgentIdentity(
   return {
     tokenId: agent.erc8004_token_id,
     registeredAt: agent.erc8004_registered_at,
-    etherscanUrl: agent.erc8004_token_id
-      ? `https://sepolia.etherscan.io/address/${ERC8004_CONFIG.identityRegistry}`
-      : null,
+    etherscanUrl: agent.erc8004_tx_hash
+      ? `https://sepolia.etherscan.io/tx/${agent.erc8004_tx_hash}`
+      : agent.erc8004_token_id
+        ? `https://sepolia.etherscan.io/address/${ERC8004_CONFIG.identityRegistry}`
+        : null,
   };
 }
 

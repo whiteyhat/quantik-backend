@@ -34,7 +34,7 @@ router.post("/generate", async (req: Request, res: Response) => {
     const userId = await getRequiredUserId(req, res);
     if (!userId) return;
     const wallet = await generateWalletCredentials();
-    res.json({ evm: { address: wallet.address, privateKey: wallet.privateKey } });
+    res.json({ address: wallet.address, privateKey: wallet.privateKey, seedPhrase: wallet.seedPhrase });
   } catch (err) {
     console.error("[wallet:generate] error:", err instanceof Error ? err.message : err);
     res.status(500).json({ error: "Failed to generate wallet" });

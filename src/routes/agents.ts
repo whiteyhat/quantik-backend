@@ -184,7 +184,6 @@ interface OwnedAgentContext extends OwnedAgentRecord {
   autopilot_updated_at: number | null;
   polymarket_ready: number | boolean | null;
   polymarket_status: string | null;
-  trustline_established: number | boolean | null;
   personality: string | null;
   decision_style: string | null;
   trading_instinct: string | null;
@@ -278,7 +277,7 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
     return await pgQueryOne<OwnedAgentContext>(
       `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
               name, wallet_address, wallet_network, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
-              polymarket_ready, polymarket_status, trustline_established,
+              polymarket_ready, polymarket_status,
               personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
        FROM agents WHERE id = $1 AND user_id = $2`,
       [agentId, userId]
@@ -289,7 +288,7 @@ async function loadOwnedAgentContext(agentId: string, userId: string): Promise<O
   const agent = db.prepare(
     `SELECT id, user_id, agent_type, status, last_heartbeat, connection_status,
             name, wallet_address, wallet_network, endpoint_url, webhook_secret, autopilot_enabled, autopilot_updated_at,
-            polymarket_ready, polymarket_status, trustline_established,
+            polymarket_ready, polymarket_status,
             personality, decision_style, trading_instinct, time_patience, money_approach, protection_mindset, market_sense
      FROM agents WHERE id = ? AND user_id = ?`
   ).get(agentId, userId) as OwnedAgentContext | undefined;
@@ -320,7 +319,6 @@ function isValidWalletAddressForActiveChain(walletAddress: string): boolean {
 async function decorateAgentResponse(agent: Record<string, unknown>, agentId: string): Promise<void> {
   agent.autopilot_enabled = normalizeAutopilotEnabled(agent.autopilot_enabled as number | boolean | null | undefined);
   agent.polymarket_ready = normalizeAutopilotEnabled(agent.polymarket_ready as number | boolean | null | undefined);
-  agent.trustline_established = normalizeAutopilotEnabled(agent.trustline_established as number | boolean | null | undefined);
   agent.wallet_network = typeof agent.wallet_network === "string"
     ? agent.wallet_network
     : "polymarket";
@@ -1143,7 +1141,7 @@ router.get("/agent/me", async (req: Request, res: Response) => {
     wallet_address, created_at, updated_at, deployed_at,
     agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events,
     autopilot_enabled, autopilot_updated_at,
-    polymarket_ready, polymarket_status, wallet_network, trustline_established,
+    polymarket_ready, polymarket_status, wallet_network,
     erc8004_token_id, erc8004_registered_at, erc8004_reputation_score, erc8004_validation_count`;
 
   if (isPgEnabled()) {
@@ -1440,7 +1438,31 @@ router.post("/agents/:id/deploy", async (req: Request, res: Response) => {
     updated_at: now,
   });
 
-  res.json({ ok: true, status: "active", deployed_at: now });
+  // Return the full agent data so the frontend can set store directly
+  // without a separate /agent/me round-trip (which can 404 on PG sync timing)
+  const DEPLOY_COLS = `id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
+    personality, decision_style, trading_instinct, time_patience, profit_dream,
+    money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
+    wallet_address, created_at, updated_at, deployed_at,
+    agent_type, endpoint_url, agent_url, connection_status, last_heartbeat, description, webhook_events,
+    autopilot_enabled, autopilot_updated_at,
+    polymarket_ready, polymarket_status, wallet_network,
+    erc8004_token_id, erc8004_registered_at, erc8004_reputation_score, erc8004_validation_count`;
+
+  let fullAgent: Record<string, unknown> | null = null;
+  if (isPgEnabled()) {
+    fullAgent = await pgQueryOne<Record<string, unknown>>(`SELECT ${DEPLOY_COLS} FROM agents WHERE id = $1`, [agentId]);
+  } else {
+    const db = getDb();
+    fullAgent = (db.prepare(`SELECT ${DEPLOY_COLS} FROM agents WHERE id = ?`).get(agentId) as Record<string, unknown>) ?? null;
+  }
+
+  if (fullAgent) {
+    await decorateAgentResponse(fullAgent, agentId);
+    res.json(fullAgent);
+  } else {
+    res.json({ ok: true, status: "active", deployed_at: now });
+  }
 
   // ERC-8004: fire-and-forget — don't block the HTTP response for on-chain TX
   if (isErc8004Configured()) {

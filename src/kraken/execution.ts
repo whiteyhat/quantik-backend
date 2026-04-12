@@ -1,5 +1,10 @@
-// ── Kraken paper trade execution engine ──────────────────────────
-import { krakenPaperBuy, krakenPaperSell, krakenFuturesPaperBuy, krakenFuturesPaperSell, krakenTicker } from "./cli";
+// ── Kraken trade execution engine (paper + live) ─────────────────
+import {
+  krakenPaperBuy, krakenPaperSell, krakenFuturesPaperBuy, krakenFuturesPaperSell,
+  krakenLiveBuy, krakenLiveSell, krakenFuturesLiveBuy, krakenFuturesLiveSell,
+  krakenTicker,
+  type KrakenCredentials,
+} from "./cli";
 import { resolveKrakenDirection } from "./correlation";
 import type { TradeSignal } from "../execution";
 
@@ -23,41 +28,60 @@ export interface KrakenExecutionResult {
 }
 
 // ── executeKrakenTrade ──────────────────────────────────────────
-// Routes a KrakenTradeSignal through the correct CLI based on asset class.
+// Routes a KrakenTradeSignal through the correct CLI based on asset class
+// and trading mode (paper vs live).
 
 export async function executeKrakenTrade(
-  signal: KrakenTradeSignal
+  signal: KrakenTradeSignal,
+  creds?: KrakenCredentials
 ): Promise<KrakenExecutionResult> {
   const { pair, direction, amount, assetClass } = signal;
+  const isLive = !!creds;
 
-  // Route to correct CLI based on asset class
   let fn: (pair: string, amount: number) => Promise<unknown>;
-  if (assetClass === "futures") {
-    fn = direction === "BUY" ? krakenFuturesPaperBuy : krakenFuturesPaperSell;
+  if (isLive) {
+    // Live mode — route through authenticated CLI commands
+    if (assetClass === "futures") {
+      fn = direction === "BUY"
+        ? (p, a) => krakenFuturesLiveBuy(p, a, creds)
+        : (p, a) => krakenFuturesLiveSell(p, a, creds);
+    } else {
+      fn = direction === "BUY"
+        ? (p, a) => krakenLiveBuy(p, a, creds)
+        : (p, a) => krakenLiveSell(p, a, creds);
+    }
   } else {
-    // crypto and forex both use spot paper trading
-    fn = direction === "BUY" ? krakenPaperBuy : krakenPaperSell;
+    // Paper mode — no auth needed
+    if (assetClass === "futures") {
+      fn = direction === "BUY" ? krakenFuturesPaperBuy : krakenFuturesPaperSell;
+    } else {
+      fn = direction === "BUY" ? krakenPaperBuy : krakenPaperSell;
+    }
   }
 
   try {
     const result = await fn(pair, amount);
+    const mode = isLive ? "live" : "paper";
+    console.log(`[Kraken][${mode}] ${direction} ${amount} ${pair} — success`);
     return { success: true, pair, direction, amount, assetClass, timestamp: Date.now(), raw: result };
   } catch (err) {
-    console.error(`[Kraken] Trade failed: ${direction} ${amount} ${pair} (${assetClass})`, err instanceof Error ? err.message : String(err));
+    const mode = isLive ? "live" : "paper";
+    console.error(`[Kraken][${mode}] Trade failed: ${direction} ${amount} ${pair} (${assetClass})`, err instanceof Error ? err.message : String(err));
     return { success: false, pair, direction, amount, assetClass, timestamp: Date.now() };
   }
 }
 
 // ── executeMultiLegKrakenTrades ─────────────────────────────────
 // Processes multiple trade signals sequentially (respects Kraken rate limits)
-// and returns all results.
+// and returns all results. Pass creds for live mode, omit for paper.
 
 export async function executeMultiLegKrakenTrades(
-  signals: KrakenTradeSignal[]
+  signals: KrakenTradeSignal[],
+  creds?: KrakenCredentials
 ): Promise<KrakenExecutionResult[]> {
   const results: KrakenExecutionResult[] = [];
   for (const signal of signals) {
-    const result = await executeKrakenTrade(signal);
+    const result = await executeKrakenTrade(signal, creds);
     results.push(result);
   }
   return results;
@@ -97,17 +121,13 @@ export function mapPipelineSignalToKrakenThesisAware(
 }
 
 // ── USDC → base currency conversion ───────────────────────────
-// Fetches current ticker price and converts a USD notional amount
-// to the correct base currency quantity for Kraken orders.
 export async function convertUsdcToBaseAmount(
   pair: string,
   usdcAmount: number
 ): Promise<number> {
   try {
     const ticker = await krakenTicker(pair);
-    // Kraken CLI ticker returns { XXBTZUSD: { c: ["71000.20", "0.0001"], ... } }
-    // The pair key varies (XXBTZUSD for BTCUSD, XETHZUSD for ETHUSD, etc.)
-    // Extract the first (only) value from the wrapper object, then read c[0] (last trade price)
+    // Ticker wraps data under a Kraken-specific key (e.g. XXBTZUSD); c[0] is last trade price
     let price: number | undefined;
     if (typeof ticker === "object" && ticker !== null) {
       const inner = Object.values(ticker as Record<string, unknown>)[0];

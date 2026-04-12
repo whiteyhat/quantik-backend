@@ -1,6 +1,9 @@
 // ── Kraken CLI wrapper — mirrors src/cli.ts pattern ─────────────
 import { exec } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, writeFileSync, unlinkSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+import { randomBytes } from "crypto";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
@@ -137,20 +140,33 @@ export function execKraken(args: string[]): Promise<unknown> {
   });
 }
 
+// ── Credential-aware exec ──────────────────────────────────────
+// Uses --api-secret-file with a temp file to avoid leaking secrets in process args.
+
+export interface KrakenCredentials {
+  apiKey: string;
+  apiSecret: string;
+}
+
+async function execKrakenAuth(args: string[], creds: KrakenCredentials): Promise<unknown> {
+  const secretFile = join(tmpdir(), `kraken-secret-${randomBytes(8).toString("hex")}`);
+  writeFileSync(secretFile, creds.apiSecret, { mode: 0o600 });
+  try {
+    return await execKraken([...args, "--api-key", creds.apiKey, "--api-secret-file", secretFile, "--yes"]);
+  } finally {
+    try { unlinkSync(secretFile); } catch { /* cleanup best-effort */ }
+  }
+}
+
 // ── High-level wrapper functions ────────────────────────────────
 
-export async function krakenPaperBuy(
-  pair: string,
-  amount: number
-): Promise<unknown> {
+// Paper mode (no auth needed)
+export async function krakenPaperBuy(pair: string, amount: number): Promise<unknown> {
   await ensureKrakenInstalled();
   return execKraken(["paper", "buy", pair, String(amount)]);
 }
 
-export async function krakenPaperSell(
-  pair: string,
-  amount: number
-): Promise<unknown> {
+export async function krakenPaperSell(pair: string, amount: number): Promise<unknown> {
   await ensureKrakenInstalled();
   return execKraken(["paper", "sell", pair, String(amount)]);
 }
@@ -165,18 +181,44 @@ export async function krakenTicker(pair: string): Promise<unknown> {
   return execKraken(["ticker", pair]);
 }
 
-export async function krakenFuturesPaperBuy(
-  pair: string,
-  amount: number
-): Promise<unknown> {
+export async function krakenFuturesPaperBuy(pair: string, amount: number): Promise<unknown> {
   await ensureKrakenInstalled();
   return execKraken(["futures", "paper", "buy", pair, String(amount)]);
 }
 
-export async function krakenFuturesPaperSell(
-  pair: string,
-  amount: number
-): Promise<unknown> {
+export async function krakenFuturesPaperSell(pair: string, amount: number): Promise<unknown> {
   await ensureKrakenInstalled();
   return execKraken(["futures", "paper", "sell", pair, String(amount)]);
+}
+
+// Live mode (requires API credentials)
+export async function krakenLiveBuy(pair: string, amount: number, creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["order", "buy", "--type", "market", pair, String(amount)], creds);
+}
+
+export async function krakenLiveSell(pair: string, amount: number, creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["order", "sell", "--type", "market", pair, String(amount)], creds);
+}
+
+export async function krakenLiveBalance(creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["balance"], creds);
+}
+
+export async function krakenFuturesLiveBuy(pair: string, amount: number, creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["futures", "order", "buy", "--type", "market", pair, String(amount)], creds);
+}
+
+export async function krakenFuturesLiveSell(pair: string, amount: number, creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["futures", "order", "sell", "--type", "market", pair, String(amount)], creds);
+}
+
+// Auth test (validates credentials against Kraken API)
+export async function krakenAuthTest(creds: KrakenCredentials): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKrakenAuth(["auth", "test"], creds);
 }

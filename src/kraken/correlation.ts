@@ -76,8 +76,8 @@ const ASSET_PATTERNS: Array<{
   // ── Macro / commodity proxies ──
   {
     patterns: [/\binflation\b/i, /\bcpi\b/i, /\bgold\b/i],
-    pair: "XAUUSD",
-    asset: "Gold",
+    pair: "BTCUSD",
+    asset: "Bitcoin (inflation proxy)",
     assetClass: "crypto",
   },
   {

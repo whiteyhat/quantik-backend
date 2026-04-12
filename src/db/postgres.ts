@@ -190,6 +190,7 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_evm_private_key TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_stellar_private_key TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_token_id TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_tx_hash TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_registered_at BIGINT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_reputation_score INTEGER;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_validation_count INTEGER NOT NULL DEFAULT 0;

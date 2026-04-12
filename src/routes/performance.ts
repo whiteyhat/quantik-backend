@@ -305,26 +305,53 @@ router.get("/arena/agent/:agentCode", apiRateLimit, async (req, res) => {
       return;
     }
 
-    // Find agent by agent_code
+    // Find agent — first try the active-agents cache, then fall back to a direct DB lookup
+    // so agents that exist but aren't deployed/funded yet still show their public page.
     const agents = await loadCachedArenaAgents();
-    const agent = agents.find((a) => a.agent_code === agentCode);
+    let agent = agents.find((a) => a.agent_code === agentCode) ?? null;
+
+    type AgentPublicRow = { id: string; agent_code: string; name: string; avatar_emoji: string; agent_type: string; status: string; wallet_address: string | null; polymarket_ready: number | boolean | null };
+    let agentRow: AgentPublicRow | null = null;
+
     if (!agent) {
-      res.status(404).json({ error: "Agent not found" });
-      return;
+      // Direct DB lookup — catches inactive/unfunded agents the cache skips
+      const cols = "id, agent_code, name, avatar_emoji, agent_type, status, wallet_address, polymarket_ready";
+      agentRow = isPgEnabled()
+        ? await pgQueryOne<AgentPublicRow>(`SELECT ${cols} FROM agents WHERE agent_code = $1`, [agentCode])
+        : (getDb().prepare(`SELECT ${cols} FROM agents WHERE agent_code = ?`).get(agentCode) as AgentPublicRow | undefined) ?? null;
+
+      if (!agentRow) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
     }
 
-    // Load leaderboard to find this agent's entry
-    const result = await loadArenaLeaderboard("all");
-    const entry = result.leaders.find((e) => e.agentId === agent.id);
+    const agentId = agent?.id ?? agentRow!.id;
 
-    // Load sparkline history
-    const sparkline = await loadAgentHistory(agent.id, "all", 168);
+    // Load leaderboard entry (may be null for unfunded agents)
+    const result = await loadArenaLeaderboard("all");
+    const entry = result.leaders.find((e) => e.agentId === agentId);
+
+    // Load sparkline + wallet address in parallel
+    const [sparkline, walletRow] = await Promise.all([
+      loadAgentHistory(agentId, "all", 168),
+      agentRow?.wallet_address != null
+        ? Promise.resolve({ wallet_address: agentRow.wallet_address })
+        : isPgEnabled()
+          ? pgQueryOne<{ wallet_address: string | null }>("SELECT wallet_address FROM agents WHERE id = $1", [agentId])
+          : Promise.resolve((getDb().prepare("SELECT wallet_address FROM agents WHERE id = ?").get(agentId) as { wallet_address: string | null } | undefined) ?? null),
+    ]);
+
+    // Determine if the agent needs setup (unfunded / not deployed)
+    const status = agent?.status ?? agentRow!.status;
+    const pmReady = agent?.polymarket_ready ?? agentRow!.polymarket_ready;
+    const needsSetup = status !== "active" || !(pmReady === true || pmReady === 1);
 
     res.json({
-      agentCode: agent.agent_code,
-      name: agent.name,
-      avatarEmoji: agent.avatar_emoji,
-      agentType: agent.agent_type,
+      agentCode: agent?.agent_code ?? agentRow!.agent_code,
+      name: agent?.name ?? agentRow!.name,
+      avatarEmoji: agent?.avatar_emoji ?? agentRow!.avatar_emoji,
+      agentType: agent?.agent_type ?? agentRow!.agent_type,
       rank: entry?.rank ?? null,
       selectedPnl: entry?.selectedPnl ?? 0,
       allTimePnl: entry?.allTimePnl ?? 0,
@@ -337,6 +364,8 @@ router.get("/arena/agent/:agentCode", apiRateLimit, async (req, res) => {
       badges: entry?.badges ?? [],
       marketBreakdown: entry?.marketBreakdown ?? [],
       sparkline,
+      walletAddress: walletRow?.wallet_address ?? null,
+      needsSetup,
     });
   } catch (err) {
     console.error("[performance:arena:agent] error:", err);

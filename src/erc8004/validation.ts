@@ -14,7 +14,7 @@ import {
   isErc8004Configured,
 } from "./config";
 import { getDb } from "../db/schema";
-import { isPgEnabled, pgExec } from "../db/postgres";
+import { isPgEnabled, pgExec, dualExec } from "../db/postgres";
 
 // ── Validation Request ──────────────────────────────────────────────────────
 
@@ -58,7 +58,6 @@ export async function submitValidationRequest(
   );
   await tx.wait();
 
-  // Persist to local DB (dual-mode)
   const id = uuidv4();
   const now = Date.now();
 
@@ -66,15 +65,7 @@ export async function submitValidationRequest(
     await pgExec(
       `INSERT INTO erc8004_validations (id, agent_id, type, tx_hash, request_hash, pipeline_run_id, data, created_at)
        VALUES ($1, $2, 'request', $3, $4, $5, $6, $7)`,
-      [
-        id,
-        agentId,
-        tx.hash,
-        requestHash,
-        pipelineRunId,
-        JSON.stringify(tradeIntent),
-        now,
-      ]
+      [id, agentId, tx.hash, requestHash, pipelineRunId, JSON.stringify(tradeIntent), now]
     );
   } else {
     getDb()
@@ -84,6 +75,10 @@ export async function submitValidationRequest(
       )
       .run(id, agentId, tx.hash, requestHash, pipelineRunId, JSON.stringify(tradeIntent), now);
   }
+  await dualExec(
+    "UPDATE agents SET erc8004_validation_count = erc8004_validation_count + 1 WHERE id = $1",
+    [agentId]
+  );
 
   return { txHash: tx.hash, requestHash };
 }
