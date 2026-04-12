@@ -1090,4 +1090,80 @@ export const RELEASES: LocalizedRelease[] = [
     },
     fixes: { en: [], es: [], fr: [], de: [] },
   },
+
+  // ── v1.6.0 ──────────────────────────────────────────────────────────────────
+  {
+    version: "v1.6.0",
+    released_at: "2026-04-12",
+    highlight: {
+      en: "ERC-8004 On-Chain Agent Identity, Kraken CLI Trading, Dual-Market Correlation Engine, Multi-Leg Execution with SSE Streaming.",
+      es: "Identidad de Agente On-Chain ERC-8004, Trading CLI de Kraken, Motor de Correlación Dual-Market, Ejecución Multi-Leg con Streaming SSE.",
+      fr: "Identité d'Agent On-Chain ERC-8004, Trading CLI Kraken, Moteur de Corrélation Dual-Market, Exécution Multi-Leg avec Streaming SSE.",
+      de: "ERC-8004 On-Chain-Agentenidentität, Kraken-CLI-Trading, Dual-Market-Korrelations-Engine, Multi-Leg-Ausführung mit SSE-Streaming.",
+    },
+    features: {
+      en: [
+        "🔗 ERC-8004 On-Chain Identity — agent registration, reputation scoring, and validation on Sepolia with Identity/Reputation/Validation registries",
+        "🦑 Kraken CLI Integration — CLI wrapper with NDJSON parsing, execution engine, and pipeline signal adapter for Kraken trading",
+        "📊 Dual-Market Correlation Engine — thesis-aware Kraken mapping, forex/futures correlation, and configurable dual-market mode",
+        "🚀 Multi-Leg Execution — asset-class routing with confidence-weighted sizing and SSE streaming for real-time leg updates",
+        "🎛️ DualMarketPanel UI — animated Kraken leg visualization in the manage-agent dashboard with live status tracking",
+        "📜 Pipeline History — updated pipeline history page with Kraken legs, wallet data, and execution details",
+        "🧠 Cross-Market Intelligence — universal correlation engine connecting Polymarket predictions to traditional Kraken markets",
+        "✅ ERC-8004 Pipeline Validation — on-chain request/response validation hooks wired into the agent execution flow",
+      ],
+      es: [
+        "🔗 Identidad On-Chain ERC-8004 — registro de agentes, puntuación de reputación y validación en Sepolia con registros de Identidad/Reputación/Validación",
+        "🦑 Integración CLI de Kraken — wrapper CLI con parsing NDJSON, motor de ejecución y adaptador de señales de pipeline para trading en Kraken",
+        "📊 Motor de Correlación Dual-Market — mapeo de Kraken basado en tesis, correlación forex/futuros y modo dual-market configurable",
+        "🚀 Ejecución Multi-Leg — enrutamiento por clase de activo con dimensionamiento ponderado por confianza y streaming SSE para actualizaciones en tiempo real",
+        "🎛️ DualMarketPanel UI — visualización animada de legs de Kraken en el dashboard de gestión de agentes con seguimiento de estado en vivo",
+        "📜 Historial de Pipeline — página actualizada con legs de Kraken, datos de billetera y detalles de ejecución",
+        "🧠 Inteligencia Cross-Market — motor de correlación universal conectando predicciones de Polymarket con mercados tradicionales de Kraken",
+        "✅ Validación de Pipeline ERC-8004 — hooks de validación on-chain de solicitud/respuesta integrados en el flujo de ejecución de agentes",
+      ],
+      fr: [
+        "🔗 Identité On-Chain ERC-8004 — enregistrement d'agents, scoring de réputation et validation sur Sepolia avec registres Identité/Réputation/Validation",
+        "🦑 Intégration CLI Kraken — wrapper CLI avec parsing NDJSON, moteur d'exécution et adaptateur de signaux pipeline pour le trading Kraken",
+        "📊 Moteur de Corrélation Dual-Market — mapping Kraken basé sur la thèse, corrélation forex/futures et mode dual-market configurable",
+        "🚀 Exécution Multi-Leg — routage par classe d'actif avec dimensionnement pondéré par confiance et streaming SSE pour les mises à jour en temps réel",
+        "🎛️ DualMarketPanel UI — visualisation animée des legs Kraken dans le tableau de bord de gestion d'agents avec suivi de statut en direct",
+        "📜 Historique de Pipeline — page mise à jour avec legs Kraken, données de portefeuille et détails d'exécution",
+        "🧠 Intelligence Cross-Market — moteur de corrélation universel connectant les prédictions Polymarket aux marchés traditionnels Kraken",
+        "✅ Validation Pipeline ERC-8004 — hooks de validation on-chain requête/réponse intégrés dans le flux d'exécution des agents",
+      ],
+      de: [
+        "🔗 ERC-8004 On-Chain-Identität — Agentenregistrierung, Reputations-Scoring und Validierung auf Sepolia mit Identitäts-/Reputations-/Validierungsregistern",
+        "🦑 Kraken-CLI-Integration — CLI-Wrapper mit NDJSON-Parsing, Ausführungs-Engine und Pipeline-Signal-Adapter für Kraken-Trading",
+        "📊 Dual-Market-Korrelations-Engine — thesenbasiertes Kraken-Mapping, Forex/Futures-Korrelation und konfigurierbarer Dual-Market-Modus",
+        "🚀 Multi-Leg-Ausführung — Asset-Klassen-Routing mit konfidenzgewichteter Dimensionierung und SSE-Streaming für Echtzeit-Updates",
+        "🎛️ DualMarketPanel UI — animierte Kraken-Leg-Visualisierung im Agenten-Management-Dashboard mit Live-Status-Tracking",
+        "📜 Pipeline-Verlauf — aktualisierte Pipeline-Seite mit Kraken-Legs, Wallet-Daten und Ausführungsdetails",
+        "🧠 Cross-Market-Intelligenz — universelle Korrelations-Engine, die Polymarket-Vorhersagen mit traditionellen Kraken-Märkten verbindet",
+        "✅ ERC-8004 Pipeline-Validierung — On-Chain-Request/Response-Validierungs-Hooks im Agenten-Ausführungsfluss",
+      ],
+    },
+    fixes: {
+      en: [
+        "🔧 Replaced Postgres stubs with real pgQuery/pgQueryOne calls for full production database support",
+        "🧹 Simplified correlation engine and tightened types — removed redundant KrakenLeg duplicates",
+        "📡 Fixed DualMarketPanel to use Zustand store instead of Socket.IO for reliable state management",
+      ],
+      es: [
+        "🔧 Reemplazados stubs de Postgres con llamadas reales pgQuery/pgQueryOne para soporte completo de base de datos en producción",
+        "🧹 Simplificado motor de correlación y tipos ajustados — eliminados duplicados redundantes de KrakenLeg",
+        "📡 Corregido DualMarketPanel para usar Zustand store en vez de Socket.IO para gestión de estado confiable",
+      ],
+      fr: [
+        "🔧 Remplacement des stubs Postgres par de vrais appels pgQuery/pgQueryOne pour le support complet de la base de données en production",
+        "🧹 Simplification du moteur de corrélation et renforcement des types — suppression des doublons KrakenLeg redondants",
+        "📡 Correction de DualMarketPanel pour utiliser le store Zustand au lieu de Socket.IO pour une gestion d'état fiable",
+      ],
+      de: [
+        "🔧 Postgres-Stubs durch echte pgQuery/pgQueryOne-Aufrufe für vollständige Produktionsdatenbankunterstützung ersetzt",
+        "🧹 Korrelations-Engine vereinfacht und Typen verschärft — redundante KrakenLeg-Duplikate entfernt",
+        "📡 DualMarketPanel auf Zustand Store statt Socket.IO für zuverlässiges State-Management umgestellt",
+      ],
+    },
+  },
 ];

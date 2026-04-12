@@ -196,6 +196,21 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_validation_count INTEGER NOT NULL DEFAULT 0;
   `);
 
+  await safeQuery("create erc8004_validations", `
+    CREATE TABLE IF NOT EXISTS erc8004_validations (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('request', 'response')),
+      tx_hash TEXT,
+      request_hash TEXT,
+      pipeline_run_id TEXT,
+      data JSONB,
+      created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_agent ON erc8004_validations(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_erc8004_validations_hash ON erc8004_validations(request_hash);
+  `);
+
   await safeQuery("create api_keys", `
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
