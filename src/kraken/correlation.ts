@@ -131,7 +131,9 @@ export function correlateQuestionToAsset(
   const bearishScore = BEARISH_PATTERNS.filter((p) => p.test(question)).length;
   const polarity: "bullish" | "bearish" =
     bullishScore >= bearishScore ? "bullish" : "bearish";
-  const confidence = Math.min(1, (bullishScore + bearishScore) * 0.3 + 0.4);
+  const PATTERN_MATCH_WEIGHT = 0.3;
+  const BASE_CONFIDENCE = 0.4;
+  const confidence = Math.min(1, (bullishScore + bearishScore) * PATTERN_MATCH_WEIGHT + BASE_CONFIDENCE);
 
   // Check if question mentions crypto keywords (for forex cross-match)
   const hasCryptoKeyword = CRYPTO_KEYWORDS.some((p) => p.test(question));
@@ -161,36 +163,23 @@ export function correlateQuestionToAsset(
           pair: futuresPair,
           asset: `${asset} Perpetual`,
           polarity: "bearish",
-          confidence: confidence * 0.9,
+          confidence: confidence * 0.9, // futures legs get 90% of spot confidence
           assetClass: "futures",
         });
       }
     }
   }
 
-  // Forex + crypto cross-match: forex match with crypto keywords adds BTC entry
+  // Forex cross-match: macro events (rate cuts, etc.) always have crypto implications
   const hasForexMatch = results.some((r) => r.assetClass === "forex");
-  if (hasForexMatch && hasCryptoKeyword && !seenPairs.has("BTCUSD")) {
-    // Rate cuts / macro events are generally bullish for risk-on assets
+  if (hasForexMatch && !seenPairs.has("BTCUSD")) {
+    const FOREX_CRYPTO_CROSS_CONFIDENCE = 0.6;
     seenPairs.set("BTCUSD", results.length);
     results.push({
       pair: "BTCUSD",
       asset: "Bitcoin",
       polarity: "bullish",
-      confidence: 0.6,
-      assetClass: "crypto",
-    });
-  }
-
-  // Forex match without explicit crypto keyword: still add BTC as secondary
-  // (macro events always have crypto implications)
-  if (hasForexMatch && !hasCryptoKeyword && !seenPairs.has("BTCUSD")) {
-    seenPairs.set("BTCUSD", results.length);
-    results.push({
-      pair: "BTCUSD",
-      asset: "Bitcoin",
-      polarity: "bullish",
-      confidence: 0.6,
+      confidence: FOREX_CRYPTO_CROSS_CONFIDENCE,
       assetClass: "crypto",
     });
   }
