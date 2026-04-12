@@ -24,8 +24,9 @@ import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
-import { isKrakenMode } from "../config/chain";
-import { mapPipelineSignalToKraken, executeKrakenTrade } from "../kraken/execution";
+import { isKrakenMode, isDualMarketEnabled } from "../config/chain";
+import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade } from "../kraken/execution";
+import { correlateQuestionToAsset } from "../kraken/correlation";
 import { GAMMA_API_BASE, fetchMarketBySlug, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
 import {
@@ -435,8 +436,6 @@ function runSigma(results: Record<string, unknown>): AgentResult {
   const kellyPct = edge?.fractional_kelly ?? edge?.kelly_fraction ?? 0;
   const adjustment = lucifer?.adjusted_confidence ?? 0;
   const finalConf = Math.max(0, Math.min(1, baseConf + adjustment));
-
-
 
   const decision =
     finalConf > 0.6 ? "BET_YES" : finalConf < 0.4 ? "BET_NO" : "PASS";
@@ -998,6 +997,39 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
             } catch (erc8004Err) {
               // Non-blocking — don't fail the pipeline for ERC-8004 issues
               console.warn("[Pipeline][ERC-8004] Validation/reputation failed:", erc8004Err instanceof Error ? erc8004Err.message : String(erc8004Err));
+            }
+          }
+
+          // ── Dual-market: fire correlated Kraken paper trade ────────
+          if (isDualMarketEnabled()) {
+            try {
+              const correlation = correlateQuestionToAsset(effectiveSlug);
+              if (correlation) {
+                const krakenSignal = mapPipelineSignalToKrakenThesisAware(
+                  { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
+                  correlation.pair,
+                  correlation.polarity
+                );
+                const krakenResult = await executeKrakenTrade(krakenSignal);
+                // Attach Kraken leg to execution result
+                (executionResult as Record<string, unknown>)["krakenLeg"] = {
+                  status: krakenResult.success ? "executed" : "failed",
+                  pair: krakenResult.pair,
+                  direction: krakenResult.direction,
+                  amount: krakenResult.amount,
+                  asset: correlation.asset,
+                  polarity: correlation.polarity,
+                  confidence: correlation.confidence,
+                  paper: true,
+                  engine: "kraken",
+                };
+                console.log(`[Pipeline][Dual-Market] Kraken ${krakenResult.direction} ${krakenResult.pair} (${correlation.asset}, ${correlation.polarity}) — ${krakenResult.success ? "OK" : "FAILED"}`);
+              } else {
+                console.log(`[Pipeline][Dual-Market] No crypto correlation found for "${effectiveSlug}" — Polymarket only`);
+              }
+            } catch (dualErr) {
+              // Non-blocking — Polymarket trade already succeeded, Kraken failure is logged only
+              console.warn("[Pipeline][Dual-Market] Kraken leg failed:", dualErr instanceof Error ? dualErr.message : String(dualErr));
             }
           }
         }
