@@ -28,4 +28,9 @@ export interface ExecutionRecord {
   pipeline_run_id: string | null;
   closed_at: number | null;
   updated_at: number | null;
+  chain_mode?: "polymarket" | "kraken" | null;
+  protocol?: string | null;
+  action?: string | null;
+  asset_pair?: string | null;
+  tx_hash?: string | null;
 }

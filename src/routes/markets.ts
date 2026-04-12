@@ -419,6 +419,7 @@ router.get("/", async (req: Request, res: Response) => {
 // ── GET /api/markets/:slug ─────────────────────────────────────
 router.get("/:slug", async (req: Request, res: Response) => {
   const slug = String(req.params["slug"] ?? "");
+
   try {
     // Gamma bulk endpoint with slug filter is unreliable — search in active markets list
     const urls = [

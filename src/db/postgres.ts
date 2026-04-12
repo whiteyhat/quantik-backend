@@ -84,10 +84,14 @@ export async function migratePg(): Promise<void> {
       asset_love TEXT NOT NULL,
       system_prompt TEXT NOT NULL,
       wallet_address TEXT,
+      wallet_network TEXT DEFAULT 'polymarket',
       user_id UUID,
       created_at BIGINT NOT NULL,
       updated_at BIGINT NOT NULL,
-      deployed_at BIGINT
+      deployed_at BIGINT,
+      stellar_ready INTEGER DEFAULT 0,
+      stellar_status TEXT DEFAULT 'pending_funding',
+      trustline_established INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
     CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
@@ -176,7 +180,19 @@ export async function migratePg(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_seed_phrase TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_ready INTEGER DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS polymarket_status TEXT DEFAULT 'pending_funding';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS wallet_network TEXT DEFAULT 'polymarket';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS stellar_ready INTEGER DEFAULT 0;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS stellar_status TEXT DEFAULT 'pending_funding';
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS trustline_established INTEGER DEFAULT 0;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS policy_setup_completed_at BIGINT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS stellar_address TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS evm_address TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_evm_private_key TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS encrypted_stellar_private_key TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_token_id TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_registered_at BIGINT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_reputation_score INTEGER;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS erc8004_validation_count INTEGER NOT NULL DEFAULT 0;
   `);
 
   await safeQuery("create api_keys", `
@@ -309,7 +325,12 @@ export async function migratePg(): Promise<void> {
       ev_grade TEXT,
       status TEXT,
       created_at BIGINT,
-      pipeline_run_id TEXT
+      pipeline_run_id TEXT,
+      chain_mode TEXT,
+      protocol TEXT,
+      action TEXT,
+      asset_pair TEXT,
+      tx_hash TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_trades_user ON trades(user_id, created_at DESC);
 
@@ -714,10 +735,16 @@ export async function migratePg(): Promise<void> {
       order_id TEXT,
       fill_price REAL,
       pnl REAL,
+      source TEXT,
       resolution_date TEXT,
       closed_at BIGINT,
       updated_at BIGINT,
-      pipeline_run_id TEXT
+      pipeline_run_id TEXT,
+      chain_mode TEXT,
+      protocol TEXT,
+      action TEXT,
+      asset_pair TEXT,
+      tx_hash TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_executions_slug_time ON executions(slug, executed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_date ON executions(executed_at DESC);
@@ -732,12 +759,22 @@ export async function migratePg(): Promise<void> {
   await safeQuery("executions.closed_at column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS closed_at BIGINT`);
   await safeQuery("executions.updated_at column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS updated_at BIGINT`);
   await safeQuery("executions.pipeline_run_id column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS pipeline_run_id TEXT`);
+  await safeQuery("executions.chain_mode column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS chain_mode TEXT`);
+  await safeQuery("executions.protocol column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS protocol TEXT`);
+  await safeQuery("executions.action column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS action TEXT`);
+  await safeQuery("executions.asset_pair column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS asset_pair TEXT`);
+  await safeQuery("executions.tx_hash column", `ALTER TABLE executions ADD COLUMN IF NOT EXISTS tx_hash TEXT`);
   await safeQuery("executions.agent_id index", `CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id, executed_at DESC)`);
   await safeQuery("executions.agent_slug_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_slug_time ON executions(agent_id, slug, executed_at DESC)`);
   await safeQuery("executions.agent_source_time index", `CREATE INDEX IF NOT EXISTS idx_executions_agent_source_time ON executions(agent_id, source, executed_at DESC)`);
   await safeQuery("executions.pipeline_run_id index", `CREATE INDEX IF NOT EXISTS idx_executions_pipeline_run ON executions(pipeline_run_id, executed_at DESC)`);
   await safeQuery("executions.legacy unique index", `DROP INDEX IF EXISTS ux_executions_slug_day`);
   await safeQuery("trades.source column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT`);
+  await safeQuery("trades.chain_mode column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS chain_mode TEXT`);
+  await safeQuery("trades.protocol column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS protocol TEXT`);
+  await safeQuery("trades.action column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS action TEXT`);
+  await safeQuery("trades.asset_pair column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS asset_pair TEXT`);
+  await safeQuery("trades.tx_hash column", `ALTER TABLE trades ADD COLUMN IF NOT EXISTS tx_hash TEXT`);
 
   await safeQuery("autopilot policy tables", `
     CREATE TABLE IF NOT EXISTS autopilot_policies (

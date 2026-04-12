@@ -193,26 +193,32 @@ export interface Trade {
   status: string;
   created_at: number;
   pipeline_run_id: string | null;
+  chain_mode?: "polymarket" | "kraken" | null;
+  protocol?: string | null;
+  action?: string | null;
+  asset_pair?: string | null;
+  tx_hash?: string | null;
 }
 
 export async function insertTrade(trade: Trade): Promise<void> {
   if (isPgEnabled()) {
     await pgExec(
       `INSERT INTO trades
-        (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id, chain_mode, protocol, action, asset_pair, tx_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
        ON CONFLICT (id) DO NOTHING`,
       [trade.id, trade.order_id, trade.market_slug, trade.direction, trade.source, trade.size,
-       trade.price, trade.net_ev, trade.ev_grade, trade.status, trade.created_at, trade.pipeline_run_id]
+       trade.price, trade.net_ev, trade.ev_grade, trade.status, trade.created_at, trade.pipeline_run_id,
+       trade.chain_mode ?? null, trade.protocol ?? null, trade.action ?? null, trade.asset_pair ?? null, trade.tx_hash ?? null]
     );
     return;
   }
   const db = getDb();
   db.prepare(`
     INSERT INTO trades
-      (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id)
+      (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id, chain_mode, protocol, action, asset_pair, tx_hash)
     VALUES
-      (@id, @order_id, @market_slug, @direction, @source, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id)
+      (@id, @order_id, @market_slug, @direction, @source, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id, @chain_mode, @protocol, @action, @asset_pair, @tx_hash)
   `).run(trade);
 }
 

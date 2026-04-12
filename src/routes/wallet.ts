@@ -1,10 +1,11 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/schema";
 import { getUserIdAsync } from "../middleware/auth";
-import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
+import { isPgEnabled, pgQuery } from "../db/postgres";
 import { generateWalletCredentials } from "../wallet/generate";
-import { getUsdcBalanceSnapshot } from "../utils/balances";
+import { getWalletFundingSnapshot } from "../utils/balances";
 import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { fetchMarketBySlug } from "../utils/market-fetch";
 import {
   calculateOpenExecutionMetrics,
@@ -23,28 +24,6 @@ async function getRequiredUserId(req: Request, res: Response): Promise<string | 
   return userId;
 }
 
-async function loadWalletAddressForUser(userId: string): Promise<string | null> {
-  if (isPgEnabled()) {
-    const user = await pgQueryOne<{ agent_id: string | null }>(
-      "SELECT agent_id FROM users WHERE id = $1",
-      [userId]
-    );
-    if (!user?.agent_id) return null;
-
-    const agent = await pgQueryOne<{ wallet_address: string | null }>(
-      "SELECT wallet_address FROM agents WHERE id = $1",
-      [user.agent_id]
-    );
-    return agent?.wallet_address ?? null;
-  }
-
-  const db = getDb();
-  const user = db.prepare("SELECT agent_id FROM users WHERE id = ?").get(userId) as { agent_id: string | null } | undefined;
-  if (!user?.agent_id) return null;
-
-  const agent = db.prepare("SELECT wallet_address FROM agents WHERE id = ?").get(user.agent_id) as { wallet_address: string | null } | undefined;
-  return agent?.wallet_address ?? null;
-}
 
 // ── POST /api/wallet/generate — Create a new EVM wallet via WDK ──────────────
 // Stateless: generates wallet, returns credentials, stores NOTHING.
@@ -54,7 +33,8 @@ router.post("/generate", async (req: Request, res: Response) => {
   try {
     const userId = await getRequiredUserId(req, res);
     if (!userId) return;
-    res.json(await generateWalletCredentials());
+    const wallet = await generateWalletCredentials();
+    res.json({ evm: { address: wallet.address, privateKey: wallet.privateKey } });
   } catch (err) {
     console.error("[wallet:generate] error:", err instanceof Error ? err.message : err);
     res.status(500).json({ error: "Failed to generate wallet" });
@@ -135,13 +115,13 @@ router.get("/positions", async (req, res) => {
     const scannerDirections = await getLatestScannerDirectionMap();
 
     const marketMeta = new Map<string, Awaited<ReturnType<typeof fetchMarketBySlug>> | null>();
+    const uniqueSlugs = [...new Set(rows.map((r) => r.slug))];
     await Promise.all(
-      rows.map(async (row) => {
-        if (marketMeta.has(row.slug)) return;
+      uniqueSlugs.map(async (slug) => {
         try {
-          marketMeta.set(row.slug, await fetchMarketBySlug(row.slug));
+          marketMeta.set(slug, await fetchMarketBySlug(slug));
         } catch {
-          marketMeta.set(row.slug, null);
+          marketMeta.set(slug, null);
         }
       })
     );
@@ -186,8 +166,9 @@ router.get("/balance", async (req, res) => {
     const userId = await getRequiredUserId(req, res);
     if (!userId) return;
 
-    const address = await loadWalletAddressForUser(userId);
-    if (!address) {
+    const linkedAgent = await loadLinkedAgentForUser(userId);
+    const address = linkedAgent?.walletAddress ?? null;
+    if (!address || !linkedAgent?.agentId) {
       res.json({
         balance: 0,
         address: null,
@@ -198,17 +179,16 @@ router.get("/balance", async (req, res) => {
       return;
     }
 
-    const snapshot = await getUsdcBalanceSnapshot(address);
+    const walletDiag = await loadAgentWalletContextWithDiag(linkedAgent.agentId);
+    const snapshot = await getWalletFundingSnapshot(address, walletDiag.context?.privateKey ?? null);
     res.json({
-      balance: snapshot.balance,
+      balance: snapshot.onChainUsdc,
       address,
-      status: snapshot.status === "live" ? "live" : "unavailable",
-      liveBalanceAvailable: snapshot.status === "live",
-      message: snapshot.status === "live"
-        ? (snapshot.balance > 0
-            ? "Live on-chain USDC balance available."
-            : "Wallet created but no on-chain USDC balance detected yet.")
-        : "Unable to read the on-chain USDC balance right now.",
+      usdc: snapshot.onChainUsdc,
+      network: snapshot.walletNetwork ?? "polymarket",
+      status: snapshot.usdcStatus === "live" || snapshot.polStatus === "live" ? "live" : "unavailable",
+      liveBalanceAvailable: snapshot.usdcStatus === "live" || snapshot.polStatus === "live",
+      message: snapshot.fundingMessage,
     });
   } catch (err) {
     console.error("[wallet:balance] error:", err);

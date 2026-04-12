@@ -10,6 +10,8 @@ const POLYGON_RPC_URLS = ["https://polygon.drpc.org", "https://polygon-bor-rpc.p
 const USDC_BRIDGED_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const USDC_NATIVE_CONTRACT  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
 
+const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
+
 export type UsdcBalanceStatus = "live" | "rpc_unavailable" | "no_address";
 export type FundingStatus = "ready" | "funding_required" | "unavailable" | "no_wallet";
 
@@ -37,6 +39,7 @@ export interface WalletFundingSnapshot {
   fundingStatus: FundingStatus;
   fundingMessage: string;
   ready: boolean;
+  walletNetwork?: "polymarket";
 }
 
 async function polygonRpcCall(rpcUrl: string, method: string, params: unknown[]): Promise<string> {
@@ -78,7 +81,6 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
 
   const paddedAddr = address.replace(/^0x/i, "").toLowerCase().padStart(64, "0");
   const callData = `0x70a08231${paddedAddr}`;
-  const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
 
   // Each USDC contract race is independently fallible — partial result (one fails) is still valid
   const [bridgedResult, nativeResult] = await Promise.all([
@@ -144,8 +146,6 @@ export async function getPolBalanceSnapshot(address: string | null | undefined):
     };
   }
 
-  const safeBigInt = (h: string) => (!h || h === "0x" || h === "0X") ? 0n : BigInt(h);
-
   try {
     const { result, rpcUrl } = await polygonRpcRace("eth_getBalance", [address, "latest"]);
     const fresh: PolBalanceSnapshot = {
@@ -185,6 +185,7 @@ export async function getWalletFundingSnapshot(
       fundingStatus: "no_wallet",
       fundingMessage: "No wallet assigned to this agent yet.",
       ready: false,
+      walletNetwork: "polymarket",
     };
   }
 
@@ -211,6 +212,7 @@ export async function getWalletFundingSnapshot(
         fundingStatus: "ready",
         fundingMessage: "Using live Polymarket collateral balance while Polygon balance checks are temporarily unavailable.",
         ready: true,
+        walletNetwork: "polymarket",
       };
     }
     return {
@@ -223,13 +225,14 @@ export async function getWalletFundingSnapshot(
       fundingStatus: "unavailable",
       fundingMessage: "Unable to verify live POL and USDC.e balances right now.",
       ready: false,
+      walletNetwork: "polymarket",
     };
   }
 
   const polReady = pol.balance >= AUTOPILOT_MIN_POL_BALANCE;
   const usdcReady = usdc.balance >= AUTOPILOT_MIN_USDC_BALANCE;
 
-  if (!polReady && !usdcReady) {
+  if (!polReady || !usdcReady) {
     return {
       address,
       onChainUsdc: usdc.balance,
@@ -240,34 +243,7 @@ export async function getWalletFundingSnapshot(
       fundingStatus: "funding_required",
       fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
       ready: false,
-    };
-  }
-
-  if (!polReady) {
-    return {
-      address,
-      onChainUsdc: usdc.balance,
-      pol: pol.balance,
-      clobBalance,
-      usdcStatus: usdc.status,
-      polStatus: pol.status,
-      fundingStatus: "funding_required",
-      fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
-      ready: false,
-    };
-  }
-
-  if (!usdcReady) {
-    return {
-      address,
-      onChainUsdc: usdc.balance,
-      pol: pol.balance,
-      clobBalance,
-      usdcStatus: usdc.status,
-      polStatus: pol.status,
-      fundingStatus: "funding_required",
-      fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
-      ready: false,
+      walletNetwork: "polymarket",
     };
   }
 
@@ -281,5 +257,6 @@ export async function getWalletFundingSnapshot(
     fundingStatus: "ready",
     fundingMessage: buildAutopilotFundingMessage(pol.balance, usdc.balance),
     ready: true,
+    walletNetwork: "polymarket",
   };
 }

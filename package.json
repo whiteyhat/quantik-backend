@@ -12,7 +12,6 @@
     "seed:releases": "tsx src/db/seed-releases.ts"
   },
   "dependencies": {
-    "@allbridge/bridge-core-sdk": "^3.29.1",
     "@clerk/express": "^2.0.1",
     "@electric-sql/pglite": "^0.3.15",
     "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.6",
@@ -20,8 +19,6 @@
     "@sentry/node": "^10.40.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/spl-token-metadata": "^0.1.6",
-    "@soroswap/sdk": "^0.3.8",
-    "@stellar/stellar-sdk": "^14.6.1",
     "@tetherto/wdk": "^1.0.0-beta.6",
     "@tetherto/wdk-wallet-evm": "^1.0.0-beta.8",
     "@types/pg": "^8.18.0",

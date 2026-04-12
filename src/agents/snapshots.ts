@@ -42,6 +42,7 @@ export interface PortfolioSnapshot {
   pol: number;
   clobBalance: number;
   polFormatted: string;
+  walletNetwork: string;
   totalValue: number | null;
   pnl: number;
   pnlPct: number | null;
@@ -173,6 +174,7 @@ interface DbAgentContextRow {
   connection_status: string | null;
   last_heartbeat: number | null;
   status: string | null;
+  polymarket_ready?: number | boolean | null;
 }
 
 interface RiskConfigRow {
@@ -303,6 +305,7 @@ function emptyPortfolioSnapshot(context: ToolExecutionContext): PortfolioSnapsho
     pol: 0,
     clobBalance: 0,
     polFormatted: "0.0000",
+    walletNetwork: "polymarket",
     totalValue: null,
     pnl: 0,
     pnlPct: null,
@@ -729,6 +732,7 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     onChainUsdcFormatted: funding.onChainUsdc.toFixed(2),
     pol: round2(funding.pol),
     polFormatted: funding.pol.toFixed(4),
+    walletNetwork: "polymarket",
     totalValue,
     pnl: cumulativePnl,
     pnlPct,

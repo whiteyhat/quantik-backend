@@ -24,7 +24,7 @@ import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
-import { isStellarTestnetMode, isKrakenMode } from "../config/chain";
+import { isKrakenMode } from "../config/chain";
 import { mapPipelineSignalToKraken, executeKrakenTrade } from "../kraken/execution";
 import { GAMMA_API_BASE, fetchMarketBySlug, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
@@ -436,41 +436,7 @@ function runSigma(results: Record<string, unknown>): AgentResult {
   const adjustment = lucifer?.adjusted_confidence ?? 0;
   const finalConf = Math.max(0, Math.min(1, baseConf + adjustment));
 
-  if (market?.["chainMode"] === "stellar_testnet") {
-    const clause = toRecord(results["clause"]);
-    const executionPlan = toRecord(market["executionPlan"]);
-    const currentApy = Number(market["currentApy"] ?? 0);
-    const protocol = typeof market["protocol"] === "string" ? market["protocol"] : "soroswap";
-    const assetPair = typeof market["assetPair"] === "string" ? market["assetPair"] : "XLM/USDC";
-    const riskScore = Number(market["riskScore"] ?? 0);
-    const veto = Boolean(clause?.["veto"] ?? false);
 
-    let decision: "TRADE" | "WATCH" | "SKIP" = "WATCH";
-    if (veto || finalConf < 0.42) {
-      decision = "SKIP";
-    } else if (finalConf >= 0.58 && currentApy > 0) {
-      decision = "TRADE";
-    }
-
-    return {
-      agent: "sigma",
-      status: "complete",
-      data: {
-        decision,
-        recommendation: decision,
-        confidence: parseFloat((finalConf * 100).toFixed(1)),
-        thesis: `${protocol} ${assetPair} opportunity scored ${(finalConf * 100).toFixed(1)}% with APY ${currentApy.toFixed(2)}% and risk ${riskScore.toFixed(2)}.`,
-        size_pct: kellyPct ? parseFloat((kellyPct * 100).toFixed(1)) : 2,
-        size_usd: executionPlan && typeof executionPlan["amountUsdc"] === "number"
-          ? Number(executionPlan["amountUsdc"])
-          : 25,
-        entry_price: edge?.market_price ?? Number(market["yesPrice"] ?? market["yes_price"] ?? 0.5),
-        net_ev: edge?.net_ev ?? 0,
-        ev_grade: edge?.ev_grade ?? "B",
-        executionPlan,
-      },
-    };
-  }
 
   const decision =
     finalConf > 0.6 ? "BET_YES" : finalConf < 0.4 ? "BET_NO" : "PASS";
@@ -527,7 +493,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const resolvedSlug = slug ?? tokenId ?? "";
 
   let effectiveSlug = resolvedSlug;
-  if (!isStellarTestnetMode() && !slug && tokenId) {
+  if (!slug && tokenId) {
     try {
       const clobMarket = await runCli(["clob", "market", tokenId]);
       if (clobMarket !== null && typeof clobMarket === "object") {
@@ -632,37 +598,27 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   // ── Pre-fetch full market data once — shared across all agents ──
   let marketRaw: Record<string, unknown> = {};
   try {
-    if (isStellarTestnetMode()) {
-      marketRaw = await fetchMarketBySlug(effectiveSlug) as unknown as Record<string, unknown>;
-    } else {
-      marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
-    }
+    marketRaw = await runCli(["markets", "get", effectiveSlug]) as Record<string, unknown>;
   } catch {
-    if (!isStellarTestnetMode()) {
-      // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
-      try {
-        const gammaRes = await fetchWithRetry(
-          `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(effectiveSlug)}`,
-          { signal: AbortSignal.timeout(8000) }
-        );
-        if (gammaRes.ok) {
-          const gammaData = await gammaRes.json() as unknown[];
-          const m = (Array.isArray(gammaData) ? gammaData[0] : gammaData) as Record<string, unknown> | undefined;
-          if (m) marketRaw = m;
-        }
-      } catch {
-        sendEvent("pipeline:warning", { message: "Market data unavailable, running with defaults" });
+    // CLI unavailable — fall back to Polymarket Gamma REST API (public, no auth)
+    try {
+      const gammaRes = await fetchWithRetry(
+        `${GAMMA_API_BASE}/markets?slug=${encodeURIComponent(effectiveSlug)}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (gammaRes.ok) {
+        const gammaData = await gammaRes.json() as unknown[];
+        const m = (Array.isArray(gammaData) ? gammaData[0] : gammaData) as Record<string, unknown> | undefined;
+        if (m) marketRaw = m;
       }
-    } else {
-      sendEvent("pipeline:warning", { message: "Stellar opportunity lookup failed, running with defaults" });
+    } catch {
+      sendEvent("pipeline:warning", { message: "Market data unavailable, running with defaults" });
     }
   }
 
-  const rawPrices = isStellarTestnetMode()
-    ? [marketRaw.yes_price ?? 0.5, marketRaw.no_price ?? 0.5]
-    : typeof marketRaw.outcomePrices === "string"
-      ? JSON.parse(marketRaw.outcomePrices as string)
-      : (marketRaw.outcomePrices ?? ["0.5", "0.5"]);
+  const rawPrices = typeof marketRaw.outcomePrices === "string"
+    ? JSON.parse(marketRaw.outcomePrices as string)
+    : (marketRaw.outcomePrices ?? ["0.5", "0.5"]);
   const yes_price = parseFloat(String(rawPrices[0] ?? marketRaw.yes_price ?? "0.5")) || 0.5;
   const no_price = parseFloat(String(rawPrices[1] ?? marketRaw.no_price ?? (1 - yes_price))) || Math.max(0.05, 1 - yes_price);
   const resolution_date = String(
@@ -705,7 +661,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
     days_to_resolution,
     category: String(marketRaw.category ?? "default"),
     token_id,
-    chainMode: isStellarTestnetMode() ? "stellar_testnet" : "polymarket",
+    chainMode: "polymarket",
     protocol: typeof marketRaw.protocol === "string" ? marketRaw.protocol : undefined,
     opportunityType: typeof marketRaw.opportunityType === "string" ? marketRaw.opportunityType : undefined,
     assetPair: typeof marketRaw.assetPair === "string" ? marketRaw.assetPair : undefined,
@@ -886,22 +842,7 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   let executionResult: Record<string, unknown> | null = null;
 
   try {
-    if (isStellarTestnetMode()) {
-      const tradeStepId = await beginStep("trade", "sigma");
-      executionResult = decision === "TRADE"
-        ? {
-            status: "manual_required",
-            paper: false,
-            reason: "Stellar execution is available only through the manual /api/stellar/execute flow in v1.",
-            executionPlan: sigmaData["executionPlan"] ?? marketInput.executionPlan ?? null,
-          }
-        : {
-            status: "skipped",
-            reason: "Sigma did not recommend a live Stellar swap.",
-            executionPlan: sigmaData["executionPlan"] ?? marketInput.executionPlan ?? null,
-          };
-      await finishStep(tradeStepId, "skipped", executionResult, null);
-    } else if (isKrakenMode()) {
+    if (isKrakenMode()) {
       // ── Kraken paper trading via CLI ─────────────────────────
       const tradeStepId = await beginStep("trade", "sigma");
       if (decision === "BET_YES" || decision === "BET_NO") {

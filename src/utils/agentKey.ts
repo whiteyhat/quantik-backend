@@ -70,7 +70,9 @@ export async function loadActiveAgentContext(): Promise<AgentWalletContext> {
   const row = await loadActiveAgentRow();
 
   if (!row) {
-    throw new Error("No Polymarket-ready agent found. Ensure the agent wallet is funded and approvals are complete.");
+    throw new Error(
+      "No Polymarket-ready agent found. Ensure the agent wallet is funded and approvals are complete."
+    );
   }
   if (!row.wallet_address) {
     throw new Error("Active agent has no wallet address.");

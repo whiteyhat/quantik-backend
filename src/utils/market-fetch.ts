@@ -56,6 +56,10 @@ export interface MarketData {
   event_slug?: string;
   /** The condition ID on the CLOB */
   condition_id?: string;
+  protocol?: string;
+  liquidity?: number;
+  volume?: number;
+  liquidityGrade?: "A" | "B" | "C" | "D";
 }
 
 export function parseClobTokenIds(raw: unknown): { noTokenId: string | null; yesTokenId: string | null } {
@@ -131,8 +135,6 @@ export async function fetchMarketBySlug(slug: string): Promise<MarketData> {
 
 /**
  * Resolve the correct Polymarket frontend URL for a given market slug.
- * Polymarket uses /event/<eventSlug> — the event slug (groupSlug from Gamma API)
- * differs from the market slug for multi-outcome events.
  */
 export async function resolvePolymarketUrl(marketSlug: string): Promise<string> {
   try {

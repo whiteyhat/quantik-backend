@@ -43,6 +43,7 @@ jest.mock("../src/utils/agentKey", () => ({
   loadAgentWalletContextWithDiag: (...args: unknown[]) => loadAgentWalletContextWithDiagMock(...args),
 }));
 
+
 const VALID_WALLET = {
   address: "0x1111111111111111111111111111111111111111",
   privateKey: "0xabcdef",
@@ -197,6 +198,7 @@ function seedAgent(
 beforeEach(() => {
   currentUserId = "user-test";
   pgEnabled = false;
+  process.env.CHAIN_MODE = "polymarket";
   process.env.ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   pgQueryMock.mockReset();
   pgQueryOneMock.mockReset();
