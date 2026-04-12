@@ -164,3 +164,19 @@ export async function krakenTicker(pair: string): Promise<unknown> {
   await ensureKrakenInstalled();
   return execKraken(["ticker", pair]);
 }
+
+export async function krakenFuturesPaperBuy(
+  pair: string,
+  amount: number
+): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKraken(["futures", "paper", "buy", pair, String(amount)]);
+}
+
+export async function krakenFuturesPaperSell(
+  pair: string,
+  amount: number
+): Promise<unknown> {
+  await ensureKrakenInstalled();
+  return execKraken(["futures", "paper", "sell", pair, String(amount)]);
+}
