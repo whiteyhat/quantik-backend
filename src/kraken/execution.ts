@@ -1,12 +1,13 @@
 // ── Kraken paper trade execution engine ──────────────────────────
-import { krakenPaperBuy, krakenPaperSell } from "./cli";
+import { krakenPaperBuy, krakenPaperSell, krakenFuturesPaperBuy, krakenFuturesPaperSell } from "./cli";
 import { resolveKrakenDirection } from "./correlation";
 import type { TradeSignal } from "../execution";
 
 export interface KrakenTradeSignal {
-  pair: string; // "BTCUSD", "ETHUSD", "SOLUSD"
+  pair: string; // "BTCUSD", "ETHUSD", "PF_XBTUSD", "EURUSD"
   direction: "BUY" | "SELL";
   amount: number; // quantity in base currency (e.g., 0.1 BTC)
+  assetClass: "crypto" | "forex" | "futures";
 }
 
 export interface KrakenExecutionResult {
@@ -18,36 +19,47 @@ export interface KrakenExecutionResult {
   price?: number;
   timestamp: number;
   raw?: unknown;
+  assetClass: "crypto" | "forex" | "futures";
 }
 
 // ── executeKrakenTrade ──────────────────────────────────────────
-// Routes a KrakenTradeSignal through the paper trading CLI.
+// Routes a KrakenTradeSignal through the correct CLI based on asset class.
 
 export async function executeKrakenTrade(
   signal: KrakenTradeSignal
 ): Promise<KrakenExecutionResult> {
-  const { pair, direction, amount } = signal;
-  const fn = direction === "BUY" ? krakenPaperBuy : krakenPaperSell;
+  const { pair, direction, amount, assetClass } = signal;
+
+  // Route to correct CLI based on asset class
+  let fn: (pair: string, amount: number) => Promise<unknown>;
+  if (assetClass === "futures") {
+    fn = direction === "BUY" ? krakenFuturesPaperBuy : krakenFuturesPaperSell;
+  } else {
+    // crypto and forex both use spot paper trading
+    fn = direction === "BUY" ? krakenPaperBuy : krakenPaperSell;
+  }
 
   try {
     const result = await fn(pair, amount);
-    return {
-      success: true,
-      pair,
-      direction,
-      amount,
-      timestamp: Date.now(),
-      raw: result,
-    };
+    return { success: true, pair, direction, amount, assetClass, timestamp: Date.now(), raw: result };
   } catch {
-    return {
-      success: false,
-      pair,
-      direction,
-      amount,
-      timestamp: Date.now(),
-    };
+    return { success: false, pair, direction, amount, assetClass, timestamp: Date.now() };
   }
+}
+
+// ── executeMultiLegKrakenTrades ─────────────────────────────────
+// Processes multiple trade signals sequentially (respects Kraken rate limits)
+// and returns all results.
+
+export async function executeMultiLegKrakenTrades(
+  signals: KrakenTradeSignal[]
+): Promise<KrakenExecutionResult[]> {
+  const results: KrakenExecutionResult[] = [];
+  for (const signal of signals) {
+    const result = await executeKrakenTrade(signal);
+    results.push(result);
+  }
+  return results;
 }
 
 // ── mapPipelineSignalToKraken ───────────────────────────────────
@@ -57,13 +69,15 @@ export async function executeKrakenTrade(
 
 export function mapPipelineSignalToKraken(
   signal: TradeSignal,
-  pair: string
+  pair: string,
+  assetClass: "crypto" | "forex" | "futures" = "crypto"
 ): KrakenTradeSignal {
   const direction: "BUY" | "SELL" = signal.direction === "YES" ? "BUY" : "SELL";
   return {
     pair,
     direction,
     amount: signal.sizeUsdc,
+    assetClass,
   };
 }
 
@@ -72,10 +86,11 @@ export function mapPipelineSignalToKraken(
 export function mapPipelineSignalToKrakenThesisAware(
   signal: TradeSignal,
   pair: string,
-  polarity: "bullish" | "bearish"
+  polarity: "bullish" | "bearish",
+  assetClass: "crypto" | "forex" | "futures" = "crypto"
 ): KrakenTradeSignal {
   const decision: "BET_YES" | "BET_NO" =
     signal.direction === "YES" ? "BET_YES" : "BET_NO";
   const direction = resolveKrakenDirection(decision, polarity);
-  return { pair, direction, amount: signal.sizeUsdc };
+  return { pair, direction, amount: signal.sizeUsdc, assetClass };
 }

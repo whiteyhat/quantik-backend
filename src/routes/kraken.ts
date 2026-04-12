@@ -23,7 +23,7 @@ router.post("/trade", async (req, res) => {
       return;
     }
 
-    const signal: KrakenTradeSignal = { pair: String(pair).toUpperCase(), direction, amount: numAmount };
+    const signal: KrakenTradeSignal = { pair: String(pair).toUpperCase(), direction, amount: numAmount, assetClass: "crypto" };
     const result = await executeKrakenTrade(signal);
     res.json({ status: "ok", data: result });
   } catch (err: unknown) {

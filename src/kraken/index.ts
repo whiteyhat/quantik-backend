@@ -8,10 +8,13 @@ export {
   krakenPaperSell,
   krakenPaperBalance,
   krakenTicker,
+  krakenFuturesPaperBuy,
+  krakenFuturesPaperSell,
 } from "./cli";
 
 export {
   executeKrakenTrade,
+  executeMultiLegKrakenTrades,
   mapPipelineSignalToKraken,
   mapPipelineSignalToKrakenThesisAware,
 } from "./execution";

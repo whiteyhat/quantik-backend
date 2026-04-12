@@ -25,7 +25,7 @@ import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
 import { approvePosition } from "../risk";
 import { isKrakenMode, isDualMarketEnabled } from "../config/chain";
-import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade } from "../kraken/execution";
+import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade, executeMultiLegKrakenTrades } from "../kraken/execution";
 import { correlateQuestionToAsset } from "../kraken/correlation";
 import { GAMMA_API_BASE, fetchMarketBySlug, fetchWithRetry } from "../utils/market-fetch";
 import { AGENT_NAMES, AGENT_OUTPUT_KEYS, type AgentName, type AgentOutputKey } from "../agents/constants";
@@ -988,7 +988,8 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
                     : 0;
                 const feedbackResult = await submitFeedback(
                   agentIdentity.tokenId,
-                  pnlBps
+                  pnlBps,
+                  pipelineAgentId!
                 );
                 console.log(
                   `[Pipeline][ERC-8004] Reputation feedback submitted: ${feedbackResult.txHash} (${pnlBps} bps)`
@@ -1000,32 +1001,40 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
             }
           }
 
-          // ── Dual-market: fire correlated Kraken paper trade ────────
+          // ── Dual-market: fire correlated Kraken paper trades (multi-leg) ────────
           if (isDualMarketEnabled()) {
             try {
-              const correlation = correlateQuestionToAsset(effectiveSlug);
-              if (correlation) {
-                const krakenSignal = mapPipelineSignalToKrakenThesisAware(
-                  { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
-                  correlation.pair,
-                  correlation.polarity
+              const correlations = correlateQuestionToAsset(effectiveSlug);
+              if (correlations.length > 0) {
+                const krakenSignals = correlations.map((c) =>
+                  mapPipelineSignalToKrakenThesisAware(
+                    { slug: effectiveSlug, direction: direction as "YES" | "NO", sizeUsdc: riskApproval.adjustedSize },
+                    c.pair,
+                    c.polarity,
+                    c.assetClass
+                  )
                 );
-                const krakenResult = await executeKrakenTrade(krakenSignal);
-                // Attach Kraken leg to execution result
-                (executionResult as Record<string, unknown>)["krakenLeg"] = {
-                  status: krakenResult.success ? "executed" : "failed",
-                  pair: krakenResult.pair,
-                  direction: krakenResult.direction,
-                  amount: krakenResult.amount,
-                  asset: correlation.asset,
-                  polarity: correlation.polarity,
-                  confidence: correlation.confidence,
+                const krakenResults = await executeMultiLegKrakenTrades(krakenSignals);
+                // Attach all Kraken legs to execution result
+                (executionResult as Record<string, unknown>)["krakenLegs"] = krakenResults.map((kr, i) => ({
+                  status: kr.success ? "executed" : "failed",
+                  pair: kr.pair,
+                  direction: kr.direction,
+                  amount: kr.amount,
+                  asset: correlations[i].asset,
+                  polarity: correlations[i].polarity,
+                  confidence: correlations[i].confidence,
+                  assetClass: correlations[i].assetClass,
                   paper: true,
                   engine: "kraken",
-                };
-                console.log(`[Pipeline][Dual-Market] Kraken ${krakenResult.direction} ${krakenResult.pair} (${correlation.asset}, ${correlation.polarity}) — ${krakenResult.success ? "OK" : "FAILED"}`);
+                }));
+                for (let i = 0; i < krakenResults.length; i++) {
+                  const kr = krakenResults[i];
+                  const c = correlations[i];
+                  console.log(`[Pipeline][Dual-Market] Kraken ${kr.direction} ${kr.pair} (${c.asset}, ${c.assetClass}, ${c.polarity}) — ${kr.success ? "OK" : "FAILED"}`);
+                }
               } else {
-                console.log(`[Pipeline][Dual-Market] No crypto correlation found for "${effectiveSlug}" — Polymarket only`);
+                console.log(`[Pipeline][Dual-Market] No correlation found for "${effectiveSlug}" — Polymarket only`);
               }
             } catch (dualErr) {
               // Non-blocking — Polymarket trade already succeeded, Kraken failure is logged only
