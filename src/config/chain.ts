@@ -8,10 +8,14 @@ export function getChainMode(): ChainMode {
   return "polymarket";
 }
 
-export function isPolymarketMode(): boolean {
-  return getChainMode() === "polymarket";
-}
-
 export function isKrakenMode(): boolean {
   return getChainMode() === "kraken";
+}
+
+/**
+ * Dual-market mode: when enabled, a single SIGMA decision triggers BOTH
+ * a Polymarket CLOB order AND a correlated Kraken paper trade.
+ */
+export function isDualMarketEnabled(): boolean {
+  return process.env.DUAL_MARKET === "true";
 }

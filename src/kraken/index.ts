@@ -10,5 +10,15 @@ export {
   krakenTicker,
 } from "./cli";
 
-export { executeKrakenTrade, mapPipelineSignalToKraken } from "./execution";
+export {
+  executeKrakenTrade,
+  mapPipelineSignalToKraken,
+  mapPipelineSignalToKrakenThesisAware,
+} from "./execution";
 export type { KrakenTradeSignal, KrakenExecutionResult } from "./execution";
+
+export {
+  correlateQuestionToAsset,
+  resolveKrakenDirection,
+} from "./correlation";
+export type { CorrelationResult } from "./correlation";
