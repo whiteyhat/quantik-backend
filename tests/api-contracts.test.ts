@@ -1,17 +1,23 @@
 /**
  * API Contract Tests — run against production backend
- * These must all pass before Railway deploy is allowed.
  */
 
 const API = process.env.API_URL ?? "https://api.quantik.fun";
-const TEST_SLUG = "khamenei-out-as-supreme-leader-of-iran-by-february-28";
 const TIMEOUT = 60000;
+// Polymarket markets close over time, so use one that is listed right now.
+let TEST_SLUG = "";
 
 async function get(path: string): Promise<{ status: number; body: any }> {
   const res = await fetch(`${API}${path}`);
   const body = await res.json().catch(() => ({}));
   return { status: res.status, body };
 }
+
+beforeAll(async () => {
+  const { body } = await get("/api/markets");
+  TEST_SLUG = (body.markets ?? body)?.[0]?.slug ?? "";
+  if (!TEST_SLUG) throw new Error("GET /api/markets returned no live markets to test against");
+}, TIMEOUT);
 
 describe("Backend API Contracts", () => {
 
