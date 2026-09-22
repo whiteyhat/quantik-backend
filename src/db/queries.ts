@@ -219,7 +219,14 @@ export async function insertTrade(trade: Trade): Promise<void> {
       (id, order_id, market_slug, direction, source, size, price, net_ev, ev_grade, status, created_at, pipeline_run_id, chain_mode, protocol, action, asset_pair, tx_hash)
     VALUES
       (@id, @order_id, @market_slug, @direction, @source, @size, @price, @net_ev, @ev_grade, @status, @created_at, @pipeline_run_id, @chain_mode, @protocol, @action, @asset_pair, @tx_hash)
-  `).run(trade);
+  `).run({
+    ...trade,
+    chain_mode: trade.chain_mode ?? null,
+    protocol: trade.protocol ?? null,
+    action: trade.action ?? null,
+    asset_pair: trade.asset_pair ?? null,
+    tx_hash: trade.tx_hash ?? null,
+  });
 }
 
 // ── Settings ───────────────────────────────────────────────────
