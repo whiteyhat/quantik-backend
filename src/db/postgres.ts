@@ -957,6 +957,72 @@ export async function migratePg(): Promise<void> {
   await safeQuery("autopilot_policies.daily_loss_limit_pct", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS daily_loss_limit_pct REAL`);
   await safeQuery("autopilot_policies.use_aura_sentiment", `ALTER TABLE autopilot_policies ADD COLUMN IF NOT EXISTS use_aura_sentiment INTEGER`);
 
+  // ── Solana agent tokens — mirrors schema.ts; DOUBLE PRECISION keeps SQLite's 8-byte REAL precision ──
+  await safeQuery("create solana token tables", `
+    CREATE TABLE IF NOT EXISTS solana_tokens (
+      id TEXT PRIMARY KEY,
+      agent_id UUID NOT NULL UNIQUE REFERENCES agents(id),
+      token_mint TEXT NOT NULL UNIQUE,
+      dbc_pool_address TEXT NOT NULL,
+      dbc_config_address TEXT NOT NULL,
+      damm_pool_address TEXT,
+      status TEXT NOT NULL DEFAULT 'bonding',
+      token_name TEXT NOT NULL,
+      token_symbol TEXT NOT NULL,
+      metadata_uri TEXT NOT NULL,
+      treasury_wallet_pubkey TEXT NOT NULL,
+      total_supply BIGINT NOT NULL DEFAULT 1000000,
+      initial_reserve_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.1,
+      migration_threshold_usdc DOUBLE PRECISION NOT NULL DEFAULT 50000,
+      fee_bps INTEGER NOT NULL DEFAULT 200,
+      created_at BIGINT NOT NULL,
+      migrated_at BIGINT
+    );
+
+    CREATE TABLE IF NOT EXISTS solana_token_holders (
+      id TEXT PRIMARY KEY,
+      mint TEXT NOT NULL,
+      wallet TEXT NOT NULL,
+      balance DOUBLE PRECISION NOT NULL,
+      percentage DOUBLE PRECISION NOT NULL,
+      rank INTEGER NOT NULL,
+      last_sync_time BIGINT NOT NULL,
+      created_at BIGINT NOT NULL,
+      UNIQUE (mint, wallet)
+    );
+
+    CREATE TABLE IF NOT EXISTS solana_token_prices (
+      id BIGSERIAL PRIMARY KEY,
+      mint TEXT NOT NULL,
+      price_usdc DOUBLE PRECISION NOT NULL,
+      source TEXT NOT NULL,
+      timestamp BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_solana_token_prices_mint_time ON solana_token_prices(mint, timestamp);
+
+    CREATE TABLE IF NOT EXISTS treasury_distributions (
+      id TEXT PRIMARY KEY,
+      agent_id UUID NOT NULL REFERENCES agents(id),
+      token_mint TEXT NOT NULL,
+      week_start BIGINT NOT NULL,
+      week_end BIGINT NOT NULL,
+      weekly_pnl DOUBLE PRECISION NOT NULL,
+      buyback_amount_usdc DOUBLE PRECISION NOT NULL,
+      buyback_tx_signature TEXT,
+      tokens_bought DOUBLE PRECISION,
+      holder_distribution_tx_signature TEXT,
+      quantik_wallet_tokens DOUBLE PRECISION,
+      holder_tokens DOUBLE PRECISION,
+      status TEXT NOT NULL DEFAULT 'pending',
+      audit_status TEXT NOT NULL DEFAULT 'pending',
+      audit_discrepancy_pct DOUBLE PRECISION,
+      failure_reason TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL,
+      completed_at BIGINT
+    );
+  `);
+
   console.log("[postgres] Migration complete — all tables ready");
 }
 
