@@ -42,7 +42,7 @@ interface SessionEntry {
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
-const GEMINI_FALLBACK = "gemini-2.5-flash-lite";
+const GEMINI_FALLBACK = "gemini-3.5-flash-lite";
 const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_HISTORY = 10;
@@ -536,7 +536,7 @@ router.post("/stream", async (req: Request, res: Response) => {
 
 // ── POST /api/relay/imagine — Generate 3D character via Gemini ─
 
-const IMAGINE_MODEL = "gemini-2.0-flash-exp";
+const IMAGINE_MODEL = "gemini-3.1-flash-image";
 
 router.post("/imagine", async (req: Request, res: Response) => {
   const { animal } = req.body as { animal?: string };

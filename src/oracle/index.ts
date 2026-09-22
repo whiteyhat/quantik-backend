@@ -27,7 +27,7 @@ export interface OracleResult {
   data_sources: Record<string, string>;
 }
 
-const ORACLE_MODELS = ["gemini-3.1-pro-preview", "gemini-2.5-flash"];
+const ORACLE_MODELS = ["gemini-3.1-pro-preview", "gemini-3.6-flash"];
 
 async function askGemini(prompt: string): Promise<any> {
   const apiKey = process.env.GEMINI_API_KEY;

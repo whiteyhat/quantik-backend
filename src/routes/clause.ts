@@ -17,7 +17,7 @@ router.get("/status", (req, res) => {
       totalMarketsScored: countRow.count,
       lastScoredAt: latestRow.lastScoredAt || null,
       mockMode: process.env.CLAUSE_MOCK === "true",
-      engine: "gemini-2.5-flash"
+      engine: "gemini-3.5-flash-lite"
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
