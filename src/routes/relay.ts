@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { SELF_BASE_URL, internalHeaders } from "../infra/internalAuth";
 import { v4 as uuidv4 } from "uuid";
 
 const router = Router();
@@ -43,7 +44,6 @@ interface SessionEntry {
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? "";
 const GEMINI_MODEL = "gemini-3.1-flash-lite-preview";
 const GEMINI_FALLBACK = "gemini-3.5-flash-lite";
-const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
 const MAX_HISTORY = 10;
 
@@ -256,7 +256,8 @@ async function fetchAgentData(
 
   const fetches = endpoints.map(async (ep) => {
     try {
-      const res = await fetch(`${BACKEND_HOST}${ep}`, {
+      const res = await fetch(`${SELF_BASE_URL}${ep}`, {
+        headers: internalHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       if (res.ok) {

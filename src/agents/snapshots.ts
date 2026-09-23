@@ -4,6 +4,7 @@ import { getCircuitBreaker, getCorrelationMonitor } from "../risk";
 import { loadCircuitBreakerState } from "../risk/state";
 import { getScannerStatus } from "../scanner/marketScanner";
 import { getWalletFundingSnapshot } from "../utils/balances";
+import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { isPgEnabled, pgQuery, pgQueryOne } from "../db/postgres";
 import {
   calculateOpenExecutionMetrics,
@@ -23,6 +24,8 @@ export interface ToolExecutionContext {
   lastHeartbeat: number | null;
   agentStatus: string | null;
   polymarketReady: boolean;
+  /** Signed-in Quantik operator (ADMIN_USER_IDS); gates platform-wide tools. */
+  isOperator?: boolean;
 }
 
 export interface PortfolioPositionSnapshot {
@@ -655,7 +658,11 @@ export async function loadPortfolioSnapshot(context: ToolExecutionContext | null
     if (!firstWasWin) currentStreak = -currentStreak;
   }
 
-  const funding = await getWalletFundingSnapshot(context.walletAddress);
+  // CLOB balance needs the caller's own key; without one it reads as 0
+  const walletKey = context.linkedAgentId
+    ? (await loadAgentWalletContextWithDiag(context.linkedAgentId)).context?.privateKey ?? null
+    : null;
+  const funding = await getWalletFundingSnapshot(context.walletAddress, walletKey);
   let totalTradesAll: number;
   let totalRealizedPnl: number;
 

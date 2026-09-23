@@ -9,7 +9,8 @@
 //   - notification:new — operator-facing system notifications
 //   - panic:cooldown — panic mode cooldown / re-arm status
 //
-// Each authenticated user joins a private room `user:{userId}`.
+// Each signed-in user joins a private room `user:{internal user id}` once their
+// Clerk session token checks out. Claimed user IDs are never trusted.
 // Falls back gracefully — if no clients are connected, emit is a no-op.
 
 import { Server as HttpServer } from "http";
@@ -17,23 +18,38 @@ import { Server, Socket } from "socket.io";
 import crypto from "crypto";
 import { getDb } from "../db/schema";
 import { persistNotification } from "../services/notificationInbox";
+import { verifyToken } from "@clerk/express";
+import { internalUserIdForClerkId } from "../middleware/auth";
+import { isAllowedOrigin } from "./origins";
 
 let io: Server | null = null;
 
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "https://quantik.fun",
-  "https://www.quantik.fun",
-  process.env.FRONTEND_URL,
-].filter(Boolean) as string[];
+/** Joins the private room of the user behind a Clerk session token, if valid. */
+async function joinVerifiedUserRoom(socket: Socket, token: string): Promise<void> {
+  try {
+    // Returns the JWT payload; throws if the token is invalid or expired
+    const payload = await verifyToken(
+      token,
+      process.env.CLERK_JWT_KEY
+        ? { jwtKey: process.env.CLERK_JWT_KEY }
+        : { secretKey: process.env.CLERK_SECRET_KEY }
+    );
+    const clerkId = payload.sub;
+    const userId = clerkId ? await internalUserIdForClerkId(clerkId) : null;
+    if (!userId) return;
+    socket.join(`user:${userId}`);
+    socket.data.userId = userId;
+    console.log(`[socket.io] User ${userId} connected (${socket.id})`);
+  } catch (err) {
+    console.warn(`[socket.io] Session token rejected (${socket.id}):`, err instanceof Error ? err.message : err);
+  }
+}
 
 export function initSocketIO(httpServer: HttpServer): Server {
   io = new Server(httpServer, {
     cors: {
       origin: (origin, cb) => {
-        if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true);
-        if (origin.endsWith(".vercel.app") || origin.endsWith(".quantik.fun")) return cb(null, true);
+        if (!origin || isAllowedOrigin(origin)) return cb(null, true);
         cb(new Error("Not allowed by CORS"));
       },
       credentials: true,
@@ -44,7 +60,7 @@ export function initSocketIO(httpServer: HttpServer): Server {
   });
 
   io.on("connection", (socket: Socket) => {
-    const userId = socket.handshake.auth?.userId as string | undefined;
+    const token = socket.handshake.auth?.token as string | undefined;
     const apiKey = socket.handshake.auth?.apiKey as string | undefined;
 
     // BYO agent auth via API key
@@ -75,9 +91,8 @@ export function initSocketIO(httpServer: HttpServer): Server {
       // Update heartbeat on connect
       db.prepare("UPDATE agents SET last_heartbeat = ?, connection_status = 'connected' WHERE id = ?")
         .run(Date.now(), row.agent_id);
-    } else if (userId) {
-      socket.join(`user:${userId}`);
-      console.log(`[socket.io] User ${userId} connected (${socket.id})`);
+    } else if (token) {
+      void joinVerifiedUserRoom(socket, token);
     } else {
       console.log(`[socket.io] Anonymous connection (${socket.id})`);
     }
@@ -85,8 +100,8 @@ export function initSocketIO(httpServer: HttpServer): Server {
     socket.on("disconnect", (reason) => {
       if (socket.data.isByo) {
         console.log(`[socket.io] BYO agent ${socket.data.agentId} disconnected: ${reason}`);
-      } else if (userId) {
-        console.log(`[socket.io] User ${userId} disconnected: ${reason}`);
+      } else if (socket.data.userId) {
+        console.log(`[socket.io] User ${socket.data.userId} disconnected: ${reason}`);
       }
     });
   });

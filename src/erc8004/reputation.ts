@@ -30,7 +30,7 @@ export async function submitFeedback(
   const endpoint = `${
     process.env.BACKEND_URL || "https://api.quantik.fun"
   }/api/pipeline`;
-  const feedbackURI = ""; // No IPFS for hackathon — empty string is valid
+  const feedbackURI = ""; // No IPFS metadata yet — empty string is valid
   const feedbackHash = ethers.keccak256(
     ethers.toUtf8Bytes(
       JSON.stringify({

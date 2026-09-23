@@ -2,7 +2,7 @@
 // ERC-8004 Configuration — Provider, Signer, Contract Instances
 // ─────────────────────────────────────────────────────────────────────────────
 // Mirrors the ethers v6 pattern from polymarket-prep.service.ts.
-// Connects to Sepolia testnet for hackathon deployment.
+// Connects to the Sepolia testnet.
 // All three ERC-8004 registries (Identity, Reputation, Validation) are
 // instantiated lazily from environment variables.
 // ─────────────────────────────────────────────────────────────────────────────

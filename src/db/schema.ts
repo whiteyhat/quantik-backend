@@ -1145,7 +1145,7 @@ function migrate(db: Database.Database): void {
       ON solana_token_prices(mint, timestamp DESC);
   `);
 
-  // ── ERC-8004 On-Chain Identity (Hackathon) ────────────────────────────
+  // ── ERC-8004 On-Chain Identity ────────────────────────────
 
   // Migration: ERC-8004 on-chain identity columns on agents table
   addColumn(db, "ALTER TABLE agents ADD COLUMN erc8004_token_id TEXT");

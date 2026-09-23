@@ -210,18 +210,20 @@ sentryWebhookRouter.get("/health", (_req: Request, res: Response): void => {
 sentryWebhookRouter.post(
   "/",
   async (req: Request, res: Response): Promise<void> => {
-    // HMAC validation (only when secret is configured)
+    // HMAC validation. Fails closed: without a secret nothing is accepted.
     const secret = process.env.SENTRY_WEBHOOK_SECRET;
-    if (secret) {
-      const rawBody: string =
-        typeof req.body === "string"
-          ? req.body
-          : JSON.stringify(req.body);
+    if (!secret) {
+      res.status(503).json({ error: "Webhook not configured" });
+      return;
+    }
+    const rawBody: string =
+      typeof req.body === "string"
+        ? req.body
+        : JSON.stringify(req.body);
 
-      if (!verifySignature(rawBody, req.headers, secret)) {
-        res.status(401).json({ error: "Invalid signature" });
-        return;
-      }
+    if (!verifySignature(rawBody, req.headers, secret)) {
+      res.status(401).json({ error: "Invalid signature" });
+      return;
     }
 
     const payload = req.body as unknown;

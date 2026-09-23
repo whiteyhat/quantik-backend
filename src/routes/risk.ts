@@ -45,6 +45,7 @@ import {
   getActiveCircuitBreakerAndThresholds,
   updateRiskConfig,
 } from "../db/panicQueries";
+import { requireAdmin } from "../middleware/guards";
 
 const router = Router();
 
@@ -164,7 +165,7 @@ router.get("/risk-config", async (_req: Request, res: Response) => {
 
 // ── PUT /api/v1/risk-config ───────────────────────────────────
 
-router.put("/risk-config", async (req: Request, res: Response) => {
+router.put("/risk-config", requireAdmin, async (req: Request, res: Response) => {
   const {
     agentVarThreshold = 0.05,
     maxPositionSize = 0.1,
@@ -201,7 +202,7 @@ router.get("/panic-mode/status", async (_req: Request, res: Response) => {
 
 // ── POST /api/v1/panic-mode/activate ──────────────────────────
 
-router.post("/panic-mode/activate", async (req: Request, res: Response) => {
+router.post("/panic-mode/activate", requireAdmin, async (req: Request, res: Response) => {
   const now = Date.now();
   const body = req.body as {
     cancelOrders?: boolean;
@@ -371,7 +372,7 @@ router.post("/panic-mode/activate", async (req: Request, res: Response) => {
 
 // ── POST /api/v1/panic-mode/rearm ─────────────────────────────
 
-router.post("/panic-mode/rearm", async (req: Request, res: Response) => {
+router.post("/panic-mode/rearm", requireAdmin, async (req: Request, res: Response) => {
   const now = Date.now();
   const body = req.body as { confirmation?: string } | undefined;
   const status = await getPanicModeStatus();

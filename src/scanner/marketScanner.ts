@@ -12,6 +12,7 @@ import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { executeManagedTrade, type ManagedTradeDirection } from "../services/tradeExecution";
 import { getAutopilotPolicyEnvelope, insertAutopilotDecision } from "../services/autopilotPolicy";
 import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+import { SELF_BASE_URL, internalHeaders } from "../infra/internalAuth";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -70,7 +71,6 @@ interface AgentBundle {
 }
 const agentCache = new Map<string, { ts: number; data: AgentBundle }>();
 const AGENT_CACHE_TTL = 8 * 60 * 1000;
-const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:3001";
 const DEFAULT_AUTOPILOT_MIN_TRADE_USDC = 1;
 
 function getAutopilotMinTradeUsdc(): number {
@@ -1031,9 +1031,9 @@ export class MarketScanner {
       const fluxTokenId = direction === "NO" ? (result.noTokenId || result.tokenId || "") : (result.tokenId || "");
       try {
         const fluxUrl = fluxTokenId
-          ? `${BACKEND_URL}/api/flux/${result.slug}?tokenId=${encodeURIComponent(fluxTokenId)}`
-          : `${BACKEND_URL}/api/flux/${result.slug}`;
-        const fluxCheck = await fetch(fluxUrl, { signal: AbortSignal.timeout(8000) });
+          ? `${SELF_BASE_URL}/api/flux/${result.slug}?tokenId=${encodeURIComponent(fluxTokenId)}`
+          : `${SELF_BASE_URL}/api/flux/${result.slug}`;
+        const fluxCheck = await fetch(fluxUrl, { headers: internalHeaders(), signal: AbortSignal.timeout(8000) });
         if (fluxCheck.ok) {
           const fluxData = await fluxCheck.json() as Record<string, unknown>;
           if (fluxData.soft_veto === true) {

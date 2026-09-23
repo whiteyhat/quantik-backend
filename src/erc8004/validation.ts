@@ -32,7 +32,7 @@ export async function submitValidationRequest(
     throw new Error("ERC-8004 not configured");
   }
 
-  const requestURI = ""; // No IPFS for hackathon — empty string is valid
+  const requestURI = ""; // No IPFS metadata yet — empty string is valid
   const requestHash = ethers.keccak256(
     ethers.toUtf8Bytes(
       JSON.stringify({

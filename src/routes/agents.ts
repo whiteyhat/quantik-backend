@@ -1278,13 +1278,32 @@ router.get("/agent/me", async (req: Request, res: Response) => {
 
 // ── GET /api/v1/agents — List agents ─────────────────────────
 
-router.get("/agents", async (_req: Request, res: Response) => {
-  const AGENT_LIST_COLS = `id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
+// Columns anyone may see. Never add owner-only or secret fields here.
+const PUBLIC_AGENT_COLS = `id, agent_code, status, name, avatar_emoji, animal_type, avatar_image,
            personality, decision_style, trading_instinct, time_patience, profit_dream,
            money_approach, protection_mindset, leverage_vibe, market_sense, asset_love,
            wallet_address, created_at, updated_at, deployed_at, agent_type, endpoint_url, agent_url,
            connection_status, last_heartbeat, description, webhook_events,
            autopilot_enabled, autopilot_updated_at`;
+
+// Stripped even for the owner: key material never leaves the server.
+const SECRET_AGENT_COLUMNS = [
+  "encrypted_private_key",
+  "encrypted_seed_phrase",
+  "encrypted_evm_private_key",
+  "encrypted_stellar_private_key",
+  "encrypted_wallet_bundle",
+  "webhook_secret",
+];
+
+function withoutSecrets(agent: Record<string, unknown>): Record<string, unknown> {
+  const safe = { ...agent };
+  for (const column of SECRET_AGENT_COLUMNS) delete safe[column];
+  return safe;
+}
+
+router.get("/agents", async (_req: Request, res: Response) => {
+  const AGENT_LIST_COLS = PUBLIC_AGENT_COLS;
 
   let agents: Array<Record<string, unknown>>;
   if (isPgEnabled()) {
@@ -1327,12 +1346,25 @@ router.get("/agents/:id", async (req: Request, res: Response) => {
     return;
   }
 
-  res.json(agent);
+  const userId = await getUserIdAsync(req);
+  if (userId && agent.user_id === userId) {
+    res.json(withoutSecrets(agent));
+    return;
+  }
+
+  const publicCols = PUBLIC_AGENT_COLS.split(",").map((col) => col.trim());
+  res.json(Object.fromEntries(publicCols.map((col) => [col, agent[col] ?? null])));
 });
 
 // ── PATCH /api/v1/agents/:id — Update agent config ──────────
 
 router.patch("/agents/:id", async (req: Request, res: Response) => {
+  const userId = await getUserIdAsync(req);
+  if (!userId) {
+    res.status(401).json({ error: "Sign in required", code: "UNAUTHORIZED" });
+    return;
+  }
+
   let existing: Record<string, unknown> | undefined | null;
   if (isPgEnabled()) {
     existing = await pgQueryOne<Record<string, unknown>>("SELECT * FROM agents WHERE id = $1", [req.params.id]);
@@ -1341,7 +1373,8 @@ router.patch("/agents/:id", async (req: Request, res: Response) => {
     existing = db.prepare("SELECT * FROM agents WHERE id = ?").get(req.params.id) as Record<string, unknown> | undefined;
   }
 
-  if (!existing) {
+  // Someone else's agent looks exactly like a missing one
+  if (!existing || existing.user_id !== userId) {
     res.status(404).json({ error: "Agent not found" });
     return;
   }

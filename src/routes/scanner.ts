@@ -1,4 +1,6 @@
 import { Router, Request, Response } from "express";
+import { getUserIdAsync } from "../middleware/auth";
+import { loadLinkedAgentForUser } from "../utils/linkedAgent";
 import { MarketScanner, getScannerStatus } from "../scanner/marketScanner";
 import { getDb } from "../db/schema";
 import { getCircuitBreaker, getPortfolioManager } from "../risk";
@@ -68,17 +70,24 @@ router.get("/results", async (req: Request, res: Response) => {
 
   // When ?executed=true, return data from executions table for the Execution Log
   if (executedOnly) {
+    // Executions are private: only the caller's own agent, never everyone's
+    const userId = await getUserIdAsync(req);
+    const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+    if (!linkedAgent) {
+      res.json([]);
+      return;
+    }
     let execRows: any[];
     if (isPgEnabled()) {
       execRows = await pgQuery(
-        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > $1 ORDER BY executed_at DESC LIMIT $2",
-        [since, limit]
+        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > $1 AND agent_id = $3 ORDER BY executed_at DESC LIMIT $2",
+        [since, limit, linkedAgent.agentId]
       );
     } else {
       const db = getDb();
       execRows = db.prepare(
-        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? ORDER BY executed_at DESC LIMIT ?"
-      ).all(since, limit) as any[];
+        "SELECT id, slug, side, direction, amount, status, executed_at, fill_price, pnl FROM executions WHERE executed_at > ? AND agent_id = ? ORDER BY executed_at DESC LIMIT ?"
+      ).all(since, linkedAgent.agentId, limit) as any[];
     }
     const scannerDirections = await getLatestScannerDirectionMap();
 

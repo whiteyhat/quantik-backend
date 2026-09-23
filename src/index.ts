@@ -51,6 +51,8 @@ import skillRouter from "./routes/skill";
 import toolApiRouter from "./routes/toolApi";
 import erc8004Router from "./routes/erc8004";
 import { apiKeyAuth } from "./middleware/apiKeyAuth";
+import { requireUser, requireAdmin, forWrites } from "./middleware/guards";
+import { isAllowedOrigin } from "./infra/origins";
 import { ensureCircuitBreakerTable } from "./risk";
 import alertsRouter from "./routes/alerts";
 import notificationsRouter from "./routes/notifications";
@@ -67,26 +69,12 @@ import { initSocketIO } from "./infra/socket";
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
 const app = express();
+app.set("trust proxy", 1);
 
 // Middleware
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-  "http://localhost:3002",
-  "http://127.0.0.1:3002",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "https://mission.adflix.now",
-  "https://quantik.fun",
-  "https://www.quantik.fun",
-  process.env.FRONTEND_URL,
-].filter(Boolean) as string[];
-
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true);
-    // Allow any vercel.app subdomain
-    if (origin.endsWith(".vercel.app") || origin.endsWith(".adflix.now") || origin.endsWith(".quantik.fun")) return cb(null, true);
+    if (!origin || isAllowedOrigin(origin)) return cb(null, true);
     cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
@@ -156,36 +144,44 @@ app.get("/.well-known/agent-registration.json", async (_req, res) => {
 });
 
 // Routes
+// Each sub-agent re-runs an LLM on GET /:slug, so only /status stays public.
+const agentRunGuard: express.RequestHandler = (req, res, next) =>
+  req.method === "GET" && req.path === "/status" ? next() : requireUser(req, res, next);
+// Kraken trades and portfolio use the platform account; tickers are public data.
+const krakenGuard: express.RequestHandler = (req, res, next) =>
+  req.method === "GET" && req.path.startsWith("/ticker/") ? next() : requireAdmin(req, res, next);
+
 app.use("/api/health", healthRouter);
 app.use("/api/markets", marketsRouter);
 app.use("/api/wallet", walletRouter);
 app.use("/api/solana/tokens", solanaTokensRouter);
 app.use("/api/solana", solanaWalletRouter);
-app.use("/api/kraken", krakenRouter);
-app.use("/api/pipeline", pipelineRouter);
-app.use("/api/trade", tradeRouter);
+app.use("/api/kraken", krakenGuard, krakenRouter);
+app.use("/api/pipeline", forWrites(requireUser), pipelineRouter);
+app.use("/api/trade", forWrites(requireUser), tradeRouter);
 app.use("/api/stream", streamRouter);
 app.use("/api/v1", riskRouter);
 app.use("/api/v1", settingsRouter);
 app.use("/api/v1", chatRouter);
 app.use("/api/v1", agentStatusRouter);
 app.use("/api/webhooks/sentry", sentryWebhookRouter);
-app.use("/api/orchestrator", orchestratorRouter);
-app.use("/api/aura", auraRouter);
-app.use("/api/oracle", oracleRouter);
-app.use("/api/edge", edgeRouter);
-app.use("/api/sigma", sigmaRouter);
-app.use("/api/clause", clauseRouter);
-app.use("/api/lucifer", luciferRouter);
-app.use("/api/flux", fluxRouter);
-app.use("/api/signals", signalsRouter);
-app.use("/api/risk", riskL3Router);
-app.use("/api/execution", executionRouter);
+app.use("/api/orchestrator", forWrites(requireUser), orchestratorRouter);
+app.use("/api/aura", agentRunGuard, auraRouter);
+app.use("/api/oracle", agentRunGuard, oracleRouter);
+app.use("/api/edge", agentRunGuard, edgeRouter);
+app.use("/api/sigma", agentRunGuard, sigmaRouter);
+app.use("/api/clause", agentRunGuard, clauseRouter);
+app.use("/api/lucifer", agentRunGuard, luciferRouter);
+app.use("/api/flux", agentRunGuard, fluxRouter);
+app.use("/api/signals", forWrites(requireUser), signalsRouter);
+app.use("/api/risk", forWrites(requireAdmin), riskL3Router);
+app.use("/api/execution", forWrites(requireUser), executionRouter);
 app.use("/api/monitoring", monitoringRouter);
-app.use("/api/relay", relayRouter);
+// Legacy relay stays open to BYO agents' API keys (documented in skill.md)
+app.use("/api/relay", forWrites((req, res, next) => (req.apiKeyAgent ? next() : requireUser(req, res, next))), relayRouter);
 app.use("/api/alerts", alertsRouter);
 app.use("/api", notificationsRouter);
-app.use("/api/scanner", scannerRouter);
+app.use("/api/scanner", forWrites(requireUser), scannerRouter);
 app.use("/api/performance", performanceRouter);
 app.use("/api/versions", versionsRouter);
 app.use("/api/agents", agentHealthRouter);
@@ -199,7 +195,7 @@ app.use("/api", skillRouter);
 app.use("/api/erc8004", erc8004Router);
 
 // CLOB balance health endpoint — verify allowances without SSHing in
-app.get("/api/clob/balance", async (_req, res) => {
+app.get("/api/clob/balance", requireAdmin, async (_req, res) => {
   try {
     const { runCliWithWallet } = await import("./cli");
     const { tryLoadActiveAgentContext } = await import("./utils/agentKey");

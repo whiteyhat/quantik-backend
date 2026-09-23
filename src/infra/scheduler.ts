@@ -21,8 +21,8 @@ async function emitPositionUpdates(): Promise<void> {
   try {
     const db = getDb();
     const positions = db.prepare(
-      "SELECT slug, side, direction, status, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
-    ).all() as { slug: string; side: string; direction: string | null; status: string; amount: number; fill_price: number | null }[];
+      "SELECT user_id, slug, side, direction, status, amount, fill_price FROM executions WHERE status IN ('placed', 'paper') AND pnl IS NULL"
+    ).all() as { user_id: string | null; slug: string; side: string; direction: string | null; status: string; amount: number; fill_price: number | null }[];
 
     if (positions.length === 0) return;
 
@@ -51,7 +51,8 @@ async function emitPositionUpdates(): Promise<void> {
         });
       }
 
-      emitPositionUpdate(null, {
+      // Positions are private: only the owner's room hears about them
+      if (pos.user_id) emitPositionUpdate(pos.user_id, {
         slug: pos.slug,
         currentPrice: metrics.currentTokenPrice,
         pnl: metrics.pnl,

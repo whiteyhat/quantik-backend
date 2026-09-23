@@ -3,14 +3,24 @@
  */
 
 import { Router, Request, Response } from "express";
+import { safeEqual } from "../infra/internalAuth";
 import { handleCallback, sendStatusUpdate } from "../alerts/telegramAlert";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQuery, pgQueryOne, pgExec } from "../db/postgres";
+import { requireAdmin } from "../middleware/guards";
 
 const router = Router();
 
 // ── POST /api/alerts/telegram/callback ───────────────────────────────────
 router.post("/telegram/callback", async (req: Request, res: Response) => {
+  // Telegram echoes the secret set via setWebhook(secret_token) in this header.
+  // Fails closed: with no secret configured, nothing is accepted.
+  const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
+  const provided = req.get("X-Telegram-Bot-Api-Secret-Token") ?? "";
+  if (!webhookSecret || !safeEqual(provided, webhookSecret)) {
+    res.status(401).json({ error: "Invalid webhook secret" });
+    return;
+  }
   try {
     const body = req.body as Record<string, unknown>;
     const cbq  = body["callback_query"] as Record<string, unknown> | undefined;
@@ -122,7 +132,7 @@ router.get("/status", async (req: Request, res: Response) => {
 });
 
 // ── POST /api/alerts/mute ─────────────────────────────────────────────────
-router.post("/mute", async (req: Request, res: Response) => {
+router.post("/mute", requireAdmin, async (req: Request, res: Response) => {
   try {
     const { seconds = 3600 } = req.body as { seconds?: number };
     const muteUntil = Date.now() + seconds * 1000;
@@ -145,7 +155,7 @@ router.post("/mute", async (req: Request, res: Response) => {
 });
 
 // ── DELETE /api/alerts/mute ───────────────────────────────────────────────
-router.delete("/mute", async (_req: Request, res: Response) => {
+router.delete("/mute", requireAdmin, async (_req: Request, res: Response) => {
   try {
     if (isPgEnabled()) {
       await pgExec("DELETE FROM settings_kv WHERE key = 'mute_until'");
@@ -161,7 +171,7 @@ router.delete("/mute", async (_req: Request, res: Response) => {
 });
 
 // ── POST /api/alerts/test ─────────────────────────────────────────────────
-router.post("/test", async (_req: Request, res: Response) => {
+router.post("/test", requireAdmin, async (_req: Request, res: Response) => {
   try {
     const ok = await sendStatusUpdate(
       `🧪 <b>Quantik Alert Engine</b> — ping OK\n${new Date().toISOString()}`

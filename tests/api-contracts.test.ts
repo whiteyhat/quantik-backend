@@ -43,31 +43,12 @@ describe("Backend API Contracts", () => {
     }, TIMEOUT);
   });
 
-  describe("Agent field contracts", () => {
-    it("Aura returns sentimentDelta as number", async () => {
-      const { status, body } = await get(`/api/aura/${TEST_SLUG}`);
-      expect(status).toBe(200);
-      expect(typeof body.sentimentDelta).toBe("number");
-    }, TIMEOUT);
-
-    it("Flux returns liquidity_grade and total_liquidity", async () => {
-      const { status, body } = await get(`/api/flux/${TEST_SLUG}`);
-      expect(status).toBe(200);
-      expect(["A","B","C","D"]).toContain(body.liquidity_grade);
-      expect(typeof body.total_liquidity).toBe("number");
-    }, TIMEOUT);
-
-    it("Edge returns fractional_kelly and position_size", async () => {
-      const { status, body } = await get(`/api/edge/${TEST_SLUG}`);
-      expect(status).toBe(200);
-      expect(typeof body.fractional_kelly).toBe("number");
-      expect(typeof body.position_size).toBe("number");
-    }, TIMEOUT);
-
-    it("Clause returns veto boolean and ambiguityScore", async () => {
-      const { status, body } = await get(`/api/clause/${TEST_SLUG}`);
-      expect(status).toBe(200);
-      expect(typeof body.veto).toBe("boolean");
+  // Each sub-agent GET re-runs a paid LLM call, so they require sign-in.
+  // CI checks the lock instead of spending model credits on every push.
+  describe("Agent endpoints require sign-in", () => {
+    it.each(["aura", "flux", "edge", "clause"])("GET /api/%s/:slug without auth → 401", async (agent) => {
+      const { status } = await get(`/api/${agent}/${TEST_SLUG}`);
+      expect(status).toBe(401);
     }, TIMEOUT);
   });
 

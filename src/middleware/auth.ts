@@ -1,4 +1,4 @@
-import { clerkMiddleware, requireAuth, getAuth } from "@clerk/express";
+import { clerkMiddleware, getAuth } from "@clerk/express";
 import { Request, Response, NextFunction } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
@@ -18,11 +18,6 @@ const clerkMiddlewareOptions = process.env.CLERK_JWT_KEY
 // Clerk middleware — verifies JWT and attaches auth to req (no-op when keys missing)
 export const clerkAuth = clerkEnabled
   ? clerkMiddleware(clerkMiddlewareOptions)
-  : (_req: Request, _res: Response, next: NextFunction) => next();
-
-// Require authentication — returns 401 if no valid session
-export const requireClerkAuth = clerkEnabled
-  ? requireAuth()
   : (_req: Request, _res: Response, next: NextFunction) => next();
 
 // In-memory cache: clerk_id -> internal user id (avoids DB lookup per request)
@@ -109,17 +104,20 @@ export function getUserId(req: Request): string | null {
 export async function getUserIdAsync(req: Request): Promise<string | null> {
   const auth = getAuth(req);
   if (!auth?.userId) return null;
+  return internalUserIdForClerkId(auth.userId);
+}
 
-  const cached = userIdCache.get(auth.userId);
+/** Internal user ID for an already-verified Clerk user ID (null if never seen). */
+export async function internalUserIdForClerkId(clerkId: string): Promise<string | null> {
+  const cached = userIdCache.get(clerkId);
   if (cached) return cached;
 
+  let row: { id: string } | null | undefined;
   if (isPgEnabled()) {
-    const row = await pgQueryOne<{ id: string }>(
-      "SELECT id FROM users WHERE clerk_id = $1", [auth.userId]
-    );
-    if (row) userIdCache.set(auth.userId, row.id);
-    return row?.id ?? null;
+    row = await pgQueryOne<{ id: string }>("SELECT id FROM users WHERE clerk_id = $1", [clerkId]);
+  } else {
+    row = getDb().prepare("SELECT id FROM users WHERE clerk_id = ?").get(clerkId) as { id: string } | undefined;
   }
-
-  return getUserId(req);
+  if (row) userIdCache.set(clerkId, row.id);
+  return row?.id ?? null;
 }

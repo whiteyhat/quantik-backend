@@ -39,9 +39,10 @@ router.get("/", async (req: Request, res: Response) => {
       (async () => {
         const userId = await getUserIdAsync(req);
         const linkedAgent = userId ? await loadLinkedAgentForUser(userId) : null;
+        // Only ever the caller's own trades — never everyone's.
         return linkedAgent
           ? dualQuery<ExecutionRecord>("SELECT * FROM executions WHERE agent_id = $1 ORDER BY executed_at DESC LIMIT 500", [linkedAgent.agentId])
-          : dualQuery<ExecutionRecord>("SELECT * FROM executions ORDER BY executed_at DESC LIMIT 500");
+          : [];
       })(),
       getLatestScannerResults(),
     ]);

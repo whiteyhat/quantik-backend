@@ -7,10 +7,11 @@ import {
 } from "../risk";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
+import { requireAdmin, isAdminRequest } from "../middleware/guards";
 
 const router = Router();
 
-router.get("/status", async (_req: Request, res: Response) => {
+router.get("/status", async (req: Request, res: Response) => {
   try {
   const portfolio = getPortfolioManager();
   const correlation = getCorrelationMonitor();
@@ -18,14 +19,19 @@ router.get("/status", async (_req: Request, res: Response) => {
 
   const cbStatus = await cb.checkAndTrip();
 
-  const totalCapital = await portfolio.getTotalCapital();
-  const deployed = await portfolio.getDeployedCapital();
-  const available = await portfolio.getAvailableCapital();
-  const dailyPnl = await portfolio.getDailyPnL();
+  // Capital, P&L and exposure cover the whole platform: operators only.
+  // Everyone else still sees the breaker state and the risk configuration.
+  const operator = isAdminRequest(req);
+  const totalCapital = operator ? await portfolio.getTotalCapital() : 0;
+  const deployed = operator ? await portfolio.getDeployedCapital() : 0;
+  const available = operator ? await portfolio.getAvailableCapital() : 0;
+  const dailyPnl = operator ? await portfolio.getDailyPnL() : 0;
 
   const themeExposure: Record<string, number> = {};
-  for (const [theme, exposure] of correlation.getThemeExposure()) {
-    themeExposure[theme] = exposure;
+  if (operator) {
+    for (const [theme, exposure] of correlation.getThemeExposure()) {
+      themeExposure[theme] = exposure;
+    }
   }
 
   // Fetch risk config from DB (real, not hardcoded)
@@ -75,9 +81,10 @@ router.get("/status", async (_req: Request, res: Response) => {
     dailyPnl,
     dailyPnlPct: totalCapital > 0 ? (dailyPnl / totalCapital) * 100 : 0,
     circuitBreaker: cbStatus.state, // Frontend expects string: "ARMED" | "WARNING" | "TRIGGERED"
-    circuitBreakerDetail: cbStatus,  // Full object for advanced consumers
+    // Full object for advanced consumers; its drawdown maths reveals capital
+    circuitBreakerDetail: operator ? cbStatus : { state: cbStatus.state },
     themeExposure,
-    positionCount: (await portfolio.getOpenPositions()).length,
+    positionCount: operator ? (await portfolio.getOpenPositions()).length : 0,
     // Risk configuration (live from DB)
     maxDrawdownPct: gcb?.drawdown_limit_pct ?? 0.15,
     maxPositionSizePct,
@@ -90,7 +97,7 @@ router.get("/status", async (_req: Request, res: Response) => {
   }
 });
 
-router.get("/positions", async (_req: Request, res: Response) => {
+router.get("/positions", requireAdmin, async (_req: Request, res: Response) => {
   const portfolio = getPortfolioManager();
   const correlation = getCorrelationMonitor();
   const positions = await portfolio.getOpenPositions();

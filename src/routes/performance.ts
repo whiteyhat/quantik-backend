@@ -17,7 +17,6 @@ import type { ExecutionRecord } from "../types/execution";
 import { parseArenaWindow } from "../performance/arena";
 import { loadArenaLeaderboard, loadCachedArenaAgents } from "../performance/arenaService";
 import { loadAgentHistory, loadComparison } from "../performance/arenaSnapshots";
-import { apiRateLimit } from "../infra/rateLimit";
 
 const router = Router();
 const attributionEngine = new AttributionEngine();
@@ -260,7 +259,7 @@ router.get("/trades", async (req, res) => {
   }
 });
 
-router.get("/arena", apiRateLimit, async (req, res) => {
+router.get("/arena", async (req, res) => {
   try {
     const window = parseArenaWindow(req.query.window);
     const userId = req.apiKeyAgent ? null : await getUserIdAsync(req);
@@ -275,7 +274,7 @@ router.get("/arena", apiRateLimit, async (req, res) => {
   }
 });
 
-router.get("/arena/compare", apiRateLimit, async (req, res) => {
+router.get("/arena/compare", async (req, res) => {
   try {
     const window = parseArenaWindow(req.query.window);
     const a1 = typeof req.query.a1 === "string" ? req.query.a1 : "";
@@ -297,7 +296,7 @@ router.get("/arena/compare", apiRateLimit, async (req, res) => {
 });
 
 // Public agent profile — no auth required
-router.get("/arena/agent/:agentCode", apiRateLimit, async (req, res) => {
+router.get("/arena/agent/:agentCode", async (req, res) => {
   try {
     const agentCode = typeof req.params.agentCode === "string" ? req.params.agentCode : "";
     if (!agentCode) {
@@ -373,7 +372,7 @@ router.get("/arena/agent/:agentCode", apiRateLimit, async (req, res) => {
   }
 });
 
-router.get("/arena/:agentId/history", apiRateLimit, async (req, res) => {
+router.get("/arena/:agentId/history", async (req, res) => {
   try {
     const window = parseArenaWindow(req.query.window);
     const limit = Math.max(1, Math.min(720, Number(req.query.limit) || 168));

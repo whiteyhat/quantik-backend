@@ -3,7 +3,6 @@
 import { PaperModeEngine } from "./paperMode";
 import { FillMonitor } from "./fillMonitor";
 import { runCliWithWallet } from "../cli";
-import { loadActiveAgentContext } from "../utils/agentKey";
 import type { PaperOrder } from "./paperMode";
 import type { RiskApproval } from "../risk";
 
@@ -17,6 +16,8 @@ export interface TradeSignal {
   sizeUsdc: number;
   tokenId?: string;
   price?: number;
+  /** Agent placing the order; scopes the per-market throttle. */
+  agentId?: string;
 }
 
 export interface ExecutionResult {
@@ -48,7 +49,9 @@ function checkRateLimit(slug: string): boolean {
 
 export async function execute(
   signal: TradeSignal,
-  riskApproval: RiskApproval
+  riskApproval: RiskApproval,
+  /** Private key of the requesting user's own agent; only read for live orders. */
+  loadWalletKey: () => Promise<string | null>,
 ): Promise<ExecutionResult> {
   if (!riskApproval.approved) {
     return {
@@ -78,7 +81,20 @@ export async function execute(
 
   // ── Live CLOB path ────────────────────────────────────────────
 
-  if (!checkRateLimit(signal.slug)) {
+  // Live orders only ever spend the requesting user's own agent wallet
+  const privateKey = DRY_RUN ? null : await loadWalletKey();
+  if (!DRY_RUN && !privateKey) {
+    console.warn("[ExecutionEngine] No wallet for the requesting agent; live order skipped");
+    return {
+      orderId: null,
+      status: "rejected",
+      filledPrice: null,
+      filledSize: null,
+      execution_mode: "live",
+    };
+  }
+
+  if (!checkRateLimit(`${signal.agentId ?? "unknown"}:${signal.slug}`)) {
     console.warn("[ExecutionEngine] Rate limit hit for market " + signal.slug);
     return {
       orderId: null,
@@ -118,9 +134,7 @@ export async function execute(
     };
   }
 
-  // Decrypt the active agent's private key and inject it into the CLI subprocess env
-  const { privateKey } = await loadActiveAgentContext();
-  const rawData = await runCliWithWallet(cliArgs, privateKey) as Record<string, unknown>;
+  const rawData = await runCliWithWallet(cliArgs, privateKey as string) as Record<string, unknown>;
   const orderId =
     typeof rawData["orderID"] === "string"
       ? rawData["orderID"]

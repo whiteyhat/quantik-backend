@@ -29,9 +29,21 @@ interface AgentRow {
  * Register an agent on the ERC-8004 Identity Registry.
  * Calls `register(agentURI)` on-chain and stores the returned tokenId in the DB.
  */
-export async function registerAgentIdentity(
-  agentId: string
-): Promise<{ txHash: string; tokenId: string; etherscanUrl: string }> {
+type RegistrationResult = { txHash: string; tokenId: string; etherscanUrl: string };
+
+// One registration in flight per agent: the token id is only stored after the
+// transaction is mined, so concurrent calls (deploy + a click) would each mint.
+const registrationsInFlight = new Map<string, Promise<RegistrationResult>>();
+
+export function registerAgentIdentity(agentId: string): Promise<RegistrationResult> {
+  const pending = registrationsInFlight.get(agentId);
+  if (pending) return pending;
+  const run = registerAgentIdentityOnce(agentId).finally(() => registrationsInFlight.delete(agentId));
+  registrationsInFlight.set(agentId, run);
+  return run;
+}
+
+async function registerAgentIdentityOnce(agentId: string): Promise<RegistrationResult> {
   if (!isErc8004Configured()) {
     throw new Error(
       "ERC-8004 not configured — set ERC8004_PRIVATE_KEY and registry addresses"
@@ -52,6 +64,15 @@ export async function registerAgentIdentity(
 
   if (!agent) {
     throw new Error(`Agent not found: ${agentId}`);
+  }
+
+  // Already on-chain: never mint a second identity on the platform signer
+  if (agent.erc8004_token_id) {
+    return {
+      txHash: agent.erc8004_tx_hash ?? "",
+      tokenId: agent.erc8004_token_id,
+      etherscanUrl: agent.erc8004_tx_hash ? `https://sepolia.etherscan.io/tx/${agent.erc8004_tx_hash}` : "",
+    };
   }
 
   // Construct agentURI pointing to our metadata endpoint

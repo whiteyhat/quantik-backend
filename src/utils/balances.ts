@@ -1,5 +1,4 @@
 import { runCliWithWallet } from "../cli";
-import { tryLoadActiveAgentContext } from "./agentKey";
 import {
   AUTOPILOT_MIN_POL_BALANCE,
   AUTOPILOT_MIN_USDC_BALANCE,
@@ -117,9 +116,10 @@ export async function getUsdcBalanceSnapshot(address: string | null | undefined)
 }
 
 export async function getClobBalance(privateKey?: string): Promise<number> {
+  // Only ever the wallet whose key we were given; never a fallback wallet
+  if (!privateKey) return 0;
   try {
-    const key = privateKey ?? (await tryLoadActiveAgentContext())?.privateKey;
-    if (!key) return 0;
+    const key = privateKey;
     const args = ["clob", "balance", "--asset-type", "collateral"];
     const raw = await runCliWithWallet(args, key);
     if (raw && typeof raw === "object") return Number((raw as any).balance ?? 0);
@@ -193,11 +193,7 @@ export async function getWalletFundingSnapshot(
   const [usdc, pol, clobBalance] = await Promise.all([
     getUsdcBalanceSnapshot(address),
     getPolBalanceSnapshot(address),
-    getClobBalance(privateKey ?? undefined).catch(async () => {
-      if (hasExplicitPrivateKey) return 0;
-      const agentCtx = await tryLoadActiveAgentContext();
-      return getClobBalance(agentCtx?.privateKey).catch(() => 0);
-    }),
+    getClobBalance(privateKey ?? undefined).catch(() => 0),
   ]);
 
   if (usdc.status !== "live" || pol.status !== "live") {

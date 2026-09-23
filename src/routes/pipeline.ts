@@ -23,6 +23,11 @@ import { runClause } from "../clause/index";
 import { runLucifer } from "../lucifer/index";
 import { trackAgent, trackAgentSync } from "../monitoring/agentHealth";
 import { execute } from "../execution/index";
+import { getUserIdAsync } from "../middleware/auth";
+import { isAdminRequest } from "../middleware/guards";
+import { internalOnBehalfOf } from "../infra/internalAuth";
+import { loadLinkedAgentForUser } from "../utils/linkedAgent";
+import { loadAgentWalletContextWithDiag } from "../utils/agentKey";
 import { approvePosition } from "../risk";
 import { isKrakenMode, isDualMarketEnabled, isKrakenLiveMode } from "../config/chain";
 import { mapPipelineSignalToKraken, mapPipelineSignalToKrakenThesisAware, executeKrakenTrade, executeMultiLegKrakenTrades, convertUsdcToBaseAmount } from "../kraken/execution";
@@ -492,6 +497,13 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
 
   const resolvedSlug = slug ?? tokenId ?? "";
 
+  // Trades and on-chain records belong to the caller's own agent. Chat tools
+  // run this route internally on behalf of the chatting user.
+  const callerId = internalOnBehalfOf(req) ?? (await getUserIdAsync(req));
+  const linkedAgent = callerId ? await loadLinkedAgentForUser(callerId) : null;
+  // `execute: false` asks for the analysis only (chat and BYO run_analysis)
+  const analysisOnly = body["execute"] === false;
+
   let effectiveSlug = resolvedSlug;
   if (!slug && tokenId) {
     try {
@@ -518,21 +530,8 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
   const runId = uuid();
   const now = Date.now();
 
-  // ── Derive agentId for ERC-8004 hooks (first active agent for user) ────
-  let pipelineAgentId: string | null = null;
-  try {
-    const agentRow = isPgEnabled()
-      ? await pgQueryOne<{ id: string }>(
-          "SELECT id FROM agents WHERE status != 'terminated' LIMIT 1",
-          []
-        )
-      : (getDb()
-          .prepare("SELECT id FROM agents WHERE status != 'terminated' LIMIT 1")
-          .get() as { id: string } | undefined);
-    pipelineAgentId = agentRow?.id ?? null;
-  } catch {
-    // Non-blocking — pipeline continues without ERC-8004
-  }
+  // ── ERC-8004 hooks record against the caller's own agent ────
+  const pipelineAgentId: string | null = linkedAgent?.agentId ?? null;
 
   const newRun: PipelineRun = {
     id: runId,
@@ -891,19 +890,23 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
       const resolvedTokenId = direction === "YES" ? token_id : token_id_no;
 
       try {
-        const riskApproval = await approvePosition(
-          effectiveSlug,
-          sizeUsd,
-          marketInput.category
-        );
-        if (!riskApproval.approved) {
+        // Without a linked agent there is no wallet of the caller's own to trade from
+        const riskApproval = linkedAgent && !analysisOnly
+          ? await approvePosition(effectiveSlug, sizeUsd, marketInput.category)
+          : null;
+        const rejection = analysisOnly
+          ? "Analysis only: no trade placed."
+          : !riskApproval
+            ? "No agent linked to this account. Create one in Agent Factory to trade."
+            : riskApproval.approved ? null : riskApproval.reason;
+        if (rejection || !riskApproval) {
           executionResult = {
             status: "rejected",
-            reason: riskApproval.reason,
+            reason: rejection,
             approved: false,
           };
-          await finishStep(tradeStepId, "rejected", executionResult, String(riskApproval.reason));
-          sendEvent("trade:rejected", { reason: riskApproval.reason, slug: effectiveSlug });
+          await finishStep(tradeStepId, "rejected", executionResult, String(rejection));
+          sendEvent("trade:rejected", { reason: rejection, slug: effectiveSlug });
         } else {
           // ── ERC-8004: Submit validation request before trade ────────
           let erc8004RequestHash: string | null = null;
@@ -940,8 +943,12 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
               sizeUsdc: riskApproval.adjustedSize,
               tokenId: resolvedTokenId,
               price: entryPrice,
+              agentId: linkedAgent?.agentId,
             },
-            riskApproval
+            riskApproval,
+            async () => linkedAgent
+              ? (await loadAgentWalletContextWithDiag(linkedAgent.agentId)).context?.privateKey ?? null
+              : null
           );
           executionResult = result as unknown as Record<string, unknown>;
           await finishStep(tradeStepId, "executed", executionResult, null);
@@ -1008,7 +1015,8 @@ router.post("/run", pipelineRateLimit, async (req: Request, res: Response) => {
               const correlations = correlateQuestionToAsset(effectiveSlug);
               if (correlations.length > 0) {
                 // Determine trading mode and load credentials if live
-                const krakenLive = isKrakenLiveMode();
+                // Live Kraken legs spend the platform account: operators only
+                const krakenLive = isKrakenLiveMode() && isAdminRequest(req);
                 const krakenCreds = krakenLive ? await loadKrakenCredentials() : null;
                 if (krakenLive && !krakenCreds) {
                   console.warn("[Pipeline][Dual-Market] Live mode enabled but no Kraken credentials found — falling back to paper");

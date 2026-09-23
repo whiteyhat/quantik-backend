@@ -16,17 +16,31 @@ import {
 } from "../erc8004";
 import { getDb } from "../db/schema";
 import { isPgEnabled, pgQueryOne, pgQuery } from "../db/postgres";
-import { requireClerkAuth } from "../middleware/auth";
+import { getUserIdAsync } from "../middleware/auth";
+import { requireUser } from "../middleware/guards";
 
 const router = Router();
 
 // ── POST /register — Register agent on ERC-8004 Identity Registry ──────────
 
-router.post("/register", requireClerkAuth, async (req, res) => {
+async function isAgentOwnedBy(agentId: string, userId: string): Promise<boolean> {
+  if (isPgEnabled()) {
+    return !!(await pgQueryOne<{ id: string }>(
+      "SELECT id FROM agents WHERE id = $1 AND user_id = $2", [agentId, userId]
+    ));
+  }
+  return !!getDb().prepare("SELECT id FROM agents WHERE id = ? AND user_id = ?").get(agentId, userId);
+}
+
+router.post("/register", requireUser, async (req, res) => {
   try {
     const { agentId } = req.body;
     if (!agentId || typeof agentId !== "string") {
       return res.status(400).json({ error: "agentId is required" });
+    }
+    const userId = await getUserIdAsync(req);
+    if (!userId || !(await isAgentOwnedBy(agentId, userId))) {
+      return res.status(404).json({ error: "Agent not found" });
     }
     if (!isErc8004Configured()) {
       return res

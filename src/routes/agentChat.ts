@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/schema";
 import { getUserId, getUserIdAsync } from "../middleware/auth";
 import { apiKeyAuth } from "../middleware/apiKeyAuth";
+import { isAdminRequest } from "../middleware/guards";
 import { isPgEnabled, pgQueryOne } from "../db/postgres";
 import { chatRateLimit } from "../infra/rateLimit";
 import { TOOL_DECLARATIONS, executeTool } from "../agents/tools";
@@ -1629,6 +1630,11 @@ router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: 
   if (!resolvedUserId && req.apiKeyAgent) {
     resolvedUserId = req.apiKeyAgent.userId;
   }
+  // Chat runs a paid model with live tools, so guests must sign in first.
+  if (!resolvedUserId) {
+    res.status(401).json({ error: "Sign in required", code: "UNAUTHORIZED" });
+    return;
+  }
 
   // Get user's agent (dual-driver: PG or SQLite)
   let agentRow: Record<string, unknown> | null = null;
@@ -1654,7 +1660,8 @@ router.post("/agent/chat", apiKeyAuth, chatRateLimit, async (req: Request, res: 
     }
   }
 
-  const executionContext = buildToolExecutionContextFromAgentRow(resolvedUserId, agentRow);
+  const baseContext = buildToolExecutionContextFromAgentRow(resolvedUserId, agentRow);
+  const executionContext = baseContext ? { ...baseContext, isOperator: isAdminRequest(req) } : baseContext;
   const systemContent = agentRow
     ? buildAgentContext(agentRow, body.locale)
     : `You are Quantik Relay, a sharp trading assistant. Keep responses under 60 words. Sound human, plainspoken, and specific. No em dashes, no chatbot filler, and no 'let me know'. You have tools available to fetch live data.${localeLanguageDirective(body.locale)}`;

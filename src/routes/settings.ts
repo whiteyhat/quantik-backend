@@ -5,8 +5,12 @@ import { isPgEnabled, pgQuery, pgExec } from "../db/postgres";
 import { encrypt, decrypt, isEncryptionEnabled } from "../infra/encryption";
 import { krakenAuthTest, type KrakenCredentials } from "../kraken/cli";
 import { getKrakenTradingMode, setKrakenTradingMode, type KrakenTradingMode } from "../config/chain";
+import { requireAdmin, isAdminRequest } from "../middleware/guards";
 
 const router = Router();
+
+// These settings are platform-wide, so every change is operator-only.
+// Reads stay open but hide credentials and contact details from non-operators.
 
 // ── GET /api/v1/settings (& /paper-mode alias) ───────────────
 async function getPaperModeHandler(_req: Request, res: Response) {
@@ -17,7 +21,7 @@ router.get("/settings", getPaperModeHandler);
 router.get("/settings/paper-mode", getPaperModeHandler);
 
 // ── POST /api/v1/settings/paper-mode ─────────────────────────
-router.post("/settings/paper-mode", async (req: Request, res: Response) => {
+router.post("/settings/paper-mode", requireAdmin, async (req: Request, res: Response) => {
   const body: any = req.body;
   if (typeof body?.enabled !== "boolean") {
     res.status(400).json({ error: "Body must be { enabled: boolean }" });
@@ -28,7 +32,7 @@ router.post("/settings/paper-mode", async (req: Request, res: Response) => {
 });
 
 // ── GET /api/v1/settings/telegram ────────────────────────────
-router.get("/settings/telegram", async (_req: Request, res: Response) => {
+router.get("/settings/telegram", async (req: Request, res: Response) => {
   try {
     let rows: {key: string; value: string}[];
 
@@ -44,6 +48,12 @@ router.get("/settings/telegram", async (_req: Request, res: Response) => {
     const settings: any = {};
     rows.forEach(r => settings[r.key] = r.value);
 
+    const hasToken = !!(settings.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN);
+    if (!isAdminRequest(req)) {
+      res.json({ chatId: "", botToken: hasToken ? "********" : "", hasToken });
+      return;
+    }
+
     res.json({
       chatId: settings.telegram_chat_id || process.env.TELEGRAM_CHAT_ID || "",
       botToken: settings.telegram_bot_token ? "********" : (process.env.TELEGRAM_BOT_TOKEN ? "********" : ""),
@@ -55,7 +65,7 @@ router.get("/settings/telegram", async (_req: Request, res: Response) => {
 });
 
 // ── POST /api/v1/settings/telegram ───────────────────────────
-router.post("/settings/telegram", async (req: Request, res: Response) => {
+router.post("/settings/telegram", requireAdmin, async (req: Request, res: Response) => {
   try {
     const { chatId, botToken } = req.body as { chatId?: string; botToken?: string };
 
@@ -144,7 +154,7 @@ export async function loadKrakenCredentials(): Promise<KrakenCredentials | null>
 }
 
 // ── GET /api/v1/settings/kraken ─────────────────────────────────
-router.get("/settings/kraken", async (_req: Request, res: Response) => {
+router.get("/settings/kraken", async (req: Request, res: Response) => {
   try {
     const [encKey, storedMode] = await Promise.all([
       getKvValue("kraken_api_key"),
@@ -158,7 +168,7 @@ router.get("/settings/kraken", async (_req: Request, res: Response) => {
 
     const hasCredentials = !!encKey;
     let apiKeyPrefix = "";
-    if (hasCredentials) {
+    if (hasCredentials && isAdminRequest(req)) {
       try {
         const plainKey = isEncryptionEnabled() ? decrypt(encKey!) : encKey!;
         apiKeyPrefix = plainKey.slice(0, 8) + "...";
@@ -179,7 +189,7 @@ router.get("/settings/kraken", async (_req: Request, res: Response) => {
 
 // ── POST /api/v1/settings/kraken ────────────────────────────────
 // Save Kraken API credentials (encrypted at rest)
-router.post("/settings/kraken", async (req: Request, res: Response) => {
+router.post("/settings/kraken", requireAdmin, async (req: Request, res: Response) => {
   try {
     const { apiKey, apiSecret } = req.body as { apiKey?: string; apiSecret?: string };
 
@@ -210,7 +220,7 @@ router.post("/settings/kraken", async (req: Request, res: Response) => {
 
 // ── DELETE /api/v1/settings/kraken ──────────────────────────────
 // Remove stored Kraken credentials
-router.delete("/settings/kraken", async (_req: Request, res: Response) => {
+router.delete("/settings/kraken", requireAdmin, async (_req: Request, res: Response) => {
   try {
     await deleteKvValue("kraken_api_key");
     await deleteKvValue("kraken_api_secret");
@@ -225,7 +235,7 @@ router.delete("/settings/kraken", async (_req: Request, res: Response) => {
 
 // ── POST /api/v1/settings/kraken/test ───────────────────────────
 // Test Kraken credentials against the live API
-router.post("/settings/kraken/test", async (_req: Request, res: Response) => {
+router.post("/settings/kraken/test", requireAdmin, async (_req: Request, res: Response) => {
   try {
     const creds = await loadKrakenCredentials();
     if (!creds) {
@@ -242,7 +252,7 @@ router.post("/settings/kraken/test", async (_req: Request, res: Response) => {
 
 // ── PUT /api/v1/settings/kraken/mode ────────────────────────────
 // Switch between paper and live trading mode
-router.put("/settings/kraken/mode", async (req: Request, res: Response) => {
+router.put("/settings/kraken/mode", requireAdmin, async (req: Request, res: Response) => {
   try {
     const { mode } = req.body as { mode?: string };
     if (mode !== "paper" && mode !== "live") {

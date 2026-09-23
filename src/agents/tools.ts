@@ -24,6 +24,7 @@ import {
 import { loadArenaLeaderboard } from "../performance/arenaService";
 import { parseArenaWindow, type ArenaWindow } from "../performance/arena";
 import { GAMMA_API_BASE, fetchWithRetry } from "../utils/market-fetch";
+import { SELF_BASE_URL, internalHeaders } from "../infra/internalAuth";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -342,13 +343,14 @@ async function executeSearchMarkets(args: { query?: string; category?: string })
   return { markets, count: markets.length };
 }
 
-async function executeRunAnalysis(args: { slug: string }): Promise<unknown> {
-  const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
+async function executeRunAnalysis(args: { slug: string }, context: ToolExecutionContext | null): Promise<unknown> {
   try {
-    const res = await fetch(`${BACKEND_HOST}/api/pipeline/run`, {
+    // Runs the pipeline as the chatting user, so any trade uses their own agent
+    const res = await fetch(`${SELF_BASE_URL}/api/pipeline/run`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: args.slug }),
+      headers: { "Content-Type": "application/json", ...internalHeaders(context?.userId) },
+      // Analysis only: trades go through place_trade and its confirmation/scope
+      body: JSON.stringify({ slug: args.slug, execute: false }),
       signal: AbortSignal.timeout(60000),
     });
 
@@ -655,7 +657,15 @@ async function executeGetRiskConfig(): Promise<unknown> {
   };
 }
 
-async function executeUpdateRiskConfig(args: { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }): Promise<unknown> {
+async function executeUpdateRiskConfig(
+  args: { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number },
+  context: ToolExecutionContext | null,
+): Promise<unknown> {
+  // These limits drive the circuit breaker for every agent on the platform
+  if (!context?.isOperator) {
+    return { error: "Risk limits are platform-wide. Only Quantik operators can change them." };
+  }
+
   // Get active risk config
   let config: { id: string } | undefined;
   if (isPgEnabled()) {
@@ -758,11 +768,10 @@ async function executeUpdateRiskConfig(args: { max_position_size?: number; drawd
 }
 
 async function executeTriggerScanner(): Promise<unknown> {
-  const BACKEND_HOST = `http://localhost:${process.env.PORT || "3001"}`;
   try {
-    const res = await fetch(`${BACKEND_HOST}/api/orchestrator/scan`, {
+    const res = await fetch(`${SELF_BASE_URL}/api/orchestrator/scan`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...internalHeaders() },
       signal: AbortSignal.timeout(30000),
     });
 
@@ -998,7 +1007,7 @@ export async function executeTool(
     case "search_markets":
       return { name, data: await executeSearchMarkets(args as { query?: string; category?: string }) };
     case "run_analysis":
-      return { name, data: await executeRunAnalysis(args as { slug: string }) };
+      return { name, data: await executeRunAnalysis(args as { slug: string }, context) };
     case "place_trade":
       return { name, data: executePlaceTrade(args as { slug: string; direction: string; size: number }) };
     case "get_scanner_signals":
@@ -1016,7 +1025,7 @@ export async function executeTool(
     case "get_risk_config":
       return { name, data: await executeGetRiskConfig() };
     case "update_risk_config":
-      return { name, data: await executeUpdateRiskConfig(args as { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }) };
+      return { name, data: await executeUpdateRiskConfig(args as { max_position_size?: number; drawdown_limit?: number; kelly_multiplier?: number }, context) };
     case "trigger_scanner":
       return { name, data: await executeTriggerScanner() };
     case "get_pipeline_output":

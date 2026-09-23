@@ -6,6 +6,22 @@ import { fetchMarketBySlug, withTimeout } from "../utils/market-fetch";
 
 const router = Router();
 
+// GET /api/oracle/status
+router.get("/status", (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    const count = db.prepare("SELECT COUNT(*) as count FROM oracle_results").get() as { count: number };
+    res.json({
+      status: "running",
+      results_count: count.count,
+      mock_mode: process.env.ORACLE_MOCK === "true",
+      timestamp: Date.now()
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/oracle/:slug — re-runs Oracle for a market
 router.get("/:slug", async (req: Request, res: Response) => {
   const slug = req.params.slug as string;
@@ -58,22 +74,6 @@ router.get("/arb/:slug", async (req: Request, res: Response) => {
     const slug = req.params.slug as string;
     const result = await detectCombinatorial(slug);
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/oracle/status
-router.get("/status", (req: Request, res: Response) => {
-  try {
-    const db = getDb();
-    const count = db.prepare("SELECT COUNT(*) as count FROM oracle_results").get() as { count: number };
-    res.json({
-      status: "running",
-      results_count: count.count,
-      mock_mode: process.env.ORACLE_MOCK === "true",
-      timestamp: Date.now()
-    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
