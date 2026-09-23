@@ -46,6 +46,7 @@ async function startServer() {
   const { default: settingsRouter } = require("../src/routes/settings") as typeof import("../src/routes/settings");
   const { default: oracleRouter } = require("../src/routes/oracle") as typeof import("../src/routes/oracle");
   const { default: scannerRouter } = require("../src/routes/scanner") as typeof import("../src/routes/scanner");
+  const { default: meAccessRouter } = require("../src/routes/meAccess") as typeof import("../src/routes/meAccess");
   const guards = require("../src/middleware/guards") as typeof import("../src/middleware/guards");
   const { getDb } = require("../src/db/schema") as typeof import("../src/db/schema");
 
@@ -55,6 +56,7 @@ async function startServer() {
   app.use("/api/v1", settingsRouter);
   app.use("/api/oracle", oracleRouter);
   app.use("/api/scanner", scannerRouter);
+  app.use("/api/v1", meAccessRouter);
   app.use("/guarded", guards.forWrites(guards.requireUser), (_req, res) => res.json({ ok: true }));
   app.use("/admin", guards.requireAdmin, (_req, res) => res.json({ ok: true }));
   const internal = require("../src/infra/internalAuth") as typeof import("../src/infra/internalAuth");
@@ -250,5 +252,24 @@ describe("internal secret comparison", () => {
     const req = { get: () => header } as unknown as import("express").Request;
     expect(() => isInternalRequest(req)).not.toThrow();
     expect(isInternalRequest(req)).toBe(false);
+  });
+});
+
+describe("GET /api/v1/me/access", () => {
+  it("tells guests nothing about operators", async () => {
+    const body = await json(await fetch(`${baseUrl}/api/v1/me/access`));
+    expect(body).toEqual({ signedIn: false, hasAgent: false, isOperator: false });
+  });
+
+  it("reports the owner's agent", async () => {
+    signIn(OWNER_ID);
+    const body = await json(await fetch(`${baseUrl}/api/v1/me/access`));
+    expect(body).toEqual({ signedIn: true, hasAgent: true, isOperator: false });
+  });
+
+  it("recognises the operator", async () => {
+    signIn("user-admin", "clerk_admin");
+    const body = await json(await fetch(`${baseUrl}/api/v1/me/access`));
+    expect(body).toEqual({ signedIn: true, hasAgent: false, isOperator: true });
   });
 });
